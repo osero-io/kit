@@ -218,6 +218,18 @@ console.log(getToken(8453, 'USDC').address);
 
 Runnable examples live in `examples/src`.
 
+## Releases
+
+This repo uses Changesets for independent package versioning.
+
+```bash
+pnpm changeset
+```
+
+When a change affects a publishable package in `packages/*`, add a changeset in the same
+PR. After merge to `main`, the release workflow opens or updates a version PR. Merging
+that PR publishes the changed public packages to npm.
+
 ```bash
 cp examples/.env.example examples/.env
 # Edit examples/.env and replace PRIVATE_KEY before running broadcast examples.

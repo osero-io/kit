@@ -33,11 +33,6 @@
     }
   ],
   "analytics": false,
-  "release": {
-    "version": {
-      "preVersionCommand": "pnpm dlx nx run-many -t build"
-    }
-  },
   "targetDefaults": {
     "test": {
       "dependsOn": ["^build"]
