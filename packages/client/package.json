@@ -1,0 +1,114 @@
+{
+  "name": "@osero/client",
+  "version": "0.0.1",
+  "description": "The official TypeScript SDK for minting USDS and sUSDS across supported chains",
+  "keywords": [
+    "defi",
+    "ethers",
+    "osero",
+    "osero-sdk",
+    "psm",
+    "sky",
+    "spark",
+    "stablecoin",
+    "susds",
+    "usds",
+    "viem"
+  ],
+  "homepage": "https://github.com/stablewatch/osero-sdk/tree/main/packages/client#readme",
+  "bugs": {
+    "url": "https://github.com/stablewatch/osero-sdk/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stablewatch/osero-sdk.git",
+    "directory": "packages/client"
+  },
+  "files": [
+    "dist",
+    "src",
+    "!**/*.tsbuildinfo",
+    "!**/*.test.ts",
+    "!**/*.spec.ts",
+    "!src/**/_testing.ts"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "osero-sdk": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./actions": {
+      "osero-sdk": "./src/lib/actions/index.ts",
+      "types": "./dist/lib/actions/index.d.ts",
+      "import": "./dist/lib/actions/index.js",
+      "default": "./dist/lib/actions/index.js"
+    },
+    "./viem": {
+      "osero-sdk": "./src/viem.ts",
+      "types": "./dist/viem.d.ts",
+      "import": "./dist/viem.js",
+      "default": "./dist/viem.js"
+    },
+    "./ethers": {
+      "osero-sdk": "./src/ethers.ts",
+      "types": "./dist/ethers.d.ts",
+      "import": "./dist/ethers.js",
+      "default": "./dist/ethers.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "lint": "oxlint src",
+    "lint:fix": "oxlint --fix src",
+    "format": "oxfmt src",
+    "format:check": "oxfmt --check src"
+  },
+  "dependencies": {
+    "neverthrow": "^8.2.0",
+    "tslib": "^2.3.0"
+  },
+  "peerDependencies": {
+    "ethers": "^6.14.0",
+    "viem": "^2.21.0"
+  },
+  "peerDependenciesMeta": {
+    "ethers": {
+      "optional": true
+    }
+  },
+  "nx": {
+    "includedScripts": [
+      "lint",
+      "lint:fix",
+      "format",
+      "format:check"
+    ],
+    "targets": {
+      "lint": {
+        "cache": true,
+        "inputs": [
+          "{workspaceRoot}/.oxlintrc.json",
+          "{projectRoot}/src/**/*.{ts,tsx}"
+        ]
+      },
+      "format:check": {
+        "cache": true,
+        "inputs": [
+          "{workspaceRoot}/.oxfmtrc.json",
+          "{projectRoot}/src/**/*.{ts,tsx,json,md}"
+        ]
+      }
+    }
+  }
+}

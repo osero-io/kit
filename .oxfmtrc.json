@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": true,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "arrowParens": "always",
+  "bracketSpacing": true,
+  "endOfLine": "lf",
+  "sortImports": true,
+  "sortPackageJson": true,
+  "insertFinalNewline": true,
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/out-tsc/**",
+    "**/coverage/**",
+    "**/node_modules/**",
+    ".nx/**",
+    "tmp/**",
+    "pnpm-lock.yaml",
+    "**/*.tsbuildinfo"
+  ]
+}

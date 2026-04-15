@@ -1,0 +1,54 @@
+{
+  "name": "@osero/examples",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runnable usage examples for @osero/client — mint and redeem USDS / sUSDS across viem and ethers.",
+  "type": "module",
+  "scripts": {
+    "dry-run:inspect-plan": "tsx src/dry-run/inspect-plan.ts",
+    "viem:mint-usds": "tsx src/viem/mint-usds.ts",
+    "viem:mint-susds-mainnet": "tsx src/viem/mint-susds-mainnet.ts",
+    "viem:redeem-susds": "tsx src/viem/redeem-susds.ts",
+    "viem:roundtrip": "tsx src/viem/roundtrip-usdc-susds.ts",
+    "ethers:mint-usds": "tsx src/ethers/mint-usds.ts",
+    "ethers:roundtrip": "tsx src/ethers/roundtrip-usdc-susds.ts",
+    "lint": "oxlint src",
+    "lint:fix": "oxlint --fix src",
+    "format": "oxfmt src",
+    "format:check": "oxfmt --check src"
+  },
+  "dependencies": {
+    "@osero/client": "workspace:*",
+    "ethers": "^6.14.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "~5.9.2"
+  },
+  "nx": {
+    "includedScripts": [
+      "lint",
+      "lint:fix",
+      "format",
+      "format:check"
+    ],
+    "targets": {
+      "lint": {
+        "cache": true,
+        "inputs": [
+          "{workspaceRoot}/.oxlintrc.json",
+          "{projectRoot}/src/**/*.{ts,tsx}"
+        ]
+      },
+      "format:check": {
+        "cache": true,
+        "inputs": [
+          "{workspaceRoot}/.oxfmtrc.json",
+          "{projectRoot}/src/**/*.{ts,tsx,json,md}"
+        ]
+      }
+    }
+  }
+}
