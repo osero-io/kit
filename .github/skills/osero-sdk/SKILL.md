@@ -74,12 +74,12 @@ Use `SUPPORTED_CHAIN_IDS` or `getChain(chainId)` instead of hard-coding chain me
 
 Import actions from `@osero/client/actions`.
 
-| Action | Direction | Input token decimals | Common plan shape |
-| --- | --- | ---: | --- |
-| `mintUsds` | USDC -> USDS | 6 | approval + swap |
-| `mintSUsds` | USDC -> sUSDS | 6 | L2: approval + swap, Mainnet: multi-step |
-| `redeemUsds` | USDS -> USDC | 18 | approval + swap |
-| `redeemSUsds` | sUSDS -> USDC | 18 | L2: approval + swap, Mainnet: multi-step |
+| Action        | Direction     | Input token decimals | Common plan shape                        |
+| ------------- | ------------- | -------------------: | ---------------------------------------- |
+| `mintUsds`    | USDC -> USDS  |                    6 | approval + swap                          |
+| `mintSUsds`   | USDC -> sUSDS |                    6 | L2: approval + swap, Mainnet: multi-step |
+| `redeemUsds`  | USDS -> USDC  |                   18 | approval + swap                          |
+| `redeemSUsds` | sUSDS -> USDC |                   18 | L2: approval + swap, Mainnet: multi-step |
 
 All actions accept this request shape:
 

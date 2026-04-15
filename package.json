@@ -56,6 +56,8 @@
         "cache": true,
         "inputs": [
           "{workspaceRoot}/.oxlintrc.json",
+          "{workspaceRoot}/*.{js,mjs,cjs,ts,tsx}",
+          "{workspaceRoot}/.github/**/*.{js,mjs,cjs,ts,tsx}",
           "{workspaceRoot}/packages/**/*.{ts,tsx,js,mjs,cjs}",
           "{workspaceRoot}/examples/**/*.{ts,tsx,js,mjs,cjs}"
         ]
@@ -64,6 +66,8 @@
         "cache": true,
         "inputs": [
           "{workspaceRoot}/.oxfmtrc.json",
+          "{workspaceRoot}/*.{json,md,yml,yaml}",
+          "{workspaceRoot}/.github/**/*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}",
           "{workspaceRoot}/packages/**/*.{ts,tsx,js,mjs,cjs,json,md}",
           "{workspaceRoot}/examples/**/*.{ts,tsx,js,mjs,cjs,json,md}"
         ]
