@@ -9,6 +9,7 @@ import { UnexpectedError, UnsupportedChainError, ValidationError } from '../erro
 import { applySlippage, usdsFromUsdcViaSellGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
+import { resolveReferralCode } from '../referrals.js';
 import { errAsync, okAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired } from '../types.js';
@@ -57,7 +58,7 @@ export type MintUsdsRequest = {
    * Opaque referral code emitted in the PSM3 `Swap` event for
    * off-chain attribution. Ignored on Ethereum mainnet.
    *
-   * @defaultValue 0n
+   * @defaultValue {@link ClientConfig.defaultReferralCode} ({@link DEFAULT_REFERRAL_CODE} = 3000n by default). Pass `undefined` to opt out for this call.
    */
   readonly referralCode?: bigint;
 };
@@ -206,7 +207,7 @@ function buildL2Plan(
   const usds = getToken(chain.chainId, 'USDS');
   const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
-  const referralCode = request.referralCode ?? 0n;
+  const referralCode = resolveReferralCode(request, client.config) ?? 0n;
 
   return quoteL2MintUsds(client, chain, request.amount).map((quote): Erc20ApprovalRequired => {
     const minAmountOut = applySlippage(quote, slippageBps);

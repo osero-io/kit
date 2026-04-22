@@ -1,6 +1,7 @@
 import type { Transport } from 'viem';
 
 import type { OseroChainId } from './chains.js';
+import { DEFAULT_REFERRAL_CODE } from './referrals.js';
 
 /**
  * Configuration options accepted by {@link OseroClient.create}.
@@ -45,6 +46,21 @@ export type ClientConfig = {
    * @defaultValue 1
    */
   readonly confirmations?: number;
+
+  /**
+   * Default referral code attached to every action unless the request
+   * overrides it. Forwarded to PSM3 `Swap` events on L2s and to the
+   * sUSDS `deposit` referral overload on mainnet.
+   *
+   * - Omit to use the SDK's built-in default ({@link DEFAULT_REFERRAL_CODE} = 3000n).
+   * - Set to a bigint to use your own code across every call.
+   * - Set to `undefined` to opt out at the client level: requests that
+   *   do not specify their own `referralCode` will carry no referral.
+   *
+   * Per-request `referralCode` always wins; pass `undefined` there to
+   * opt out for a single call.
+   */
+  readonly defaultReferralCode?: bigint;
 };
 
 /**
@@ -57,15 +73,20 @@ export type ResolvedClientConfig = {
   readonly transports: Partial<Record<OseroChainId, Transport>>;
   readonly defaultSlippageBps: number;
   readonly confirmations: number;
+  readonly defaultReferralCode: bigint | undefined;
 };
 
 /**
  * @internal
  */
 export function resolveConfig(config: ClientConfig): ResolvedClientConfig {
+  const defaultReferralCode =
+    'defaultReferralCode' in config ? config.defaultReferralCode : DEFAULT_REFERRAL_CODE;
+
   return {
     transports: config.transports ?? {},
     defaultSlippageBps: config.defaultSlippageBps ?? 5,
     confirmations: config.confirmations ?? 1,
+    defaultReferralCode,
   };
 }

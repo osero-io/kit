@@ -149,6 +149,74 @@ describe('redeemUsds', () => {
       expect(args[1]).toBe(getToken(42161, 'USDC').address);
       expect(args[2]).toBe(amount);
       expect(args[3]).toBe((quote * 9995n) / 10_000n);
+      expect(args[5]).toBe(3000n); // SDK default referral
+    });
+
+    it('opts out when the request passes referralCode: undefined', async () => {
+      const client = OseroClient.create();
+      const quote = 999_500_000n;
+      installMockPublicClient(client, 42161, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemUsds(client, {
+        chainId: 42161,
+        amount: parseUnits('1000', 18),
+        sender: SENDER,
+        referralCode: undefined,
+      });
+      if (!result.isOk()) throw result.error;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(0n);
+    });
+
+    it('uses the client-level defaultReferralCode when the request omits one', async () => {
+      const client = OseroClient.create({ defaultReferralCode: 99n });
+      const quote = 999_500_000n;
+      installMockPublicClient(client, 42161, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemUsds(client, {
+        chainId: 42161,
+        amount: parseUnits('1000', 18),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(99n);
+    });
+
+    it('opts out when the client-level defaultReferralCode is explicitly undefined', async () => {
+      const client = OseroClient.create({ defaultReferralCode: undefined });
+      const quote = 999_500_000n;
+      installMockPublicClient(client, 42161, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemUsds(client, {
+        chainId: 42161,
+        amount: parseUnits('1000', 18),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(0n);
     });
   });
 });

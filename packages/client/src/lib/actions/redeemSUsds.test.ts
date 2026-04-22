@@ -163,7 +163,81 @@ describe('redeemSUsds', () => {
       const args = main.args as readonly unknown[];
       expect(args[0]).toBe(getToken(8453, 'sUSDS').address);
       expect(args[1]).toBe(getToken(8453, 'USDC').address);
+      expect(args[5]).toBe(3000n); // SDK default referral
       expect(result.value.originalTransaction.operation).toBe('REDEEM_SUSDS_FOR_USDC');
+    });
+
+    it('opts out when the request passes referralCode: undefined', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 5 });
+      const quote = 999_500_000n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('1000', 18),
+        sender: SENDER,
+        referralCode: undefined,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'Erc20ApprovalRequired') return;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(0n);
+    });
+
+    it('uses the client-level defaultReferralCode when the request omits one', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 5, defaultReferralCode: 99n });
+      const quote = 999_500_000n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('1000', 18),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'Erc20ApprovalRequired') return;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(99n);
+    });
+
+    it('opts out when the client-level defaultReferralCode is explicitly undefined', async () => {
+      const client = OseroClient.create({
+        defaultSlippageBps: 5,
+        defaultReferralCode: undefined,
+      });
+      const quote = 999_500_000n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('1000', 18),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'Erc20ApprovalRequired') return;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(0n);
     });
   });
 });

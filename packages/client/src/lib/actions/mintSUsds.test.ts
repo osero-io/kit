@@ -171,7 +171,8 @@ describe('mintSUsds', () => {
       expect(deposit.functionName).toBe('deposit');
       expect(deposit.args?.[0]).toBe(usdsOut);
       expect(deposit.args?.[1]).toBe(SENDER); // default receiver
-      expect(deposit.args).toHaveLength(2);
+      expect(deposit.args).toHaveLength(3);
+      expect(deposit.args?.[2]).toBe(3000); // SDK default referral
       expect(phase2.originalTransaction.operation).toBe('DEPOSIT_USDS_FOR_SUSDS');
     });
 
@@ -208,7 +209,8 @@ describe('mintSUsds', () => {
       }).args as readonly unknown[];
       // deposit routes sUSDS to the final receiver
       expect(depositArgs[1]).toBe(RECEIVER);
-      expect(depositArgs).toHaveLength(2);
+      expect(depositArgs).toHaveLength(3);
+      expect(depositArgs[2]).toBe(3000); // SDK default referral
     });
 
     it('uses the mainnet deposit referral overload when a referral code is provided', async () => {
@@ -238,6 +240,80 @@ describe('mintSUsds', () => {
       expect(depositArgs).toHaveLength(3);
       expect(depositArgs[1]).toBe(RECEIVER);
       expect(depositArgs[2]).toBe(42);
+    });
+
+    it('opts out of the deposit referral overload when the request passes referralCode: undefined', async () => {
+      const client = OseroClient.create();
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 1,
+        amount: parseUnits('1000', 6),
+        sender: SENDER,
+        referralCode: undefined,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+
+      const phase2 = result.value.steps[1]!;
+      if (phase2.__typename !== 'Erc20ApprovalRequired') return;
+      const depositArgs = decodeFunctionData({
+        abi: erc4626Abi,
+        data: phase2.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(depositArgs).toHaveLength(2);
+    });
+
+    it('uses the client-level defaultReferralCode on the mainnet deposit when the request omits one', async () => {
+      const client = OseroClient.create({ defaultReferralCode: 7n });
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 1,
+        amount: parseUnits('1000', 6),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+
+      const phase2 = result.value.steps[1]!;
+      if (phase2.__typename !== 'Erc20ApprovalRequired') return;
+      const depositArgs = decodeFunctionData({
+        abi: erc4626Abi,
+        data: phase2.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(depositArgs).toHaveLength(3);
+      expect(depositArgs[2]).toBe(7);
+    });
+
+    it('opts out at the client level when defaultReferralCode is explicitly undefined', async () => {
+      const client = OseroClient.create({ defaultReferralCode: undefined });
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 1,
+        amount: parseUnits('1000', 6),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+
+      const phase2 = result.value.steps[1]!;
+      if (phase2.__typename !== 'Erc20ApprovalRequired') return;
+      const depositArgs = decodeFunctionData({
+        abi: erc4626Abi,
+        data: phase2.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(depositArgs).toHaveLength(2);
     });
 
     it('accounts for a non-zero tin when computing usdsOut', async () => {
@@ -297,8 +373,81 @@ describe('mintSUsds', () => {
       expect(args[2]).toBe(amount);
       expect(args[3]).toBe((quote * 9995n) / 10_000n);
       expect(args[4]).toBe(SENDER);
-      expect(args[5]).toBe(0n);
+      expect(args[5]).toBe(3000n); // SDK default referral
       expect(plan.originalTransaction.operation).toBe('MINT_SUSDS');
+    });
+
+    it('opts out when the request passes referralCode: undefined', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 5 });
+      const quote = 999_500_000_000_000_000_000n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('1000', 6),
+        sender: SENDER,
+        referralCode: undefined,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'Erc20ApprovalRequired') return;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(0n);
+    });
+
+    it('uses the client-level defaultReferralCode when the request omits one', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 5, defaultReferralCode: 99n });
+      const quote = 999_500_000_000_000_000_000n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('1000', 6),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'Erc20ApprovalRequired') return;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(99n);
+    });
+
+    it('opts out when the client-level defaultReferralCode is explicitly undefined', async () => {
+      const client = OseroClient.create({
+        defaultSlippageBps: 5,
+        defaultReferralCode: undefined,
+      });
+      const quote = 999_500_000_000_000_000_000n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('1000', 6),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'Erc20ApprovalRequired') return;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(0n);
     });
 
     it('forwards a custom referral code to the L2 PSM3 swap', async () => {

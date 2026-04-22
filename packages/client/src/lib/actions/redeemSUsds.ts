@@ -10,6 +10,7 @@ import { UnexpectedError, UnsupportedChainError, ValidationError } from '../erro
 import { applySlippage, usdcFromUsdsViaBuyGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
+import { resolveReferralCode } from '../referrals.js';
 import { errAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
@@ -54,7 +55,7 @@ export type RedeemSUsdsRequest = {
   /**
    * Opaque referral code for L2 PSM3 calls. Ignored on mainnet.
    *
-   * @defaultValue 0n
+   * @defaultValue {@link ClientConfig.defaultReferralCode} ({@link DEFAULT_REFERRAL_CODE} = 3000n by default). Pass `undefined` to opt out for this call.
    */
   readonly referralCode?: bigint;
 };
@@ -232,7 +233,7 @@ function buildL2Plan(
   const susds = getToken(chain.chainId, 'sUSDS');
   const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
-  const referralCode = request.referralCode ?? 0n;
+  const referralCode = resolveReferralCode(request, client.config) ?? 0n;
 
   return quoteL2RedeemSUsds(client, chain, request.amount).map((quote): Erc20ApprovalRequired => {
     const minAmountOut = applySlippage(quote, slippageBps);

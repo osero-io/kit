@@ -10,6 +10,7 @@ import { UnexpectedError, UnsupportedChainError, ValidationError } from '../erro
 import { applySlippage, usdsFromUsdcViaSellGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
+import { resolveReferralCode } from '../referrals.js';
 import { errAsync, okAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
@@ -65,7 +66,7 @@ export type MintSUsdsRequest = {
    * On L2s it is forwarded to the PSM3 `Swap` event. On Ethereum
    * mainnet it is forwarded to the sUSDS `deposit` referral overload.
    *
-   * @defaultValue 0n
+   * @defaultValue {@link ClientConfig.defaultReferralCode} ({@link DEFAULT_REFERRAL_CODE} = 3000n by default). Pass `undefined` to opt out for this call.
    */
   readonly referralCode?: bigint;
 };
@@ -171,24 +172,25 @@ export function mintSUsds(
   }
 
   const receiver = request.receiver ?? request.sender;
+  const resolvedReferralCode = resolveReferralCode(request, client.config);
 
-  if (request.referralCode !== undefined && request.referralCode < 0n) {
+  if (resolvedReferralCode !== undefined && resolvedReferralCode < 0n) {
     return errAsync(
       ValidationError.forField('referralCode', 'referralCode must be greater than or equal to 0'),
     );
   }
 
-  if (chain.isMainnet && request.referralCode !== undefined && request.referralCode > 65_535n) {
+  if (chain.isMainnet && resolvedReferralCode !== undefined && resolvedReferralCode > 65_535n) {
     return errAsync(
       ValidationError.forField('referralCode', 'referralCode is out of range for Ethereum mainnet'),
     );
   }
 
   if (chain.isMainnet) {
-    return buildMainnetPlan(client, chain, request, receiver);
+    return buildMainnetPlan(client, chain, request, receiver, resolvedReferralCode);
   }
 
-  return buildL2Plan(client, chain, request, receiver, request.referralCode ?? 0n);
+  return buildL2Plan(client, chain, request, receiver, resolvedReferralCode ?? 0n);
 }
 
 function buildMainnetPlan(
@@ -196,6 +198,7 @@ function buildMainnetPlan(
   chain: ChainMetadata,
   request: MintSUsdsRequest,
   receiver: Address,
+  resolvedReferralCode: bigint | undefined,
 ): ResultAsync<MultiStepExecution, UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
   const usds = getToken(chain.chainId, 'USDS');
@@ -213,7 +216,7 @@ function buildMainnetPlan(
   }
 
   const referralCode =
-    request.referralCode === undefined ? undefined : Number(request.referralCode);
+    resolvedReferralCode === undefined ? undefined : Number(resolvedReferralCode);
 
   return quoteMainnetUsdsBridgeAmount(client, chain, request.amount, litePsmAddress).map(
     (usdsOut): MultiStepExecution => {
