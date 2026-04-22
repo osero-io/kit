@@ -76,12 +76,23 @@ describe('validateReferralCode', () => {
     expect(validateReferralCode(10n ** 70n)).toBeUndefined();
   });
 
+  it('accepts the maximum uint256 value', () => {
+    const maxUint256 = (1n << 256n) - 1n;
+    expect(validateReferralCode(maxUint256)).toBeUndefined();
+  });
+
   it('accepts undefined (opt-out)', () => {
     expect(validateReferralCode(undefined)).toBeUndefined();
   });
 
   it('rejects a negative value with a typed ValidationError', () => {
     const result = validateReferralCode(-1n);
+    expect(result).toBeInstanceOf(ValidationError);
+    expect(result?.context).toEqual({ field: 'referralCode' });
+  });
+
+  it('rejects a value that overflows uint256 with a typed ValidationError', () => {
+    const result = validateReferralCode(1n << 256n);
     expect(result).toBeInstanceOf(ValidationError);
     expect(result?.context).toEqual({ field: 'referralCode' });
   });

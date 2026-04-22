@@ -67,6 +67,33 @@ describe('redeemSUsds', () => {
     }
   });
 
+  it('rejects a request referral code that overflows uint256 without throwing from the ABI encoder', async () => {
+    const client = OseroClient.create();
+    const result = await redeemSUsds(client, {
+      chainId: 8453,
+      amount: 1n,
+      sender: SENDER,
+      referralCode: 1n << 256n,
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+  });
+
+  it('rejects a client-level defaultReferralCode that overflows uint256 without throwing from the ABI encoder', async () => {
+    const client = OseroClient.create({ defaultReferralCode: 1n << 256n });
+    const result = await redeemSUsds(client, {
+      chainId: 8453,
+      amount: 1n,
+      sender: SENDER,
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+  });
+
   describe('previewRedeemSUsds', () => {
     it('previews the mainnet USDC output via previewRedeem and lite PSM tout', async () => {
       const client = OseroClient.create();

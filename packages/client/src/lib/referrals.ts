@@ -9,6 +9,13 @@ import { ValidationError } from './errors.js';
  */
 export const DEFAULT_REFERRAL_CODE = 3000n;
 
+/**
+ * Maximum value representable by the `uint256` referral slot used
+ * by PSM3's swap entrypoints. Anything above this would overflow
+ * viem's ABI encoder.
+ */
+const MAX_UINT256 = (1n << 256n) - 1n;
+
 type HasReferralCode = { readonly referralCode?: bigint };
 
 /**
@@ -31,17 +38,25 @@ export function resolveReferralCode(
 
 /**
  * Validates that a resolved referral code is within the psm3Abi
- * `uint256` range. Returns a typed {@link ValidationError} instead
- * of throwing so actions can short-circuit via `errAsync` without
- * ever letting viem's ABI encoder raise synchronously.
+ * `uint256` range (`[0, 2**256 - 1]`). Returns a typed
+ * {@link ValidationError} instead of throwing so actions can
+ * short-circuit via `errAsync` without ever letting viem's ABI
+ * encoder raise synchronously.
  */
 export function validateReferralCode(
   code: bigint | undefined,
 ): ValidationError<{ field: string }> | undefined {
-  if (code !== undefined && code < 0n) {
+  if (code === undefined) return undefined;
+  if (code < 0n) {
     return ValidationError.forField(
       'referralCode',
       'referralCode must be greater than or equal to 0',
+    );
+  }
+  if (code > MAX_UINT256) {
+    return ValidationError.forField(
+      'referralCode',
+      'referralCode must fit in a uint256 (<= 2**256 - 1)',
     );
   }
   return undefined;
