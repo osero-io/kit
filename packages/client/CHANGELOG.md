@@ -1,5 +1,11 @@
 # @osero/client
 
+## 0.4.1
+
+### Patch Changes
+
+- 4d83de1: Update repository URLs in package.json after repo rename from `osero-kit` to `kit`
+
 ## 0.4.0
 
 ### Minor Changes
