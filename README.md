@@ -208,6 +208,35 @@ type ActionRequest = {
 };
 ```
 
+### Referral codes
+
+Every action carries an off-chain referral code so that PSM3 `Swap`
+events on L2s and the sUSDS `deposit` referral overload on mainnet
+can attribute flows back to an integrator.
+
+- The SDK defaults to `DEFAULT_REFERRAL_CODE` (`3000n`) when neither
+  the request nor the client specifies a code.
+- Pass `referralCode: undefined` on a specific request to opt out for
+  that call.
+- Set `defaultReferralCode` on `OseroClient.create({ ... })` to replace
+  the SDK default with your own once and forget about it. Pass
+  `defaultReferralCode: undefined` there to opt out at the client
+  level.
+
+```ts
+import { DEFAULT_REFERRAL_CODE, OseroClient } from '@osero/client';
+
+// Use your own code across every action by default.
+const client = OseroClient.create({
+  defaultReferralCode: 12345n,
+});
+
+// Opt out of attribution at the client level.
+const anonymousClient = OseroClient.create({
+  defaultReferralCode: undefined,
+});
+```
+
 ## Balance Helpers
 
 Import balance helpers from the root package when you want raw token

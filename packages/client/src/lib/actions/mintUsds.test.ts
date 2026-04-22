@@ -42,6 +42,60 @@ describe('mintUsds', () => {
     }
   });
 
+  it('rejects a negative referral code on the request without throwing from the ABI encoder', async () => {
+    const client = OseroClient.create();
+    const result = await mintUsds(client, {
+      chainId: 8453,
+      amount: 1n,
+      sender: SENDER,
+      referralCode: -1n,
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+  });
+
+  it('rejects a negative client-level defaultReferralCode without throwing from the ABI encoder', async () => {
+    const client = OseroClient.create({ defaultReferralCode: -1n });
+    const result = await mintUsds(client, {
+      chainId: 8453,
+      amount: 1n,
+      sender: SENDER,
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+  });
+
+  it('rejects a request referral code that overflows uint256 without throwing from the ABI encoder', async () => {
+    const client = OseroClient.create();
+    const result = await mintUsds(client, {
+      chainId: 8453,
+      amount: 1n,
+      sender: SENDER,
+      referralCode: 1n << 256n,
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+  });
+
+  it('rejects a client-level defaultReferralCode that overflows uint256 without throwing from the ABI encoder', async () => {
+    const client = OseroClient.create({ defaultReferralCode: 1n << 256n });
+    const result = await mintUsds(client, {
+      chainId: 8453,
+      amount: 1n,
+      sender: SENDER,
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+  });
+
   describe('previewMintUsds', () => {
     it('previews the mainnet USDS output using lite PSM tin', async () => {
       const client = OseroClient.create();
@@ -177,7 +231,74 @@ describe('mintUsds', () => {
       // minOut = quote * 9995 / 10000
       expect(args[3]).toBe((quote * 9995n) / 10_000n);
       expect(args[4]).toBe(SENDER); // default receiver
-      expect(args[5]).toBe(0n); // default referral
+      expect(args[5]).toBe(3000n); // SDK default referral
+    });
+
+    it('opts out of the referral code when the request passes referralCode: undefined', async () => {
+      const client = OseroClient.create();
+      const quote = 99_999_999_999_999_999_999n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('100', 6),
+        sender: SENDER,
+        referralCode: undefined,
+      });
+      if (!result.isOk()) throw result.error;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(0n);
+    });
+
+    it('uses the client-level defaultReferralCode when the request omits one', async () => {
+      const client = OseroClient.create({ defaultReferralCode: 99n });
+      const quote = 99_999_999_999_999_999_999n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('100', 6),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(99n);
+    });
+
+    it('opts out when the client-level defaultReferralCode is explicitly undefined', async () => {
+      const client = OseroClient.create({ defaultReferralCode: undefined });
+      const quote = 99_999_999_999_999_999_999n;
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('100', 6),
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[5]).toBe(0n);
     });
 
     it('wraps transport failures in UnexpectedError', async () => {

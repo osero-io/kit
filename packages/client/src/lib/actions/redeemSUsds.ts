@@ -10,6 +10,7 @@ import { UnexpectedError, UnsupportedChainError, ValidationError } from '../erro
 import { applySlippage, usdcFromUsdsViaBuyGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
+import { resolveReferralCode, validateReferralCode } from '../referrals.js';
 import { errAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
@@ -54,7 +55,7 @@ export type RedeemSUsdsRequest = {
   /**
    * Opaque referral code for L2 PSM3 calls. Ignored on mainnet.
    *
-   * @defaultValue 0n
+   * @defaultValue {@link ClientConfig.defaultReferralCode} ({@link DEFAULT_REFERRAL_CODE} = 3000n by default). Pass `undefined` to opt out for this call.
    */
   readonly referralCode?: bigint;
 };
@@ -141,12 +142,18 @@ export function redeemSUsds(
     return errAsync(ValidationError.forField('amount', 'amount must be greater than 0'));
   }
 
+  const resolvedReferralCode = resolveReferralCode(request, client.config);
+  const referralCodeError = validateReferralCode(resolvedReferralCode);
+  if (referralCodeError) {
+    return errAsync(referralCodeError);
+  }
+
   const receiver = request.receiver ?? request.sender;
 
   if (chain.isMainnet) {
     return buildMainnetPlan(client, chain, request, receiver);
   }
-  return buildL2Plan(client, chain, request, receiver);
+  return buildL2Plan(client, chain, request, receiver, resolvedReferralCode ?? 0n);
 }
 
 function buildMainnetPlan(
@@ -227,12 +234,12 @@ function buildL2Plan(
   chain: ChainMetadata,
   request: RedeemSUsdsRequest,
   receiver: Address,
+  referralCode: bigint,
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
   const susds = getToken(chain.chainId, 'sUSDS');
   const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
-  const referralCode = request.referralCode ?? 0n;
 
   return quoteL2RedeemSUsds(client, chain, request.amount).map((quote): Erc20ApprovalRequired => {
     const minAmountOut = applySlippage(quote, slippageBps);
