@@ -15,14 +15,14 @@
     "usds",
     "viem"
   ],
-  "homepage": "https://github.com/osero-io/osero-kit/tree/main/packages/client#readme",
+  "homepage": "https://github.com/osero-io/kit/tree/main/packages/client#readme",
   "bugs": {
-    "url": "https://github.com/osero-io/osero-kit/issues"
+    "url": "https://github.com/osero-io/kit/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/osero-io/osero-kit.git",
+    "url": "git+https://github.com/osero-io/kit.git",
     "directory": "packages/client"
   },
   "files": [
