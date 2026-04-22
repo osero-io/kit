@@ -55,6 +55,19 @@ describe('mintSUsds', () => {
     }
   });
 
+  it('rejects a negative client-level defaultReferralCode without throwing from the ABI encoder', async () => {
+    const client = OseroClient.create({ defaultReferralCode: -1n });
+    const result = await mintSUsds(client, {
+      chainId: 8453,
+      amount: 1n,
+      sender: SENDER,
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+  });
+
   it('rejects a mainnet referral code above the supported range', async () => {
     const client = OseroClient.create();
     const result = await mintSUsds(client, {

@@ -1,6 +1,7 @@
 import type { ResolvedClientConfig } from './config.js';
 import { resolveConfig } from './config.js';
-import { DEFAULT_REFERRAL_CODE, resolveReferralCode } from './referrals.js';
+import { ValidationError } from './errors.js';
+import { DEFAULT_REFERRAL_CODE, resolveReferralCode, validateReferralCode } from './referrals.js';
 
 function makeResolvedConfig(overrides: Partial<ResolvedClientConfig> = {}): ResolvedClientConfig {
   return {
@@ -59,5 +60,29 @@ describe('resolveReferralCode', () => {
   it('returns undefined when the client default is undefined and the request does not set one', () => {
     const config = makeResolvedConfig({ defaultReferralCode: undefined });
     expect(resolveReferralCode({}, config)).toBeUndefined();
+  });
+});
+
+describe('validateReferralCode', () => {
+  it('accepts the SDK default', () => {
+    expect(validateReferralCode(DEFAULT_REFERRAL_CODE)).toBeUndefined();
+  });
+
+  it('accepts zero', () => {
+    expect(validateReferralCode(0n)).toBeUndefined();
+  });
+
+  it('accepts a large positive value', () => {
+    expect(validateReferralCode(10n ** 70n)).toBeUndefined();
+  });
+
+  it('accepts undefined (opt-out)', () => {
+    expect(validateReferralCode(undefined)).toBeUndefined();
+  });
+
+  it('rejects a negative value with a typed ValidationError', () => {
+    const result = validateReferralCode(-1n);
+    expect(result).toBeInstanceOf(ValidationError);
+    expect(result?.context).toEqual({ field: 'referralCode' });
   });
 });

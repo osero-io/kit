@@ -1,4 +1,5 @@
 import type { ResolvedClientConfig } from './config.js';
+import { ValidationError } from './errors.js';
 
 /**
  * SDK-wide default referral code, applied when neither the request
@@ -26,4 +27,22 @@ export function resolveReferralCode(
     return request.referralCode;
   }
   return config.defaultReferralCode;
+}
+
+/**
+ * Validates that a resolved referral code is within the psm3Abi
+ * `uint256` range. Returns a typed {@link ValidationError} instead
+ * of throwing so actions can short-circuit via `errAsync` without
+ * ever letting viem's ABI encoder raise synchronously.
+ */
+export function validateReferralCode(
+  code: bigint | undefined,
+): ValidationError<{ field: string }> | undefined {
+  if (code !== undefined && code < 0n) {
+    return ValidationError.forField(
+      'referralCode',
+      'referralCode must be greater than or equal to 0',
+    );
+  }
+  return undefined;
 }

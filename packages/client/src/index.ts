@@ -75,7 +75,11 @@ export {
 } from './lib/plan.js';
 
 // Referrals ------------------------------------------------------------
-export { DEFAULT_REFERRAL_CODE, resolveReferralCode } from './lib/referrals.js';
+export {
+  DEFAULT_REFERRAL_CODE,
+  resolveReferralCode,
+  validateReferralCode,
+} from './lib/referrals.js';
 
 // Result type re-exports ------------------------------------------------
 export {

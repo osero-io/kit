@@ -10,7 +10,7 @@ import { UnexpectedError, UnsupportedChainError, ValidationError } from '../erro
 import { applySlippage, usdsFromUsdcViaSellGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
-import { resolveReferralCode } from '../referrals.js';
+import { resolveReferralCode, validateReferralCode } from '../referrals.js';
 import { errAsync, okAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
@@ -174,10 +174,9 @@ export function mintSUsds(
   const receiver = request.receiver ?? request.sender;
   const resolvedReferralCode = resolveReferralCode(request, client.config);
 
-  if (resolvedReferralCode !== undefined && resolvedReferralCode < 0n) {
-    return errAsync(
-      ValidationError.forField('referralCode', 'referralCode must be greater than or equal to 0'),
-    );
+  const referralCodeError = validateReferralCode(resolvedReferralCode);
+  if (referralCodeError) {
+    return errAsync(referralCodeError);
   }
 
   if (chain.isMainnet && resolvedReferralCode !== undefined && resolvedReferralCode > 65_535n) {
