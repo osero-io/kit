@@ -1,5 +1,12 @@
 // ABIs -----------------------------------------------------------------
-export { erc20Abi, erc4626Abi, litePsmAbi, psm3Abi, usdsPsmWrapperAbi } from './lib/abis/index.js';
+export {
+  erc20Abi,
+  erc4626Abi,
+  litePsmAbi,
+  psm3Abi,
+  ssrAbi,
+  usdsPsmWrapperAbi,
+} from './lib/abis/index.js';
 
 // Adapters (shared helpers) --------------------------------------------
 export {
@@ -11,6 +18,17 @@ export {
 
 // Addresses -------------------------------------------------------------
 export { PSM_ADDRESSES, type PsmAddresses } from './lib/addresses.js';
+
+// APY / SSR -------------------------------------------------------------
+export {
+  type GetSsrError,
+  type GetSsrRequest,
+  getSsr,
+  getSUsdsApy,
+  RAY,
+  SECONDS_PER_YEAR,
+  ssrToApy,
+} from './lib/apy.js';
 
 // Balances --------------------------------------------------------------
 export {
