@@ -12,7 +12,8 @@ src/
 │   ├── env.ts         Loads PRIVATE_KEY + RPC URLs from process.env
 │   └── format.ts      Pretty-printing + small logging helpers
 ├── dry-run/
-│   └── inspect-plan.ts        Build a plan without sending it. No funds needed.
+│   ├── inspect-plan.ts        Build a plan without sending it. No funds needed.
+│   └── susds-apy.ts           Read the live sUSDS APY on every supported chain.
 ├── viem/
 │   ├── mint-usds.ts           USDC → USDS on Base (single approve + swap)
 │   ├── mint-susds-mainnet.ts  USDC → sUSDS on Ethereum mainnet (MultiStepExecution)
@@ -33,6 +34,9 @@ cp examples/.env.example examples/.env
 
 # Dry-run (no funds, no tx): prints the ExecutionPlan the SDK would produce.
 pnpm --filter @osero/examples dry-run:inspect-plan
+
+# Dry-run (no funds, no tx): prints the live sUSDS APY on every supported chain.
+pnpm --filter @osero/examples dry-run:susds-apy
 
 # viem examples
 pnpm --filter @osero/examples viem:mint-usds
