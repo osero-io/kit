@@ -47,3 +47,14 @@ Thumbs.db
 .claude/settings.local.json
 .nx/polygraph
 vitest.config.*.timestamp*
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
