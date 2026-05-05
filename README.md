@@ -10,6 +10,7 @@ before anything is signed.
 - Mint USDS from USDC and redeem USDS back to USDC.
 - Mint sUSDS from USDC and redeem sUSDS back to USDC.
 - Preview exact-in output amounts before building or sending a plan.
+- Fetch hosted Osero API swap quotes and convert them into the same execution plan model.
 - Supports Ethereum mainnet, OP Mainnet, Unichain, Base, and Arbitrum One.
 - Uses viem internally for ABI encoding and public RPC reads.
 - Provides adapters for `@osero/client/viem` and `@osero/client/ethers`.
@@ -139,6 +140,44 @@ The repository also includes a dry-run script:
 ```bash
 pnpm install
 pnpm --filter @osero/examples dry-run:inspect-plan
+```
+
+## Quote With the Osero API
+
+Use `@osero/client/api` when you want the hosted Osero API to build a
+ready-to-sign swap quote between supported public assets. The API
+client sends your key as `x-api-key`, returns typed `ResultAsync`
+values, and adds an `executionPlan` that can be inspected or passed to
+the existing wallet adapters.
+
+```ts
+import { flattenExecutionPlan } from '@osero/client';
+import { OseroApiClient } from '@osero/client/api';
+import { parseUnits } from 'viem';
+
+const api = OseroApiClient.create({
+  apiKey: process.env.OSERO_API_KEY!,
+});
+
+const quote = await api.getSwapQuote({
+  fromAddress: '0x1111111111111111111111111111111111111111',
+  fromAssetId: 'base:usdc',
+  toAssetId: 'ethereum:susds',
+  amount: parseUnits('1', 6),
+  slippage: '0.5',
+  referralCode: 3000,
+});
+
+if (quote.isOk()) {
+  console.log(quote.value.quote.amountOut?.formatted);
+  console.log(flattenExecutionPlan(quote.value.executionPlan));
+}
+```
+
+Run the API example without a private key:
+
+```bash
+OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-susds
 ```
 
 ## Preview a Flow Before Sending
@@ -352,6 +391,7 @@ pnpm --filter @osero/examples viem:mint-usds
 pnpm --filter @osero/examples viem:redeem-susds
 pnpm --filter @osero/examples ethers:mint-usds
 pnpm --filter @osero/examples ethers:roundtrip
+pnpm --filter @osero/examples api:quote-susds
 ```
 
 The examples broadcast real transactions. Use a disposable wallet with small balances
