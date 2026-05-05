@@ -131,6 +131,83 @@ export class InsufficientBalanceError extends OseroError {
 }
 
 /**
+ * Raised when the Osero HTTP API returns a non-2xx response. The
+ * normalized fields expose the stable error metadata returned by the API
+ * when available, while {@link ApiRequestError.body} keeps the decoded
+ * response for callers that need endpoint-specific details.
+ */
+export class ApiRequestError extends OseroError {
+  readonly statusCode: number;
+  readonly statusText: string;
+  readonly code?: string;
+  readonly correlationId?: string;
+  readonly body: unknown;
+
+  constructor(
+    message: string,
+    options: ErrorOptions & {
+      statusCode: number;
+      statusText: string;
+      code?: string;
+      correlationId?: string;
+      body: unknown;
+    },
+  ) {
+    super(message, { cause: options.cause });
+    this.name = 'ApiRequestError';
+    this.statusCode = options.statusCode;
+    this.statusText = options.statusText;
+    this.code = options.code;
+    this.correlationId = options.correlationId;
+    this.body = options.body;
+  }
+
+  static from(params: {
+    statusCode: number;
+    statusText: string;
+    body: unknown;
+    cause?: unknown;
+  }): ApiRequestError {
+    const metadata = extractApiErrorMetadata(params.body);
+    const message =
+      metadata.message ?? `Osero API request failed with ${params.statusCode} ${params.statusText}`;
+
+    return new ApiRequestError(message, {
+      statusCode: params.statusCode,
+      statusText: params.statusText,
+      code: metadata.code,
+      correlationId: metadata.correlationId,
+      body: params.body,
+      cause: params.cause,
+    });
+  }
+}
+
+function extractApiErrorMetadata(body: unknown): {
+  readonly code?: string;
+  readonly message?: string;
+  readonly correlationId?: string;
+} {
+  if (body === null || typeof body !== 'object') {
+    return {};
+  }
+
+  const record = body as Record<string, unknown>;
+  const rawMessage = record.message;
+  const message = Array.isArray(rawMessage)
+    ? rawMessage.filter((entry): entry is string => typeof entry === 'string').join(', ')
+    : typeof rawMessage === 'string'
+      ? rawMessage
+      : undefined;
+
+  return {
+    code: typeof record.code === 'string' ? record.code : undefined,
+    message,
+    correlationId: typeof record.correlationId === 'string' ? record.correlationId : undefined,
+  };
+}
+
+/**
  * Raised for any error that does not fit the other, more specific
  * categories — typically an RPC failure, a network timeout, or an
  * unforeseen runtime exception. Always wraps the underlying error in
