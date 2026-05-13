@@ -440,4 +440,90 @@ describe('OseroApiClient', () => {
     }
     expect(calls).toHaveLength(0);
   });
+
+  it('uses bridge.statusRequest to call getSwapStatus from a cross-chain quote', async () => {
+    const statusResponse = {
+      bridge: {
+        protocol: 'stargate',
+        state: 'pending',
+        providerStatus: 'inflight',
+        sourceChainId: 8453,
+        destinationChainId: 1,
+        sourceTxHash: SOURCE_HASH,
+        destinationTxHash: null,
+        error: null,
+      },
+    } satisfies OseroApiSwapStatusResponse;
+    const { fetch, calls } = makeFetch(jsonResponse(statusResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapStatusForQuote(toSusdsQuoteResponse, SOURCE_HASH);
+
+    expect(result.isOk()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      `https://api.osero.org/v1/swap/status/${SOURCE_HASH}?sourceChainId=8453&bridgeProtocol=stargate`,
+    );
+  });
+
+  it('returns a ValidationError when getSwapStatusForQuote is called with a same-chain quote', async () => {
+    const { fetch, calls } = makeFetch(jsonResponse(supportedAssetsResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapStatusForQuote(fromSusdsQuoteResponse, SOURCE_HASH);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects quote responses where required=true but bridge metadata is null', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse({
+        ...toSusdsQuoteResponse,
+        bridge: { required: true, protocol: null, statusRequest: null },
+      }),
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'base:usdc',
+      toAssetId: 'ethereum:susds',
+      amount: 1_000_000n,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(UnexpectedError);
+    }
+  });
+
+  it('rejects quote responses where required=false but bridge metadata is set', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse({
+        ...fromSusdsQuoteResponse,
+        bridge: {
+          required: false,
+          protocol: 'stargate',
+          statusRequest: { sourceChainId: 1, bridgeProtocol: 'stargate' },
+        },
+      }),
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'ethereum:susds',
+      toAssetId: 'ethereum:usdc',
+      amount: '1000000000000000000',
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(UnexpectedError);
+    }
+  });
 });

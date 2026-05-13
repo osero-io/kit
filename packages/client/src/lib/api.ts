@@ -200,11 +200,23 @@ export type OseroApiSwapExecution = {
   readonly route: readonly OseroApiSwapRouteHop[];
 };
 
-export type OseroApiSwapBridge = {
-  readonly required: boolean;
-  readonly protocol: OseroApiBridgeProtocol | null;
-  readonly statusRequest: OseroApiSwapBridgeStatusRequest | null;
-};
+/**
+ * Discriminated on `required`: a cross-chain quote always carries a
+ * non-null `protocol` + `statusRequest`, a same-chain quote always
+ * carries `null` for both. The decoder enforces this invariant at
+ * runtime so callers can rely on the narrowing.
+ */
+export type OseroApiSwapBridge =
+  | {
+      readonly required: true;
+      readonly protocol: OseroApiBridgeProtocol;
+      readonly statusRequest: OseroApiSwapBridgeStatusRequest;
+    }
+  | {
+      readonly required: false;
+      readonly protocol: null;
+      readonly statusRequest: null;
+    };
 
 export type OseroApiSwapPair = {
   readonly direction: OseroApiSwapDirection;
@@ -332,6 +344,39 @@ export class OseroApiClient {
     });
   }
 
+  /**
+   * Convenience wrapper around {@link OseroApiClient.getSwapStatus} that
+   * pulls `sourceChainId` and `bridgeProtocol` out of a cross-chain
+   * quote's `bridge.statusRequest`, so callers only need to supply the
+   * source-chain tx hash returned by their wallet.
+   *
+   * Returns a {@link ValidationError} when the quote is same-chain
+   * (`bridge.required === false`) since there is no bridge to track.
+   */
+  getSwapStatusForQuote(
+    quote: OseroApiSwapQuoteResponse,
+    txHash: Hex,
+    options?: OseroApiRequestOptions,
+  ): ResultAsync<OseroApiSwapStatusResponse, OseroApiClientError> {
+    if (!quote.bridge.required) {
+      return errAsync(
+        ValidationError.forField(
+          'quote',
+          'Quote is same-chain — getSwapStatusForQuote requires a cross-chain bridge.',
+        ),
+      );
+    }
+
+    return this.getSwapStatus(
+      {
+        txHash,
+        sourceChainId: quote.bridge.statusRequest.sourceChainId,
+        bridgeProtocol: quote.bridge.statusRequest.bridgeProtocol,
+      },
+      options,
+    );
+  }
+
   private requestJson<T>({
     method,
     path,
@@ -394,8 +439,6 @@ export class OseroApiClient {
     );
   }
 }
-
-export { OseroApiClient as OseroAPIClient };
 
 function withExecutionPlan(response: OseroApiSwapQuoteResponse): OseroApiSwapQuote {
   return Object.assign({}, response, {
@@ -799,16 +842,32 @@ function decodeSwapExecution(value: unknown, path: string): OseroApiSwapExecutio
 
 function decodeSwapBridge(value: unknown, path: string): OseroApiSwapBridge {
   const record = asRecord(value, path);
-  return {
-    required: booleanField(record, 'required', `${path}.required`),
-    protocol: nullableField(record, 'protocol', `${path}.protocol`, decodeBridgeProtocol),
-    statusRequest: nullableField(
-      record,
-      'statusRequest',
-      `${path}.statusRequest`,
-      decodeSwapBridgeStatusRequest,
-    ),
-  };
+  const required = booleanField(record, 'required', `${path}.required`);
+  const protocol = nullableField(record, 'protocol', `${path}.protocol`, decodeBridgeProtocol);
+  const statusRequest = nullableField(
+    record,
+    'statusRequest',
+    `${path}.statusRequest`,
+    decodeSwapBridgeStatusRequest,
+  );
+
+  if (required) {
+    if (protocol === null) {
+      throw new DecodeError(`${path}.protocol must not be null when bridge.required is true`);
+    }
+    if (statusRequest === null) {
+      throw new DecodeError(`${path}.statusRequest must not be null when bridge.required is true`);
+    }
+    return { required: true, protocol, statusRequest };
+  }
+
+  if (protocol !== null) {
+    throw new DecodeError(`${path}.protocol must be null when bridge.required is false`);
+  }
+  if (statusRequest !== null) {
+    throw new DecodeError(`${path}.statusRequest must be null when bridge.required is false`);
+  }
+  return { required: false, protocol: null, statusRequest: null };
 }
 
 function decodeSwapBridgeStatusRequest(

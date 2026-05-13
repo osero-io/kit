@@ -251,6 +251,10 @@ Common calls:
   for supported counter asset ↔ sUSDS routes.
 - `getSwapStatus({ txHash, sourceChainId, bridgeProtocol })` checks a
   bridge status request returned by a cross-chain quote.
+- `getSwapStatusForQuote(quote, txHash)` is a convenience wrapper that
+  pulls `sourceChainId` and `bridgeProtocol` off `quote.bridge.statusRequest`
+  for you. Same-chain quotes have no bridge to track and return a
+  `ValidationError`.
 
 The client-level API key can be overridden per request:
 

@@ -33,7 +33,6 @@ export {
 // API client ------------------------------------------------------------
 export {
   DEFAULT_OSERO_API_BASE_URL,
-  OseroAPIClient,
   OseroApiClient,
   OSERO_API_BRIDGE_PROTOCOLS,
   OSERO_API_COUNTER_ASSET_IDS,
