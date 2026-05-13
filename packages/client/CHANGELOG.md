@@ -1,5 +1,13 @@
 # @osero/client
 
+## 0.6.0
+
+### Minor Changes
+
+- 00a1f05: Add an authenticated Osero API client for swap quotes, assets, and bridge status,
+  including `x-api-key` candidate validation, quote referral code overrides, API
+  error handling, and wallet-adapter execution plan conversion.
+
 ## 0.5.0
 
 ### Minor Changes
