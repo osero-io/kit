@@ -28,6 +28,11 @@ that either adapter can broadcast.
 It also exposes preview helpers for every exact-in flow so callers can
 quote the expected output amount before building or sending a plan.
 
+The package also includes `@osero/client/api`, a small HTTP client for
+the hosted Osero API. It can fetch supported API assets, build API
+swap quotes, convert those quotes into SDK execution plans, and poll
+bridge status for cross-chain quotes.
+
 ## Install
 
 ```bash
@@ -202,6 +207,65 @@ All balance helpers return raw `bigint` values and surface
 `UnsupportedChainError` or `UnexpectedError` through the same
 `ResultAsync` model used by the action builders.
 
+## Osero API client
+
+Use `@osero/client/api` for hosted API quotes instead of building the
+route locally. The client sends `x-api-key`, validates the public API
+key shape before making requests, and returns typed `ResultAsync`
+values.
+
+```ts
+import { flattenExecutionPlan } from '@osero/client';
+import { OseroApiClient } from '@osero/client/api';
+import { parseUnits } from 'viem';
+
+const api = OseroApiClient.create({
+  apiKey: process.env.OSERO_API_KEY!,
+  // Defaults to https://api.osero.org/v1/
+  baseUrl: process.env.OSERO_API_BASE_URL,
+});
+
+const quote = await api.getSwapQuote({
+  fromAddress: '0x1111111111111111111111111111111111111111',
+  fromAssetId: 'base:usdc',
+  toAssetId: 'ethereum:susds',
+  amount: parseUnits('1', 6),
+  slippage: '0.5',
+  referralCode: 3000,
+});
+
+if (quote.isErr()) {
+  console.error(quote.error.name, quote.error.message);
+  return;
+}
+
+console.log('sUSDS out:', quote.value.quote.amountOut?.formatted);
+console.log(flattenExecutionPlan(quote.value.executionPlan));
+```
+
+Common calls:
+
+- `getSupportedAssets()` returns the public asset IDs accepted by the
+  quote endpoint.
+- `getSwapQuote(request)` builds approval and execution transactions
+  for supported counter asset ↔ sUSDS routes.
+- `getSwapStatus({ txHash, sourceChainId, bridgeProtocol })` checks a
+  bridge status request returned by a cross-chain quote.
+- `getSwapStatusForQuote(quote, txHash)` is a convenience wrapper that
+  pulls `sourceChainId` and `bridgeProtocol` off `quote.bridge.statusRequest`
+  for you. Same-chain quotes have no bridge to track and return a
+  `ValidationError`.
+
+The client-level API key can be overridden per request:
+
+```ts
+await api.getSupportedAssets({ apiKey: 'osero_partner-key' });
+```
+
+Quote `referralCode` is optional. When provided, it must be an integer
+from `3000` to `3999` and overrides the referral code attached to the
+authenticated API key for that quote.
+
 ## Error handling
 
 `@osero/client` uses [`neverthrow`](https://github.com/supermacro/neverthrow)
@@ -225,6 +289,9 @@ if (result.isErr()) {
       break;
     case 'TransactionError':
       // tx was broadcast but reverted — inspect .txHash / .link
+      break;
+    case 'ApiRequestError':
+      // hosted API returned a non-2xx response — inspect .statusCode / .body
       break;
     case 'SigningError':
     case 'UnexpectedError':

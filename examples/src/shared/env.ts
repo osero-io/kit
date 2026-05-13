@@ -55,3 +55,8 @@ export function optionalRpcUrl(chainId: number): string | undefined {
   const value = process.env[envVar];
   return value && value.length > 0 ? value : undefined;
 }
+
+export function optionalEnv(name: string): string | undefined {
+  const value = process.env[name];
+  return value && value.length > 0 ? value : undefined;
+}

@@ -52,6 +52,12 @@
       "import": "./dist/lib/actions/index.js",
       "default": "./dist/lib/actions/index.js"
     },
+    "./api": {
+      "osero-sdk": "./src/api.ts",
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js",
+      "default": "./dist/api.js"
+    },
     "./viem": {
       "osero-sdk": "./src/viem.ts",
       "types": "./dist/viem.d.ts",

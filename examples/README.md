@@ -11,6 +11,8 @@ src/
 ├── shared/            Helpers reused by every example
 │   ├── env.ts         Loads PRIVATE_KEY + RPC URLs from process.env
 │   └── format.ts      Pretty-printing + small logging helpers
+├── api/
+│   └── quote-susds.ts        Request a hosted API quote without sending it.
 ├── dry-run/
 │   ├── inspect-plan.ts        Build a plan without sending it. No funds needed.
 │   └── susds-apy.ts           Read the live sUSDS APY on every supported chain.
@@ -38,6 +40,9 @@ pnpm --filter @osero/examples dry-run:inspect-plan
 # Dry-run (no funds, no tx): prints the live sUSDS APY on every supported chain.
 pnpm --filter @osero/examples dry-run:susds-apy
 
+# Osero API quote example (no private key, no tx): requires OSERO_API_KEY.
+pnpm --filter @osero/examples api:quote-susds
+
 # viem examples
 pnpm --filter @osero/examples viem:mint-usds
 pnpm --filter @osero/examples viem:mint-susds-mainnet
@@ -53,6 +58,11 @@ pnpm --filter @osero/examples ethers:roundtrip
 > you configure. Use a disposable wallet funded with small amounts,
 > and double-check the chain ID and amounts printed at the top of
 > each script before confirming.
+
+The `api:*` examples are read-only from your wallet's perspective.
+They call the hosted Osero API and print ready-to-sign transactions,
+but they do not require `PRIVATE_KEY` and do not broadcast. Set
+`OSERO_API_KEY` in `examples/.env` or inline before running them.
 
 ## The mental model in ~40 lines
 
@@ -80,6 +90,12 @@ preview helpers to print expected output amounts up front, then use
 `getTokenBalances` and `getSUsdsBalance` from `@osero/client` to track
 the balance delta across the mint and redeem legs without hand-writing
 ERC-20 `balanceOf` calls.
+
+The API example shows the hosted route-building side of the SDK:
+`OseroApiClient` lists supported API assets, requests a Base USDC →
+Ethereum sUSDS quote, and prints the `ExecutionPlan` attached to the
+API response. That plan uses the same adapter-compatible structure as
+the local action builders.
 
 That dichotomy is the whole SDK — everything else is routing per
 chain. On L2s the plans are `Erc20ApprovalRequired` (PSM3 swap). On
