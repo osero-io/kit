@@ -892,7 +892,7 @@ function decodeSwapTransaction(value: unknown, path: string): OseroApiSwapTransa
     to: addressField(record, 'to', `${path}.to`),
     from: addressField(record, 'from', `${path}.from`),
     data: hexField(record, 'data', `${path}.data`),
-    value: nonNegativeIntegerStringField(record, 'value', `${path}.value`),
+    value: transactionValueField(record, 'value', `${path}.value`),
   };
 }
 
@@ -1089,6 +1089,33 @@ function decodeNonNegativeIntegerString(value: unknown, path: string): OseroApiI
     throw new DecodeError(`${path} must be a non-negative integer string`);
   }
   return text as OseroApiIntegerString;
+}
+
+function transactionValueField(
+  record: Record<string, unknown>,
+  field: string,
+  path: string,
+): OseroApiIntegerString {
+  return decodeTransactionValue(requiredField(record, field, path), path);
+}
+
+function decodeTransactionValue(value: unknown, path: string): OseroApiIntegerString {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new DecodeError(`${path} must be a safe non-negative integer number`);
+    }
+    return value.toString() as OseroApiIntegerString;
+  }
+
+  const text = decodeString(value, path);
+  if (/^(?:0|[1-9][0-9]*)$/.test(text)) {
+    return text as OseroApiIntegerString;
+  }
+  if (/^0x[0-9a-fA-F]+$/.test(text)) {
+    return BigInt(text).toString() as OseroApiIntegerString;
+  }
+
+  throw new DecodeError(`${path} must be a non-negative integer string, number, or hex string`);
 }
 
 function decimalsField(record: Record<string, unknown>, field: string, path: string): 6 | 18 {
