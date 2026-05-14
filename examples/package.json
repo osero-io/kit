@@ -5,6 +5,7 @@
   "description": "Runnable usage examples for @osero/client — mint and redeem USDS / sUSDS across viem and ethers.",
   "type": "module",
   "scripts": {
+    "api:execute-quote-viem": "tsx src/api/execute-quote-viem.ts",
     "api:quote-susds": "tsx src/api/quote-susds.ts",
     "dry-run:inspect-plan": "tsx src/dry-run/inspect-plan.ts",
     "dry-run:susds-apy": "tsx src/dry-run/susds-apy.ts",

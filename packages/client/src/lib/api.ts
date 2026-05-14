@@ -34,6 +34,7 @@ export const OSERO_API_KEY_PREFIX = 'osero_';
 export const OSERO_API_KEY_MAX_LENGTH = 256;
 export const OSERO_API_REFERRAL_CODE_MIN = 3000;
 export const OSERO_API_REFERRAL_CODE_MAX = 3999;
+const UINT256_MAX = 2n ** 256n - 1n;
 
 export type OseroApiCounterAssetId = (typeof OSERO_API_COUNTER_ASSET_IDS)[number];
 export type OseroApiSusdsAssetId = typeof OSERO_API_SUSDS_ASSET_ID;
@@ -892,7 +893,7 @@ function decodeSwapTransaction(value: unknown, path: string): OseroApiSwapTransa
     to: addressField(record, 'to', `${path}.to`),
     from: addressField(record, 'from', `${path}.from`),
     data: hexField(record, 'data', `${path}.data`),
-    value: nonNegativeIntegerStringField(record, 'value', `${path}.value`),
+    value: transactionValueField(record, 'value', `${path}.value`),
   };
 }
 
@@ -1089,6 +1090,40 @@ function decodeNonNegativeIntegerString(value: unknown, path: string): OseroApiI
     throw new DecodeError(`${path} must be a non-negative integer string`);
   }
   return text as OseroApiIntegerString;
+}
+
+function transactionValueField(
+  record: Record<string, unknown>,
+  field: string,
+  path: string,
+): OseroApiIntegerString {
+  return decodeIntegerLikeUint256String(requiredField(record, field, path), path);
+}
+
+function decodeIntegerLikeUint256String(value: unknown, path: string): OseroApiIntegerString {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new DecodeError(`${path} must be a safe non-negative integer number`);
+    }
+    return encodeUint256String(BigInt(value), path);
+  }
+
+  const text = decodeString(value, path);
+  if (/^(?:0|[1-9][0-9]*)$/.test(text)) {
+    return encodeUint256String(BigInt(text), path);
+  }
+  if (/^0x[0-9a-fA-F]+$/.test(text)) {
+    return encodeUint256String(BigInt(text), path);
+  }
+
+  throw new DecodeError(`${path} must be a non-negative integer string, number, or hex string`);
+}
+
+function encodeUint256String(value: bigint, path: string): OseroApiIntegerString {
+  if (value > UINT256_MAX) {
+    throw new DecodeError(`${path} must fit within uint256`);
+  }
+  return value.toString() as OseroApiIntegerString;
 }
 
 function decimalsField(record: Record<string, unknown>, field: string, path: string): 6 | 18 {

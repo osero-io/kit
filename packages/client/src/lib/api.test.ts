@@ -1,7 +1,7 @@
 import { type Address, type Hex } from 'viem';
 import { vi } from 'vitest';
 
-import { flattenExecutionPlan } from './adapters.js';
+import { flattenExecutionPlan, runExecutionPlan, type SingleTxExecutor } from './adapters.js';
 import {
   OseroApiClient,
   type OseroApiFetch,
@@ -13,6 +13,7 @@ import {
   type OseroApiSupportedAssetsResponse,
 } from './api.js';
 import { ApiRequestError, UnexpectedError, ValidationError } from './errors.js';
+import { errAsync, okAsync } from './result.js';
 import type { TransactionRequest } from './types.js';
 
 const WALLET: Address = '0x1111111111111111111111111111111111111111';
@@ -28,6 +29,10 @@ const OVERRIDE_API_KEY = 'osero_override-key_123';
 const API_KEY = 'osero_test-key_123';
 const UNKNOWN_API_KEY = 'osero_unknown-key_123';
 const INVALID_API_KEY = 'bad-key';
+const LARGE_HEX_TRANSACTION_VALUE = '0x1000000000000000A';
+const LARGE_HEX_TRANSACTION_VALUE_DECIMAL = BigInt(LARGE_HEX_TRANSACTION_VALUE).toString();
+const UINT256_OVERFLOW_DECIMAL = (2n ** 256n).toString();
+const UINT256_OVERFLOW_HEX = `0x1${'0'.repeat(64)}`;
 
 type FetchCall = {
   readonly url: string;
@@ -57,6 +62,20 @@ function makeFetch(response: OseroApiFetchResponse): {
     return response;
   });
   return { fetch, calls };
+}
+
+function transactionHash(index: number): Hex {
+  return `0x${index.toString(16).padStart(64, '0')}` as Hex;
+}
+
+function makeRecordingExecutor(calls: TransactionRequest[], failAt?: number): SingleTxExecutor {
+  return vi.fn<SingleTxExecutor>((tx) => {
+    calls.push(tx);
+    if (calls.length === failAt) {
+      return errAsync(UnexpectedError.from(new Error(`transaction ${calls.length} failed`)));
+    }
+    return okAsync(transactionHash(calls.length));
+  });
 }
 
 const supportedAssetsResponse = {
@@ -300,6 +319,90 @@ describe('OseroApiClient', () => {
     }
   });
 
+  it('pipes a cross-chain API quote execution plan into the web3 transaction handler', async () => {
+    const { fetch } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+    const txCalls: TransactionRequest[] = [];
+    const executor = makeRecordingExecutor(txCalls);
+
+    const result = await client
+      .getSwapQuote({
+        fromAddress: WALLET,
+        fromAssetId: 'base:usdc',
+        toAssetId: 'ethereum:susds',
+        amount: 1_000_000n,
+      })
+      .andThen((quote) => runExecutionPlan(quote.executionPlan, executor));
+
+    expect(result.isOk()).toBe(true);
+    expect(txCalls).toHaveLength(2);
+    expect(txCalls.map((tx) => tx.operation)).toEqual(['APPROVE_ERC20', 'MINT_SUSDS']);
+    expect(txCalls[0]).toMatchObject({
+      chainId: 8453,
+      from: WALLET,
+      to: BASE_USDC,
+      data: '0x095ea7b3',
+      value: 0n,
+    });
+    expect(txCalls[1]).toMatchObject({
+      chainId: 8453,
+      from: WALLET,
+      to: EXECUTOR,
+      data: '0x1234',
+      value: 123n,
+    });
+    if (result.isOk()) {
+      expect(result.value.txHash).toBe(transactionHash(2));
+      expect(result.value.operations).toEqual(['APPROVE_ERC20', 'MINT_SUSDS']);
+    }
+  });
+
+  it('normalizes JSON numbers and mixed-case hex transaction values', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse({
+        ...toSusdsQuoteResponse,
+        approval: {
+          ...toSusdsQuoteResponse.approval,
+          transaction: {
+            ...toSusdsQuoteResponse.approval.transaction,
+            value: 0,
+          },
+        },
+        execution: {
+          ...toSusdsQuoteResponse.execution,
+          transaction: {
+            ...toSusdsQuoteResponse.execution.transaction,
+            value: LARGE_HEX_TRANSACTION_VALUE,
+          },
+        },
+      }),
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'base:usdc',
+      toAssetId: 'ethereum:susds',
+      amount: 1_000_000n,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      const txCalls: TransactionRequest[] = [];
+      const executionResult = await runExecutionPlan(
+        result.value.executionPlan,
+        makeRecordingExecutor(txCalls),
+      );
+      const transactions = flattenExecutionPlan(result.value.executionPlan);
+      expect(result.value.approval.transaction.value).toBe('0');
+      expect(result.value.execution.transaction.value).toBe(LARGE_HEX_TRANSACTION_VALUE_DECIMAL);
+      expect(transactions[0]!.value).toBe(0n);
+      expect(transactions[1]!.value).toBe(BigInt(LARGE_HEX_TRANSACTION_VALUE));
+      expect(executionResult.isOk()).toBe(true);
+      expect(txCalls.map((tx) => tx.value)).toEqual([0n, BigInt(LARGE_HEX_TRANSACTION_VALUE)]);
+    }
+  });
+
   it('maps from-sUSDS quotes to a redeem execution operation', async () => {
     const { fetch } = makeFetch(jsonResponse(fromSusdsQuoteResponse));
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
@@ -320,6 +423,121 @@ describe('OseroApiClient', () => {
       ).toEqual(['APPROVE_ERC20', 'REDEEM_SUSDS_FOR_USDC']);
     }
   });
+
+  it('pipes a same-chain from-sUSDS API quote execution plan into the web3 handler', async () => {
+    const { fetch } = makeFetch(jsonResponse(fromSusdsQuoteResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+    const txCalls: TransactionRequest[] = [];
+
+    const result = await client
+      .getSwapQuote({
+        fromAddress: WALLET,
+        fromAssetId: 'ethereum:susds',
+        toAssetId: 'ethereum:usdc',
+        amount: '1000000000000000000',
+      })
+      .andThen((quote) => runExecutionPlan(quote.executionPlan, makeRecordingExecutor(txCalls)));
+
+    expect(result.isOk()).toBe(true);
+    expect(txCalls).toHaveLength(2);
+    expect(txCalls.map((tx) => tx.operation)).toEqual(['APPROVE_ERC20', 'REDEEM_SUSDS_FOR_USDC']);
+    expect(txCalls.map((tx) => tx.chainId)).toEqual([1, 1]);
+    expect(txCalls[0]).toMatchObject({
+      from: WALLET,
+      to: MAINNET_SUSDS,
+      data: '0x095ea7b3',
+      value: 0n,
+    });
+    expect(txCalls[1]).toMatchObject({
+      from: WALLET,
+      to: EXECUTOR,
+      data: '0x5678',
+      value: 0n,
+    });
+    if (result.isOk()) {
+      expect(result.value.txHash).toBe(transactionHash(2));
+    }
+  });
+
+  it.each([
+    ['negative number', -1],
+    ['unsafe number', Number.MAX_SAFE_INTEGER + 1],
+    ['float', 1.5],
+    ['empty hex', '0x'],
+    ['uppercase hex prefix', '0X7b'],
+    ['invalid hex', '0xZZ'],
+    ['garbage string', 'abc'],
+    ['leading zero decimal', '01'],
+    ['negative string', '-1'],
+    ['decimal string float', '1.0'],
+    ['uint256 decimal overflow', UINT256_OVERFLOW_DECIMAL],
+    ['uint256 hex overflow', UINT256_OVERFLOW_HEX],
+  ] as const)(
+    'does not call the web3 transaction handler when transaction.value is %s',
+    async (_name, value) => {
+      const { fetch } = makeFetch(
+        jsonResponse({
+          ...toSusdsQuoteResponse,
+          approval: {
+            ...toSusdsQuoteResponse.approval,
+            transaction: {
+              ...toSusdsQuoteResponse.approval.transaction,
+              value,
+            },
+          },
+        }),
+      );
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+      const txCalls: TransactionRequest[] = [];
+      const executor = makeRecordingExecutor(txCalls);
+
+      const result = await client
+        .getSwapQuote({
+          fromAddress: WALLET,
+          fromAssetId: 'base:usdc',
+          toAssetId: 'ethereum:susds',
+          amount: 1_000_000n,
+        })
+        .andThen((quote) => runExecutionPlan(quote.executionPlan, executor));
+
+      expect(result.isErr()).toBe(true);
+      expect(txCalls).toHaveLength(0);
+      expect(executor).not.toHaveBeenCalled();
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(UnexpectedError);
+      }
+    },
+  );
+
+  it.each([
+    ['approval', 1, ['APPROVE_ERC20']],
+    ['swap', 2, ['APPROVE_ERC20', 'MINT_SUSDS']],
+  ] as const)(
+    'short-circuits API quote execution when the %s transaction fails',
+    async (_failedStep, failAt, expectedOperations) => {
+      const { fetch } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+      const txCalls: TransactionRequest[] = [];
+
+      const result = await client
+        .getSwapQuote({
+          fromAddress: WALLET,
+          fromAssetId: 'base:usdc',
+          toAssetId: 'ethereum:susds',
+          amount: 1_000_000n,
+        })
+        .andThen((quote) =>
+          runExecutionPlan(quote.executionPlan, makeRecordingExecutor(txCalls, failAt)),
+        );
+
+      expect(result.isErr()).toBe(true);
+      expect(txCalls).toHaveLength(failAt);
+      expect(txCalls.map((tx) => tx.operation)).toEqual(expectedOperations);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(UnexpectedError);
+      }
+    },
+  );
 
   it('fetches bridge status with query params', async () => {
     const statusResponse = {

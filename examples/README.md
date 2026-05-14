@@ -12,7 +12,8 @@ src/
 │   ├── env.ts         Loads PRIVATE_KEY + RPC URLs from process.env
 │   └── format.ts      Pretty-printing + small logging helpers
 ├── api/
-│   └── quote-susds.ts        Request a hosted API quote without sending it.
+│   ├── quote-susds.ts        Request a hosted API quote without sending it.
+│   └── execute-quote-viem.ts Request a hosted API quote and send it with viem.
 ├── dry-run/
 │   ├── inspect-plan.ts        Build a plan without sending it. No funds needed.
 │   └── susds-apy.ts           Read the live sUSDS APY on every supported chain.
@@ -43,6 +44,9 @@ pnpm --filter @osero/examples dry-run:susds-apy
 # Osero API quote example (no private key, no tx): requires OSERO_API_KEY.
 pnpm --filter @osero/examples api:quote-susds
 
+# Osero API quote execution: requires OSERO_API_KEY + PRIVATE_KEY.
+pnpm --filter @osero/examples api:execute-quote-viem
+
 # viem examples
 pnpm --filter @osero/examples viem:mint-usds
 pnpm --filter @osero/examples viem:mint-susds-mainnet
@@ -59,10 +63,12 @@ pnpm --filter @osero/examples ethers:roundtrip
 > and double-check the chain ID and amounts printed at the top of
 > each script before confirming.
 
-The `api:*` examples are read-only from your wallet's perspective.
-They call the hosted Osero API and print ready-to-sign transactions,
-but they do not require `PRIVATE_KEY` and do not broadcast. Set
-`OSERO_API_KEY` in `examples/.env` or inline before running them.
+The `api:quote-susds` example is read-only from your wallet's
+perspective. It calls the hosted Osero API and prints ready-to-sign
+transactions, but does not require `PRIVATE_KEY` and does not broadcast.
+The `api:execute-quote-viem` example uses the same hosted quote shape,
+then passes `quote.value.executionPlan` to `sendWith(wallet)` and
+broadcasts real transactions from `PRIVATE_KEY`.
 
 ## The mental model in ~40 lines
 
@@ -96,6 +102,25 @@ The API example shows the hosted route-building side of the SDK:
 Ethereum sUSDS quote, and prints the `ExecutionPlan` attached to the
 API response. That plan uses the same adapter-compatible structure as
 the local action builders.
+
+The API execution example takes that one step further:
+
+```ts
+const quote = await api.getSwapQuote(request);
+if (quote.isErr()) throw quote.error;
+
+const result = await sendWith(wallet, quote.value.executionPlan);
+```
+
+If you prefer a single `ResultAsync` pipeline, map the API response to
+its plan before handing it to the wallet adapter:
+
+```ts
+const result = await api
+  .getSwapQuote(request)
+  .map((quote) => quote.executionPlan)
+  .andThen(sendWith(wallet));
+```
 
 That dichotomy is the whole SDK — everything else is routing per
 chain. On L2s the plans are `Erc20ApprovalRequired` (PSM3 swap). On

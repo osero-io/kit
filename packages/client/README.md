@@ -243,6 +243,19 @@ console.log('sUSDS out:', quote.value.quote.amountOut?.formatted);
 console.log(flattenExecutionPlan(quote.value.executionPlan));
 ```
 
+To execute the hosted quote through a wallet, hand off the attached
+`executionPlan` to the same viem or ethers adapter used by local action
+builders:
+
+```ts
+import { sendWith } from '@osero/client/viem';
+
+const result = await api
+  .getSwapQuote(request)
+  .map((quote) => quote.executionPlan)
+  .andThen(sendWith(wallet));
+```
+
 Common calls:
 
 - `getSupportedAssets()` returns the public asset IDs accepted by the
