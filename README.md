@@ -174,10 +174,28 @@ if (quote.isOk()) {
 }
 ```
 
+To broadcast the hosted quote, pass the attached `executionPlan` to the
+same wallet adapter used by local SDK actions:
+
+```ts
+import { sendWith } from '@osero/client/viem';
+
+const result = await api
+  .getSwapQuote(request)
+  .map((quote) => quote.executionPlan)
+  .andThen(sendWith(wallet));
+```
+
 Run the API example without a private key:
 
 ```bash
 OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-susds
+```
+
+Run the API-to-viem broadcast example with an API key and funded wallet:
+
+```bash
+OSERO_API_KEY=osero_... PRIVATE_KEY=0x... pnpm --filter @osero/examples api:execute-quote-viem
 ```
 
 ## Preview a Flow Before Sending
