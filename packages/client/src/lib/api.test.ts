@@ -29,6 +29,10 @@ const OVERRIDE_API_KEY = 'osero_override-key_123';
 const API_KEY = 'osero_test-key_123';
 const UNKNOWN_API_KEY = 'osero_unknown-key_123';
 const INVALID_API_KEY = 'bad-key';
+const LARGE_HEX_TRANSACTION_VALUE = '0x1000000000000000A';
+const LARGE_HEX_TRANSACTION_VALUE_DECIMAL = BigInt(LARGE_HEX_TRANSACTION_VALUE).toString();
+const UINT256_OVERFLOW_DECIMAL = (2n ** 256n).toString();
+const UINT256_OVERFLOW_HEX = `0x1${'0'.repeat(64)}`;
 
 type FetchCall = {
   readonly url: string;
@@ -353,7 +357,7 @@ describe('OseroApiClient', () => {
     }
   });
 
-  it('normalizes transaction values encoded as JSON numbers or hex strings', async () => {
+  it('normalizes JSON numbers and mixed-case hex transaction values', async () => {
     const { fetch } = makeFetch(
       jsonResponse({
         ...toSusdsQuoteResponse,
@@ -368,7 +372,7 @@ describe('OseroApiClient', () => {
           ...toSusdsQuoteResponse.execution,
           transaction: {
             ...toSusdsQuoteResponse.execution.transaction,
-            value: '0x7b',
+            value: LARGE_HEX_TRANSACTION_VALUE,
           },
         },
       }),
@@ -391,11 +395,11 @@ describe('OseroApiClient', () => {
       );
       const transactions = flattenExecutionPlan(result.value.executionPlan);
       expect(result.value.approval.transaction.value).toBe('0');
-      expect(result.value.execution.transaction.value).toBe('123');
+      expect(result.value.execution.transaction.value).toBe(LARGE_HEX_TRANSACTION_VALUE_DECIMAL);
       expect(transactions[0]!.value).toBe(0n);
-      expect(transactions[1]!.value).toBe(123n);
+      expect(transactions[1]!.value).toBe(BigInt(LARGE_HEX_TRANSACTION_VALUE));
       expect(executionResult.isOk()).toBe(true);
-      expect(txCalls.map((tx) => tx.value)).toEqual([0n, 123n]);
+      expect(txCalls.map((tx) => tx.value)).toEqual([0n, BigInt(LARGE_HEX_TRANSACTION_VALUE)]);
     }
   });
 
@@ -455,39 +459,55 @@ describe('OseroApiClient', () => {
     }
   });
 
-  it('does not call the web3 transaction handler when quote decoding fails', async () => {
-    const { fetch } = makeFetch(
-      jsonResponse({
-        ...toSusdsQuoteResponse,
-        approval: {
-          ...toSusdsQuoteResponse.approval,
-          transaction: {
-            ...toSusdsQuoteResponse.approval.transaction,
-            value: Number.MAX_SAFE_INTEGER + 1,
+  it.each([
+    ['negative number', -1],
+    ['unsafe number', Number.MAX_SAFE_INTEGER + 1],
+    ['float', 1.5],
+    ['empty hex', '0x'],
+    ['uppercase hex prefix', '0X7b'],
+    ['invalid hex', '0xZZ'],
+    ['garbage string', 'abc'],
+    ['leading zero decimal', '01'],
+    ['negative string', '-1'],
+    ['decimal string float', '1.0'],
+    ['uint256 decimal overflow', UINT256_OVERFLOW_DECIMAL],
+    ['uint256 hex overflow', UINT256_OVERFLOW_HEX],
+  ] as const)(
+    'does not call the web3 transaction handler when transaction.value is %s',
+    async (_name, value) => {
+      const { fetch } = makeFetch(
+        jsonResponse({
+          ...toSusdsQuoteResponse,
+          approval: {
+            ...toSusdsQuoteResponse.approval,
+            transaction: {
+              ...toSusdsQuoteResponse.approval.transaction,
+              value,
+            },
           },
-        },
-      }),
-    );
-    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
-    const txCalls: TransactionRequest[] = [];
-    const executor = makeRecordingExecutor(txCalls);
+        }),
+      );
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+      const txCalls: TransactionRequest[] = [];
+      const executor = makeRecordingExecutor(txCalls);
 
-    const result = await client
-      .getSwapQuote({
-        fromAddress: WALLET,
-        fromAssetId: 'base:usdc',
-        toAssetId: 'ethereum:susds',
-        amount: 1_000_000n,
-      })
-      .andThen((quote) => runExecutionPlan(quote.executionPlan, executor));
+      const result = await client
+        .getSwapQuote({
+          fromAddress: WALLET,
+          fromAssetId: 'base:usdc',
+          toAssetId: 'ethereum:susds',
+          amount: 1_000_000n,
+        })
+        .andThen((quote) => runExecutionPlan(quote.executionPlan, executor));
 
-    expect(result.isErr()).toBe(true);
-    expect(txCalls).toHaveLength(0);
-    expect(executor).not.toHaveBeenCalled();
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-    }
-  });
+      expect(result.isErr()).toBe(true);
+      expect(txCalls).toHaveLength(0);
+      expect(executor).not.toHaveBeenCalled();
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(UnexpectedError);
+      }
+    },
+  );
 
   it.each([
     ['approval', 1, ['APPROVE_ERC20']],
