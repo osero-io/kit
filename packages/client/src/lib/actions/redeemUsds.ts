@@ -231,14 +231,17 @@ function buildL2Plan(
   request: RedeemUsdsRequest,
   receiver: Address,
   referralCode: bigint,
-): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
+): ResultAsync<Erc20ApprovalRequired, ValidationError | UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
   const usds = getToken(chain.chainId, 'USDS');
   const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
-  return quoteL2RedeemUsds(client, chain, request.amount).map((quote): Erc20ApprovalRequired => {
+  return quoteL2RedeemUsds(client, chain, request.amount).andThen((quote) => {
     const minAmountOut = applySlippage(quote, slippageBps);
+    if (minAmountOut === 0n) {
+      return errAsync(ValidationError.forField('amount', ZERO_USDC_OUTPUT_ERROR));
+    }
 
     const swapData = encodeFunctionData({
       abi: psm3Abi,
@@ -254,14 +257,16 @@ function buildL2Plan(
       operation: 'REDEEM_USDS_FOR_USDC',
     });
 
-    return makeSingleApprovalPlan({
-      chainId: chain.chainId,
-      from: request.sender,
-      token: usds.address,
-      spender: psmAddress,
-      amount: request.amount,
-      mainTransaction,
-    });
+    return okAsync(
+      makeSingleApprovalPlan({
+        chainId: chain.chainId,
+        from: request.sender,
+        token: usds.address,
+        spender: psmAddress,
+        amount: request.amount,
+        mainTransaction,
+      }),
+    );
   });
 }
 

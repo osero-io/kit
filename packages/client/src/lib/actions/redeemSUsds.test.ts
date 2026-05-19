@@ -160,6 +160,32 @@ describe('redeemSUsds', () => {
       }
     });
 
+    it('allows the smallest mainnet redemption that buys 1 USDC atom', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 0 });
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'previewRedeem') return 1_000_000_000_000n;
+        if (functionName === 'tout') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 1,
+        amount: 1n,
+        sender: SENDER,
+      });
+
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+      const step2 = result.value.steps[1]!;
+      if (step2.__typename !== 'Erc20ApprovalRequired') return;
+      const buyGem = decodeFunctionData({
+        abi: usdsPsmWrapperAbi,
+        data: step2.originalTransaction.data,
+      });
+      expect(buyGem.args?.[1]).toBe(1n);
+    });
+
     it('builds a two-phase plan: redeem then approve+buyGem', async () => {
       const client = OseroClient.create({ defaultSlippageBps: 5 });
       const shares = parseUnits('1000', 18);
@@ -214,6 +240,29 @@ describe('redeemSUsds', () => {
   });
 
   describe('L2 (chain 8453, Base)', () => {
+    it('rejects an L2 redemption whose slippage-adjusted minimum output is 0 USDC', async () => {
+      const client = OseroClient.create();
+      installMockPublicClient(client, 8453, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 8453,
+        amount: 1n,
+        sender: SENDER,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+        expect(result.error).toMatchObject({
+          context: { field: 'amount' },
+          message: 'amount too small: would produce 0 USDC output',
+        });
+      }
+    });
+
     it('builds an Erc20ApprovalRequired via PSM3.swapExactIn(sUSDS, USDC)', async () => {
       const client = OseroClient.create({ defaultSlippageBps: 5 });
       const quote = 999_500_000n;
