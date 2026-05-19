@@ -1,7 +1,7 @@
 import type { Chain } from 'viem';
 import { vi } from 'vitest';
 
-import { UnexpectedError } from './lib/errors.js';
+import { TransactionError, UnexpectedError } from './lib/errors.js';
 import { makeTransactionRequest } from './lib/plan.js';
 import { sendWith, type ConnectedWalletClient } from './viem.js';
 
@@ -80,5 +80,26 @@ describe('viem sendWith', () => {
       hash: txHash,
       confirmations: 1,
     });
+  });
+
+  it('continues to expose the transaction hash for reverted receipts', async () => {
+    viemActions.estimateGas.mockResolvedValue(100_000n);
+    viemActions.sendTransaction.mockResolvedValue(txHash);
+    viemActions.waitForTransactionReceipt.mockResolvedValue({
+      status: 'reverted',
+      transactionHash: txHash,
+    });
+
+    const result = await sendWith(walletClient, request);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      const error = result.error;
+      expect(error).toBeInstanceOf(TransactionError);
+      if (!(error instanceof TransactionError)) {
+        throw new Error(`Expected TransactionError, received ${error.name}`);
+      }
+      expect(error.txHash).toBe(txHash);
+    }
   });
 });

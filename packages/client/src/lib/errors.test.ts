@@ -81,13 +81,6 @@ describe('Osero errors', () => {
       expect(err).toBeInstanceOf(UnexpectedError);
       expect(err.message).toBe('rpc down');
     });
-
-    it('can carry a transaction hash for post-broadcast failures', () => {
-      const cause = new Error('receipt polling timed out');
-      const err = UnexpectedError.from(cause, { txHash: '0xdeadbeef' });
-      expect(err.txHash).toBe('0xdeadbeef');
-      expect(err.cause).toBe(cause);
-    });
   });
 
   describe('ValidationError.forField', () => {

@@ -80,13 +80,16 @@ function sendSingleTransaction(
         mapSendError,
       ),
     )
-    .andThen((response: TransactionResponse) =>
-      ResultAsync.fromPromise(response.wait(confirmations), (err) =>
-        UnexpectedError.from(err),
+    .andThen((response: TransactionResponse) => {
+      const txHash = response.hash as `0x${string}`;
+      return ResultAsync.fromPromise(response.wait(confirmations), (err) =>
+        UnexpectedError.from(err, { txHash }),
       ).andThen((receipt) => {
         if (!receipt) {
           return errAsync(
-            UnexpectedError.from(new Error(`ethers wait() returned null for tx ${response.hash}`)),
+            UnexpectedError.from(new Error(`ethers wait() returned null for tx ${response.hash}`), {
+              txHash,
+            }),
           );
         }
         if (receipt.status === 0) {
@@ -97,8 +100,8 @@ function sendSingleTransaction(
           );
         }
         return okAsync(receipt.hash as `0x${string}`);
-      }),
-    );
+      });
+    });
 }
 
 function buildExecutor(signer: Signer, confirmations: number): SingleTxExecutor {
