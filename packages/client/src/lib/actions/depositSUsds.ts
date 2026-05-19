@@ -110,7 +110,9 @@ export function previewDepositSUsds(
  * Build an {@link ExecutionPlan} that deposits existing USDS into
  * sUSDS. This is useful when a prior mainnet {@link mintSUsds}
  * execution completed the USDC -> USDS step but stopped before the
- * final sUSDS deposit.
+ * final sUSDS deposit. If a prior {@link redeemSUsds} execution left
+ * the wallet holding USDS, use {@link redeemUsds} to continue from
+ * USDS to USDC.
  *
  * ### Mainnet path
  *
@@ -125,6 +127,18 @@ export function previewDepositSUsds(
  *
  * 1. `USDS.approve(PSM3, amount)`
  * 2. `PSM3.swapExactIn(USDS, sUSDS, amount, minShares, receiver, 0)`
+ *
+ * ```ts
+ * import { depositSUsds } from '@osero/client/actions';
+ * import { sendWith } from '@osero/client/viem';
+ * import { parseUnits } from 'viem';
+ *
+ * const result = await depositSUsds(client, {
+ *   chainId: 1,
+ *   amount: parseUnits('1000', 18),
+ *   sender: wallet.account.address,
+ * }).andThen(sendWith(wallet));
+ * ```
  */
 export function depositSUsds(
   client: OseroClient,

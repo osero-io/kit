@@ -68,6 +68,32 @@ describe('depositSUsds', () => {
   });
 
   describe('previewDepositSUsds', () => {
+    it('rejects an unsupported chain', async () => {
+      const client = OseroClient.create();
+      const result = await previewDepositSUsds(client, {
+        chainId: 137,
+        amount: 1n,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(UnsupportedChainError);
+      }
+    });
+
+    it('rejects a zero amount', async () => {
+      const client = OseroClient.create();
+      const result = await previewDepositSUsds(client, {
+        chainId: 1,
+        amount: 0n,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+      }
+    });
+
     it('previews the mainnet sUSDS output via previewDeposit', async () => {
       const client = OseroClient.create();
       const amount = parseUnits('1000', 18);
