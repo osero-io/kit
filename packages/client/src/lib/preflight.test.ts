@@ -2,7 +2,7 @@ import { parseUnits } from 'viem';
 import { vi } from 'vitest';
 
 import { PSM_ADDRESSES } from './addresses.js';
-import { UnexpectedError } from './errors.js';
+import { SlippageError, UnexpectedError } from './errors.js';
 import { applySlippage, usdsFromUsdcViaSellGem } from './math.js';
 import { makeTransactionRequest } from './plan.js';
 import { runTransactionPreflightChecks, type PreflightReaders } from './preflight.js';
@@ -51,8 +51,13 @@ describe('runTransactionPreflightChecks', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(SlippageError);
       expect(result.error).toBeInstanceOf(UnexpectedError);
       expect(result.error.message).toContain('below guarded minimum');
+      if (result.error instanceof SlippageError) {
+        expect(result.error.actualOutput).toBe(usdsFromUsdcViaSellGem(amount, 10n ** 16n));
+        expect(result.error.minimumOutput).toBe(minUsdsOut);
+      }
     }
   });
 });

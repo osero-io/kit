@@ -4,7 +4,7 @@ import { vi } from 'vitest';
 
 import { installMockPublicClient } from './lib/actions/_testing.js';
 import { mintUsds } from './lib/actions/mintUsds.js';
-import { UnexpectedError } from './lib/errors.js';
+import { SlippageError, UnexpectedError } from './lib/errors.js';
 import { OseroClient } from './lib/OseroClient.js';
 import { sendWith } from './viem.js';
 
@@ -62,6 +62,7 @@ describe('viem preflight checks', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(SlippageError);
       expect(result.error).toBeInstanceOf(UnexpectedError);
       expect(result.error.message).toContain('below guarded minimum');
     }

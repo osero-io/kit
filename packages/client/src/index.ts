@@ -121,6 +121,7 @@ export {
   InsufficientBalanceError,
   OseroError,
   SigningError,
+  SlippageError,
   TransactionError,
   UnexpectedError,
   UnsupportedChainError,

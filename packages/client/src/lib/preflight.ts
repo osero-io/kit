@@ -1,6 +1,6 @@
 import type { Address } from 'viem';
 
-import { UnexpectedError } from './errors.js';
+import { SlippageError, UnexpectedError } from './errors.js';
 import { usdsFromUsdcViaSellGem } from './math.js';
 import { errAsync, okAsync, type ResultAsync } from './result.js';
 import type { TransactionPreflightCheck, TransactionRequest } from './types.js';
@@ -31,11 +31,11 @@ function runTransactionPreflightCheck(
         const liveUsdsOut = usdsFromUsdcViaSellGem(check.amount, tin);
         if (liveUsdsOut < check.minUsdsOut) {
           return errAsync(
-            UnexpectedError.from(
-              new Error(
-                `Mainnet mintUsds preflight failed: live Lite PSM tin ${tin.toString()} returns ${liveUsdsOut.toString()} USDS wei, below guarded minimum ${check.minUsdsOut.toString()}`,
-              ),
-            ),
+            SlippageError.fromQuote({
+              actualOutput: liveUsdsOut,
+              minimumOutput: check.minUsdsOut,
+              message: `Mainnet mintUsds preflight failed: live Lite PSM tin ${tin.toString()} returns ${liveUsdsOut.toString()} USDS wei, below guarded minimum ${check.minUsdsOut.toString()}`,
+            }),
           );
         }
         return okAsync(undefined);

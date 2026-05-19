@@ -4,6 +4,7 @@ import type {
   CancelError,
   InsufficientBalanceError,
   SigningError,
+  SlippageError,
   TransactionError,
   UnexpectedError,
   UnsupportedChainError,
@@ -122,7 +123,12 @@ export type TransactionResult = {
 /**
  * Every error an {@link ExecutionPlanHandler} can produce.
  */
-export type SendWithError = CancelError | SigningError | TransactionError | UnexpectedError;
+export type SendWithError =
+  | CancelError
+  | SigningError
+  | TransactionError
+  | SlippageError
+  | UnexpectedError;
 
 /**
  * An executor function that takes an {@link ExecutionPlan} and runs it

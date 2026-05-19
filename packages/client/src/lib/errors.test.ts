@@ -3,6 +3,7 @@ import {
   InsufficientBalanceError,
   OseroError,
   SigningError,
+  SlippageError,
   TransactionError,
   UnexpectedError,
   UnsupportedChainError,
@@ -22,6 +23,7 @@ describe('Osero errors', () => {
         required: 1n,
         available: 0n,
       }),
+      new SlippageError('x', { actualOutput: 1n, minimumOutput: 2n }),
       new UnexpectedError('x'),
     ];
     for (const err of errors) {
@@ -43,6 +45,9 @@ describe('Osero errors', () => {
         available: 0n,
       }).name,
     ).toBe('InsufficientBalanceError');
+    expect(new SlippageError('x', { actualOutput: 1n, minimumOutput: 2n }).name).toBe(
+      'SlippageError',
+    );
     expect(new UnexpectedError('x').name).toBe('UnexpectedError');
   });
 
@@ -71,6 +76,21 @@ describe('Osero errors', () => {
       const err = UnexpectedError.from(new Error('rpc down'));
       expect(err).toBeInstanceOf(UnexpectedError);
       expect(err.message).toBe('rpc down');
+    });
+  });
+
+  describe('SlippageError.fromQuote', () => {
+    it('captures actual and minimum output amounts', () => {
+      const err = SlippageError.fromQuote({
+        actualOutput: 99n,
+        minimumOutput: 100n,
+      });
+
+      expect(err).toBeInstanceOf(SlippageError);
+      expect(err).toBeInstanceOf(UnexpectedError);
+      expect(err.actualOutput).toBe(99n);
+      expect(err.minimumOutput).toBe(100n);
+      expect(err.message).toContain('below minimum');
     });
   });
 
