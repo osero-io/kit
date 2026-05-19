@@ -67,10 +67,26 @@ describe('Osero errors', () => {
       expect(UnexpectedError.from(original)).toBe(original);
     });
 
+    it('preserves an explicit tx hash when wrapping an existing UnexpectedError', () => {
+      const original = new UnexpectedError('receipt polling timed out');
+      const err = UnexpectedError.from(original, { txHash: '0xdeadbeef' });
+      expect(err).not.toBe(original);
+      expect(err.message).toBe(original.message);
+      expect(err.txHash).toBe('0xdeadbeef');
+      expect(err.cause).toBe(original);
+    });
+
     it('wraps any other error', () => {
       const err = UnexpectedError.from(new Error('rpc down'));
       expect(err).toBeInstanceOf(UnexpectedError);
       expect(err.message).toBe('rpc down');
+    });
+
+    it('can carry a transaction hash for post-broadcast failures', () => {
+      const cause = new Error('receipt polling timed out');
+      const err = UnexpectedError.from(cause, { txHash: '0xdeadbeef' });
+      expect(err.txHash).toBe('0xdeadbeef');
+      expect(err.cause).toBe(cause);
     });
   });
 

@@ -107,7 +107,7 @@ function sendSingleTransaction(
           hash,
           confirmations,
         }),
-        (err) => UnexpectedError.from(err),
+        (err) => UnexpectedError.from(err, { txHash: hash }),
       ).andThen((receipt) => {
         if (receipt.status === 'reverted') {
           const explorer = walletClient.chain.blockExplorers?.default?.url;
