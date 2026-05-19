@@ -50,7 +50,9 @@ export type MintUsdsRequest = {
    * On Ethereum mainnet this is applied to the current Lite PSM
    * `tin()` quote and enforced as a pre-send guard by the SDK wallet
    * adapters because `UsdsPsmWrapper.sellGem` has no `minOut`
-   * argument.
+   * argument. This catches fee changes before broadcast; a same-block
+   * fee change after the guard runs is still outside what the SDK can
+   * enforce without an on-chain min-out wrapper.
    *
    * @defaultValue {@link ClientConfig.defaultSlippageBps} (5 bps)
    */
@@ -125,6 +127,13 @@ export function previewMintUsds(
  *
  * 1. `USDC.approve(UsdsPsmWrapper, amount)`
  * 2. `UsdsPsmWrapper.sellGem(receiver, amount)`
+ *
+ * Because mainnet `sellGem` has no `minOut` argument, SDK adapters
+ * re-read Lite PSM `tin()` immediately before broadcasting `sellGem`
+ * and reject if the live quote is below the request's slippage guard.
+ * A governance fee change that lands after that preflight read can
+ * still affect the mined output; closing that final window requires an
+ * on-chain wrapper that enforces `minOut`.
  *
  * In both cases the return type is an
  * {@link Erc20ApprovalRequired}, ready to be piped into `sendWith`:
