@@ -15,6 +15,7 @@ import { mintUsds, previewMintUsds } from './mintUsds.js';
 const SENDER = '0x1111111111111111111111111111111111111111' as const;
 const RECEIVER = '0x2222222222222222222222222222222222222222' as const;
 const PSM_OVERRIDE = '0x3333333333333333333333333333333333333333' as const;
+const LITE_PSM_OVERRIDE = '0x4444444444444444444444444444444444444444' as const;
 
 describe('mintUsds', () => {
   it('rejects an unsupported chain', async () => {
@@ -112,6 +113,31 @@ describe('mintUsds', () => {
         amount,
       });
 
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value).toBe(usdsFromUsdcViaSellGem(amount, tin));
+    });
+
+    it('uses a configured mainnet Lite PSM override when previewing tin', async () => {
+      const client = OseroClient.create({
+        addressOverrides: {
+          1: { litePsm: LITE_PSM_OVERRIDE },
+        },
+      });
+      const amount = parseUnits('100', 6);
+      const tin = 10n ** 16n;
+      const mock = installMockPublicClient(client, 1, ({ address, functionName }) => {
+        expect(address).toBe(LITE_PSM_OVERRIDE);
+        if (functionName === 'tin') return tin;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await previewMintUsds(client, {
+        chainId: 1,
+        amount,
+      });
+
+      expect(mock.readContract).toHaveBeenCalledOnce();
       expect(result.isOk()).toBe(true);
       if (!result.isOk()) return;
       expect(result.value).toBe(usdsFromUsdcViaSellGem(amount, tin));

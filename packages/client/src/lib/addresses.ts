@@ -81,10 +81,8 @@ export function ensurePsmTargetHasCode(
   client: OseroClient,
   chainId: OseroChainId,
   address: Address,
-  label: 'psm' | 'litePsm' = 'psm',
 ): ResultAsync<void, UnexpectedError> {
   const publicClient = client.getPublicClient(chainId);
-  const targetName = label === 'litePsm' ? 'Lite PSM' : 'PSM';
 
   return ResultAsync.fromPromise(publicClient.getCode({ address }), (err) =>
     UnexpectedError.from(err),
@@ -96,7 +94,7 @@ export function ensurePsmTargetHasCode(
     return errAsync(
       UnexpectedError.from(
         new Error(
-          `No contract code found at configured ${targetName} address ${address} on chain ${chainId}`,
+          `No contract code found at configured PSM address ${address} on chain ${chainId}`,
         ),
       ),
     );
