@@ -50,6 +50,11 @@ export function isMultiStepExecution(plan: ExecutionPlan): plan is MultiStepExec
  * Useful for previews, gas estimation, and inspection. The adapters
  * use this internally too — it keeps the viem and ethers send loops
  * identical aside from the actual `sendTransaction` call.
+ *
+ * Dynamic `refresh` hooks are not executed here. For refreshable
+ * multi-step plans this returns the static fallback transactions that
+ * are suitable for display, not necessarily the exact phase-2 calldata
+ * the SDK adapters will rebuild during execution.
  */
 export function flattenExecutionPlan(plan: ExecutionPlan): readonly TransactionRequest[] {
   if (isTransactionRequest(plan)) {

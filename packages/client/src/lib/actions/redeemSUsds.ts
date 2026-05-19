@@ -1,6 +1,7 @@
 import {
   type Address,
   encodeFunctionData,
+  type Hex,
   isAddressEqual,
   parseEventLogs,
   type TransactionReceipt,
@@ -216,8 +217,18 @@ function buildMainnetPlan(
           tout,
           slippageBps,
         }),
-        refresh: (context: ExecutionStepRefreshContext) =>
-          refreshMainnetRedeemSUsdsPhase2(client, chain, {
+        refresh: (context: ExecutionStepRefreshContext) => {
+          if (!context.previousTxHash) {
+            return errAsync(
+              UnexpectedError.from(
+                new Error(
+                  'Cannot refresh mainnet redeemSUsds phase 2 without a redeem transaction hash',
+                ),
+              ),
+            );
+          }
+
+          return refreshMainnetRedeemSUsdsPhase2(client, chain, {
             redeemTxHash: context.previousTxHash,
             shares: request.amount,
             sender: request.sender,
@@ -227,7 +238,8 @@ function buildMainnetPlan(
             wrapperAddress,
             litePsmAddress,
             slippageBps,
-          }),
+          });
+        },
       } satisfies Erc20ApprovalRequired;
 
       return makeMultiStepPlan([redeemTx, phase2]);
@@ -275,7 +287,7 @@ function refreshMainnetRedeemSUsdsPhase2(
   client: OseroClient,
   chain: ChainMetadata,
   args: {
-    readonly redeemTxHash?: `0x${string}`;
+    readonly redeemTxHash: Hex;
     readonly shares: bigint;
     readonly sender: Address;
     readonly receiver: Address;
@@ -286,17 +298,8 @@ function refreshMainnetRedeemSUsdsPhase2(
     readonly slippageBps: number;
   },
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
-  const redeemTxHash = args.redeemTxHash;
-  if (!redeemTxHash) {
-    return errAsync(
-      UnexpectedError.from(
-        new Error('Cannot refresh mainnet redeemSUsds phase 2 without a redeem transaction hash'),
-      ),
-    );
-  }
-
   return readConfirmedMainnetRedeemSUsdsPhase2Inputs(client, chain, {
-    redeemTxHash,
+    redeemTxHash: args.redeemTxHash,
     shares: args.shares,
     sender: args.sender,
     susds: args.susds,
