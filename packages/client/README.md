@@ -120,23 +120,25 @@ Every action returns a `ResultAsync<ExecutionPlan, …>` that you pipe
 into `sendWith` (from either `@osero/client/viem` or
 `@osero/client/ethers`) to execute.
 
-| Action        | Direction    | Mainnet shape      | L2 shape            |
-| ------------- | ------------ | ------------------ | ------------------- |
-| `mintUsds`    | USDC → USDS  | approve + sellGem  | approve + PSM3 swap |
-| `mintSUsds`   | USDC → sUSDS | four-tx two-phase  | approve + PSM3 swap |
-| `redeemUsds`  | USDS → USDC  | approve + buyGem   | approve + PSM3 swap |
-| `redeemSUsds` | sUSDS → USDC | three-tx two-phase | approve + PSM3 swap |
+| Action         | Direction    | Mainnet shape      | L2 shape            |
+| -------------- | ------------ | ------------------ | ------------------- |
+| `depositSUsds` | USDS → sUSDS | approve + deposit  | approve + PSM3 swap |
+| `mintUsds`     | USDC → USDS  | approve + sellGem  | approve + PSM3 swap |
+| `mintSUsds`    | USDC → sUSDS | four-tx two-phase  | approve + PSM3 swap |
+| `redeemUsds`   | USDS → USDC  | approve + buyGem   | approve + PSM3 swap |
+| `redeemSUsds`  | sUSDS → USDC | three-tx two-phase | approve + PSM3 swap |
 
 Matching preview helpers return the quoted output amount as a raw
 `bigint` wrapped in `ResultAsync`. They only take `chainId` and
 `amount` because they do not build a sender-specific execution plan:
 
-| Preview helper       | Quotes       | Input decimals |
-| -------------------- | ------------ | -------------: |
-| `previewMintUsds`    | USDC → USDS  |              6 |
-| `previewMintSUsds`   | USDC → sUSDS |              6 |
-| `previewRedeemUsds`  | USDS → USDC  |             18 |
-| `previewRedeemSUsds` | sUSDS → USDC |             18 |
+| Preview helper        | Quotes       | Input decimals |
+| --------------------- | ------------ | -------------: |
+| `previewDepositSUsds` | USDS → sUSDS |             18 |
+| `previewMintUsds`     | USDC → USDS  |              6 |
+| `previewMintSUsds`    | USDC → sUSDS |              6 |
+| `previewRedeemUsds`   | USDS → USDC  |             18 |
+| `previewRedeemSUsds`  | sUSDS → USDC |             18 |
 
 ```ts
 import { previewMintSUsds } from '@osero/client/actions';

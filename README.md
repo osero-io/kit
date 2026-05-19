@@ -225,8 +225,10 @@ Import actions from `@osero/client/actions`:
 
 ```ts
 import {
+  depositSUsds,
   mintSUsds,
   mintUsds,
+  previewDepositSUsds,
   previewMintSUsds,
   previewMintUsds,
   previewRedeemSUsds,
@@ -236,21 +238,23 @@ import {
 } from '@osero/client/actions';
 ```
 
-| Action        | Direction     | Input decimals |
-| ------------- | ------------- | -------------: |
-| `mintUsds`    | USDC -> USDS  |              6 |
-| `mintSUsds`   | USDC -> sUSDS |              6 |
-| `redeemUsds`  | USDS -> USDC  |             18 |
-| `redeemSUsds` | sUSDS -> USDC |             18 |
+| Action         | Direction     | Input decimals |
+| -------------- | ------------- | -------------: |
+| `depositSUsds` | USDS -> sUSDS |             18 |
+| `mintUsds`     | USDC -> USDS  |              6 |
+| `mintSUsds`    | USDC -> sUSDS |              6 |
+| `redeemUsds`   | USDS -> USDC  |             18 |
+| `redeemSUsds`  | sUSDS -> USDC |             18 |
 
 Matching preview helpers:
 
-| Helper               | Quotes        | Input decimals |
-| -------------------- | ------------- | -------------: |
-| `previewMintUsds`    | USDC -> USDS  |              6 |
-| `previewMintSUsds`   | USDC -> sUSDS |              6 |
-| `previewRedeemUsds`  | USDS -> USDC  |             18 |
-| `previewRedeemSUsds` | sUSDS -> USDC |             18 |
+| Helper                | Quotes        | Input decimals |
+| --------------------- | ------------- | -------------: |
+| `previewDepositSUsds` | USDS -> sUSDS |             18 |
+| `previewMintUsds`     | USDC -> USDS  |              6 |
+| `previewMintSUsds`    | USDC -> sUSDS |              6 |
+| `previewRedeemUsds`   | USDS -> USDC  |             18 |
+| `previewRedeemSUsds`  | sUSDS -> USDC |             18 |
 
 Every action accepts:
 
