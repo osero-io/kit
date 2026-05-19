@@ -2,6 +2,7 @@ import {
   CancelError,
   InsufficientBalanceError,
   OseroError,
+  ReceiptPollingError,
   SigningError,
   TransactionError,
   UnexpectedError,
@@ -22,6 +23,7 @@ describe('Osero errors', () => {
         required: 1n,
         available: 0n,
       }),
+      new ReceiptPollingError('x', { txHash: '0xabcd' }),
       new UnexpectedError('x'),
     ];
     for (const err of errors) {
@@ -43,6 +45,7 @@ describe('Osero errors', () => {
         available: 0n,
       }).name,
     ).toBe('InsufficientBalanceError');
+    expect(new ReceiptPollingError('x', { txHash: '0xabcd' }).name).toBe('ReceiptPollingError');
     expect(new UnexpectedError('x').name).toBe('UnexpectedError');
   });
 
@@ -80,6 +83,19 @@ describe('Osero errors', () => {
       const err = UnexpectedError.from(new Error('rpc down'));
       expect(err).toBeInstanceOf(UnexpectedError);
       expect(err.message).toBe('rpc down');
+    });
+  });
+
+  describe('ReceiptPollingError.forTransaction', () => {
+    it('preserves the broadcast transaction hash and cause', () => {
+      const cause = new Error('receipt polling timed out');
+      const err = ReceiptPollingError.forTransaction(cause, { txHash: '0xdeadbeef' });
+
+      expect(err).toBeInstanceOf(ReceiptPollingError);
+      expect(err).toBeInstanceOf(UnexpectedError);
+      expect(err.txHash).toBe('0xdeadbeef');
+      expect(err.message).toBe(cause.message);
+      expect(err.cause).toBe(cause);
     });
   });
 

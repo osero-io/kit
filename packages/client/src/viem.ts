@@ -13,7 +13,13 @@ import {
 } from 'viem/actions';
 
 import { type SingleTxExecutor, runExecutionPlan } from './lib/adapters.js';
-import { CancelError, SigningError, TransactionError, UnexpectedError } from './lib/errors.js';
+import {
+  CancelError,
+  ReceiptPollingError,
+  SigningError,
+  TransactionError,
+  UnexpectedError,
+} from './lib/errors.js';
 import { errAsync, okAsync, ResultAsync } from './lib/result.js';
 import type {
   ExecutionPlan,
@@ -107,7 +113,7 @@ function sendSingleTransaction(
           hash,
           confirmations,
         }),
-        (err) => UnexpectedError.from(err, { txHash: hash }),
+        (err) => ReceiptPollingError.forTransaction(err, { txHash: hash }),
       ).andThen((receipt) => {
         if (receipt.status === 'reverted') {
           const explorer = walletClient.chain.blockExplorers?.default?.url;

@@ -1,7 +1,7 @@
 import type { Signer, TransactionResponse } from 'ethers';
 
 import { sendWith } from './ethers.js';
-import { UnexpectedError } from './lib/errors.js';
+import { ReceiptPollingError, UnexpectedError } from './lib/errors.js';
 import { makeTransactionRequest } from './lib/plan.js';
 
 const from = '0x1111111111111111111111111111111111111111';
@@ -31,9 +31,10 @@ describe('ethers sendWith', () => {
     expect(result.isErr()).toBe(true);
     if (result.isErr()) {
       const error = result.error;
+      expect(error).toBeInstanceOf(ReceiptPollingError);
       expect(error).toBeInstanceOf(UnexpectedError);
-      if (!(error instanceof UnexpectedError)) {
-        throw new Error(`Expected UnexpectedError, received ${error.name}`);
+      if (!(error instanceof ReceiptPollingError)) {
+        throw new Error(`Expected ReceiptPollingError, received ${error.name}`);
       }
       expect(error.txHash).toBe(txHash);
       expect(error.cause).toBe(pollingError);
@@ -51,9 +52,10 @@ describe('ethers sendWith', () => {
     expect(result.isErr()).toBe(true);
     if (result.isErr()) {
       const error = result.error;
+      expect(error).toBeInstanceOf(ReceiptPollingError);
       expect(error).toBeInstanceOf(UnexpectedError);
-      if (!(error instanceof UnexpectedError)) {
-        throw new Error(`Expected UnexpectedError, received ${error.name}`);
+      if (!(error instanceof ReceiptPollingError)) {
+        throw new Error(`Expected ReceiptPollingError, received ${error.name}`);
       }
       expect(error.txHash).toBe(txHash);
       expect(error.message).toContain(txHash);

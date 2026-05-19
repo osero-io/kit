@@ -1,7 +1,7 @@
 import type { Chain } from 'viem';
 import { vi } from 'vitest';
 
-import { TransactionError, UnexpectedError } from './lib/errors.js';
+import { ReceiptPollingError, TransactionError, UnexpectedError } from './lib/errors.js';
 import { makeTransactionRequest } from './lib/plan.js';
 import { sendWith, type ConnectedWalletClient } from './viem.js';
 
@@ -69,9 +69,10 @@ describe('viem sendWith', () => {
     expect(result.isErr()).toBe(true);
     if (result.isErr()) {
       const error = result.error;
+      expect(error).toBeInstanceOf(ReceiptPollingError);
       expect(error).toBeInstanceOf(UnexpectedError);
-      if (!(error instanceof UnexpectedError)) {
-        throw new Error(`Expected UnexpectedError, received ${error.name}`);
+      if (!(error instanceof ReceiptPollingError)) {
+        throw new Error(`Expected ReceiptPollingError, received ${error.name}`);
       }
       expect(error.txHash).toBe(txHash);
       expect(error.cause).toBe(pollingError);

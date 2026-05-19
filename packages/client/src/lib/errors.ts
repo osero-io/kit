@@ -231,3 +231,26 @@ export class UnexpectedError extends OseroError {
     });
   }
 }
+
+/**
+ * Raised when a transaction was broadcast successfully but the adapter
+ * could not obtain a usable receipt for it. The transaction may still
+ * be pending or mined later; callers can use {@link ReceiptPollingError.txHash}
+ * to continue tracking it.
+ */
+export class ReceiptPollingError extends UnexpectedError {
+  declare readonly txHash: Hex;
+
+  constructor(message: string, options: ErrorOptions & { readonly txHash: Hex }) {
+    super(message, options);
+    this.name = 'ReceiptPollingError';
+  }
+
+  static forTransaction(cause: unknown, options: { readonly txHash: Hex }): ReceiptPollingError {
+    if (cause instanceof ReceiptPollingError) return cause;
+    return new ReceiptPollingError(extractMessage(cause, 'Failed to poll transaction receipt'), {
+      ...options,
+      cause,
+    });
+  }
+}

@@ -120,6 +120,7 @@ export {
   CancelError,
   InsufficientBalanceError,
   OseroError,
+  ReceiptPollingError,
   SigningError,
   TransactionError,
   UnexpectedError,

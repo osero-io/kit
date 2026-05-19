@@ -3,6 +3,7 @@ import type { Address, Hex } from 'viem';
 import type {
   CancelError,
   InsufficientBalanceError,
+  ReceiptPollingError,
   SigningError,
   TransactionError,
   UnexpectedError,
@@ -106,7 +107,12 @@ export type TransactionResult = {
 /**
  * Every error an {@link ExecutionPlanHandler} can produce.
  */
-export type SendWithError = CancelError | SigningError | TransactionError | UnexpectedError;
+export type SendWithError =
+  | CancelError
+  | SigningError
+  | TransactionError
+  | ReceiptPollingError
+  | UnexpectedError;
 
 /**
  * An executor function that takes an {@link ExecutionPlan} and runs it
