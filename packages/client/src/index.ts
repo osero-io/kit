@@ -121,6 +121,7 @@ export {
   InsufficientBalanceError,
   OseroError,
   SigningError,
+  SlippageError,
   TransactionError,
   UnexpectedError,
   UnsupportedChainError,
@@ -182,8 +183,10 @@ export type {
   ExecutionPlanHandler,
   ExecutionStep,
   MultiStepExecution,
+  MainnetMintUsdsTinPreflightCheck,
   OperationType,
   SendWithError,
+  TransactionPreflightCheck,
   TransactionRequest,
   TransactionResult,
 } from './lib/types.js';

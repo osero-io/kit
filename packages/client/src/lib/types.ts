@@ -4,6 +4,7 @@ import type {
   CancelError,
   InsufficientBalanceError,
   SigningError,
+  SlippageError,
   TransactionError,
   UnexpectedError,
   UnsupportedChainError,
@@ -27,9 +28,24 @@ export type OperationType =
   | 'REDEEM_SUSDS_FOR_USDS';
 
 /**
+ * Guard metadata that wallet adapters can evaluate immediately before
+ * broadcasting a transaction. Custom executors may ignore it, but the
+ * SDK-provided adapters treat failed checks as pre-send failures.
+ */
+export type MainnetMintUsdsTinPreflightCheck = {
+  readonly kind: 'MAINNET_MINT_USDS_TIN';
+  readonly litePsm: Address;
+  readonly amount: bigint;
+  readonly minUsdsOut: bigint;
+};
+
+export type TransactionPreflightCheck = MainnetMintUsdsTinPreflightCheck;
+
+/**
  * A fully-baked EVM transaction that can be handed to a wallet with
  * no further processing. The wallet is responsible only for gas
- * estimation, nonce selection, and signing.
+ * estimation, nonce selection, signing, and any optional preflight
+ * checks attached by SDK action builders.
  */
 export type TransactionRequest = {
   readonly __typename: 'TransactionRequest';
@@ -39,6 +55,7 @@ export type TransactionRequest = {
   readonly data: Hex;
   readonly value: bigint;
   readonly operation: OperationType;
+  readonly preflightChecks?: readonly TransactionPreflightCheck[];
 };
 
 /**
@@ -106,7 +123,12 @@ export type TransactionResult = {
 /**
  * Every error an {@link ExecutionPlanHandler} can produce.
  */
-export type SendWithError = CancelError | SigningError | TransactionError | UnexpectedError;
+export type SendWithError =
+  | CancelError
+  | SigningError
+  | TransactionError
+  | SlippageError
+  | UnexpectedError;
 
 /**
  * An executor function that takes an {@link ExecutionPlan} and runs it

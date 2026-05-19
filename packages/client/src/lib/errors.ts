@@ -224,3 +224,43 @@ export class UnexpectedError extends OseroError {
     return new UnexpectedError(extractMessage(cause, 'An unexpected error occurred'), { cause });
   }
 }
+
+/**
+ * Raised when a live quote no longer satisfies the slippage guard that
+ * was attached to a transaction plan. It extends {@link UnexpectedError}
+ * so existing adapter error handlers continue to catch it.
+ */
+export class SlippageError extends UnexpectedError {
+  readonly actualOutput: bigint;
+  readonly minimumOutput: bigint;
+
+  constructor(
+    message: string,
+    options: ErrorOptions & {
+      readonly actualOutput: bigint;
+      readonly minimumOutput: bigint;
+    },
+  ) {
+    super(message, options);
+    this.name = 'SlippageError';
+    this.actualOutput = options.actualOutput;
+    this.minimumOutput = options.minimumOutput;
+  }
+
+  static fromQuote(params: {
+    readonly actualOutput: bigint;
+    readonly minimumOutput: bigint;
+    readonly message?: string;
+    readonly cause?: unknown;
+  }): SlippageError {
+    return new SlippageError(
+      params.message ??
+        `Slippage guard failed: actual output ${params.actualOutput.toString()} is below minimum ${params.minimumOutput.toString()}`,
+      {
+        actualOutput: params.actualOutput,
+        minimumOutput: params.minimumOutput,
+        cause: params.cause,
+      },
+    );
+  }
+}

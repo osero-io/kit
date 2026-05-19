@@ -7,6 +7,7 @@ import type {
   ExecutionStep,
   MultiStepExecution,
   OperationType,
+  TransactionPreflightCheck,
   TransactionRequest,
 } from './types.js';
 
@@ -25,8 +26,9 @@ export function makeTransactionRequest(args: {
   data: Hex;
   value?: bigint;
   operation: OperationType;
+  preflightChecks?: readonly TransactionPreflightCheck[];
 }): TransactionRequest {
-  return {
+  const tx: TransactionRequest = {
     __typename: 'TransactionRequest',
     chainId: args.chainId,
     from: args.from,
@@ -35,6 +37,12 @@ export function makeTransactionRequest(args: {
     value: args.value ?? 0n,
     operation: args.operation,
   };
+
+  if (args.preflightChecks && args.preflightChecks.length > 0) {
+    return { ...tx, preflightChecks: args.preflightChecks };
+  }
+
+  return tx;
 }
 
 /**

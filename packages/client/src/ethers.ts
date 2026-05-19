@@ -1,7 +1,10 @@
 import { isError, type Signer, type TransactionResponse } from 'ethers';
+import { decodeFunctionResult, encodeFunctionData, type Hex } from 'viem';
 
+import { litePsmAbi } from './lib/abis/litePsm.js';
 import { type SingleTxExecutor, runExecutionPlan } from './lib/adapters.js';
 import { CancelError, SigningError, TransactionError, UnexpectedError } from './lib/errors.js';
+import { runTransactionPreflightChecks } from './lib/preflight.js';
 import { errAsync, okAsync, ResultAsync } from './lib/result.js';
 import type {
   ExecutionPlan,
@@ -57,6 +60,44 @@ function mapSendError(err: unknown): CancelError | SigningError {
   return SigningError.from(err);
 }
 
+function runPreflightChecks(
+  signer: Signer,
+  request: TransactionRequest,
+): ResultAsync<void, UnexpectedError> {
+  const provider = signer.provider;
+  if (!provider) {
+    return errAsync(
+      new UnexpectedError(
+        'ethers Signer is detached — it must have a provider attached to run transaction preflight checks',
+      ),
+    );
+  }
+
+  const tinData = encodeFunctionData({
+    abi: litePsmAbi,
+    functionName: 'tin',
+  });
+
+  return runTransactionPreflightChecks(request, {
+    readLitePsmTin: (address) =>
+      ResultAsync.fromPromise(provider.call({ to: address, data: tinData }), (err) =>
+        UnexpectedError.from(err),
+      ).andThen((data) => {
+        try {
+          return okAsync(
+            decodeFunctionResult({
+              abi: litePsmAbi,
+              functionName: 'tin',
+              data: data as Hex,
+            }),
+          );
+        } catch (err) {
+          return errAsync(UnexpectedError.from(err));
+        }
+      }),
+  });
+}
+
 /**
  * Broadcast a single transaction through an ethers signer and wait
  * for it to be mined.
@@ -69,6 +110,7 @@ function sendSingleTransaction(
   confirmations: number,
 ): ResultAsync<`0x${string}`, CancelError | SigningError | TransactionError | UnexpectedError> {
   return ensureChain(signer, request)
+    .andThen(() => runPreflightChecks(signer, request))
     .andThen(() =>
       ResultAsync.fromPromise(
         signer.sendTransaction({

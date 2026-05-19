@@ -6,7 +6,7 @@ import { usdsPsmWrapperAbi } from '../abis/usdsPsmWrapper.js';
 import { flattenExecutionPlan } from '../adapters.js';
 import { PSM_ADDRESSES } from '../addresses.js';
 import { UnexpectedError, UnsupportedChainError, ValidationError } from '../errors.js';
-import { usdsFromUsdcViaSellGem } from '../math.js';
+import { applySlippage, usdsFromUsdcViaSellGem } from '../math.js';
 import { OseroClient } from '../OseroClient.js';
 import { getToken } from '../tokens.js';
 import { installMockPublicClient } from './_testing.js';
@@ -137,13 +137,19 @@ describe('mintUsds', () => {
 
   describe('mainnet (chain 1)', () => {
     it('builds an Erc20ApprovalRequired via UsdsPsmWrapper.sellGem', async () => {
-      const client = OseroClient.create();
+      const client = OseroClient.create({ defaultSlippageBps: 5 });
       const amount = parseUnits('100', 6);
+      const tin = 10n ** 16n;
+      const mock = installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return tin;
+        throw new Error(`unexpected read ${functionName}`);
+      });
       const result = await mintUsds(client, {
         chainId: 1,
         amount,
         sender: SENDER,
       });
+      expect(mock.readContract).toHaveBeenCalledOnce();
       expect(result.isOk()).toBe(true);
       if (!result.isOk()) return;
 
@@ -167,6 +173,14 @@ describe('mintUsds', () => {
       const mainTx = plan.originalTransaction;
       expect(mainTx.to).toBe(PSM_ADDRESSES[1]!.psm);
       expect(mainTx.operation).toBe('MINT_USDS');
+      expect(mainTx.preflightChecks).toEqual([
+        {
+          kind: 'MAINNET_MINT_USDS_TIN',
+          litePsm: PSM_ADDRESSES[1]!.litePsm,
+          amount,
+          minUsdsOut: applySlippage(usdsFromUsdcViaSellGem(amount, tin), 5),
+        },
+      ]);
       const mainDecoded = decodeFunctionData({
         abi: usdsPsmWrapperAbi,
         data: mainTx.data,
@@ -179,6 +193,10 @@ describe('mintUsds', () => {
     it('routes the USDS to an explicit receiver when provided', async () => {
       const client = OseroClient.create();
       const amount = parseUnits('100', 6);
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
       const result = await mintUsds(client, {
         chainId: 1,
         amount,
@@ -191,6 +209,32 @@ describe('mintUsds', () => {
         data: result.value.originalTransaction.data,
       });
       expect(decoded.args?.[0]).toBe(RECEIVER);
+    });
+
+    it('uses a request-level slippage override for the mainnet tin preflight guard', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 5 });
+      const amount = parseUnits('100', 6);
+      const tin = 10n ** 16n;
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return tin;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintUsds(client, {
+        chainId: 1,
+        amount,
+        sender: SENDER,
+        slippageBps: 50,
+      });
+
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value.originalTransaction.preflightChecks?.[0]).toEqual({
+        kind: 'MAINNET_MINT_USDS_TIN',
+        litePsm: PSM_ADDRESSES[1]!.litePsm,
+        amount,
+        minUsdsOut: applySlippage(usdsFromUsdcViaSellGem(amount, tin), 50),
+      });
     });
   });
 
