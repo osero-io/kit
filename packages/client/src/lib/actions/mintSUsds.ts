@@ -51,10 +51,11 @@ export type MintSUsdsRequest = {
   readonly receiver?: Address;
 
   /**
-   * Slippage tolerance (basis points) applied to the PSM3
-   * `previewSwapExactIn` quote on L2s. Ignored on Ethereum mainnet
-   * because both the Lite PSM and ERC-4626 deposit are
-   * deterministic.
+   * Slippage tolerance (basis points). On L2s it is applied to the
+   * PSM3 `previewSwapExactIn` quote. On Ethereum mainnet it is
+   * applied to the intermediate USDS amount deposited in phase 2, so
+   * small Lite PSM `tin` increases between planning and execution can
+   * leave USDS dust with `sender` instead of reverting the deposit.
    *
    * @defaultValue {@link ClientConfig.defaultSlippageBps} (5 bps)
    */
@@ -138,14 +139,16 @@ export function previewMintSUsds(
  *
  * 1. `USDC.approve(UsdsPsmWrapper, amount)`
  * 2. `UsdsPsmWrapper.sellGem(sender, amount)` — sender receives USDS
- * 3. `USDS.approve(sUSDS, usdsOut)`
- * 4. `sUSDS.deposit(usdsOut, receiver, referralCode)` — receiver gets
- *    sUSDS shares
+ * 3. `USDS.approve(sUSDS, usdsToDeposit)`
+ * 4. `sUSDS.deposit(usdsToDeposit, receiver, referralCode)` — receiver
+ *    gets sUSDS shares
  *
  * The exact USDS bridge amount is computed off-chain from
  * `LitePSM.tin()`, which is governance-set and has been `0` since
  * launch. The SDK still reads it on every call so that a future
- * change is handled automatically.
+ * change is handled automatically. Because the returned plan is
+ * static, the phase-2 deposit amount is reduced by `slippageBps`;
+ * any USDS above that amount remains in `sender`'s balance.
  *
  * ```ts
  * import { mintSUsds } from '@osero/client/actions';
@@ -205,6 +208,7 @@ function buildMainnetPlan(
   const psmAddresses = PSM_ADDRESSES[chain.chainId];
   const wrapperAddress = psmAddresses.psm;
   const litePsmAddress = psmAddresses.litePsm;
+  const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
   if (!litePsmAddress) {
     return errAsync(
@@ -219,6 +223,8 @@ function buildMainnetPlan(
 
   return quoteMainnetUsdsBridgeAmount(client, chain, request.amount, litePsmAddress).map(
     (usdsOut): MultiStepExecution => {
+      const usdsToDeposit = applySlippage(usdsOut, slippageBps);
+
       // Phase 1 — USDC → USDS via Spark UsdsPsmWrapper.sellGem.
       // USDS goes to `sender` (the intermediate holder) because `sender`
       // is the one who will approve it into sUSDS in phase 2.
@@ -243,13 +249,16 @@ function buildMainnetPlan(
         mainTransaction: sellGemTx,
       });
 
-      // Phase 2 — USDS → sUSDS via the ERC-4626 vault. The vault is
-      // at the sUSDS address and must be approved as the spender of
-      // the sender's USDS.
+      // Phase 2 — USDS → sUSDS via the ERC-4626 vault. The deposit
+      // amount is reduced by slippage because this static phase cannot
+      // re-read the sender's actual USDS balance after sellGem confirms.
       const depositData = encodeFunctionData({
         abi: erc4626Abi,
         functionName: 'deposit',
-        args: referralCode === undefined ? [usdsOut, receiver] : [usdsOut, receiver, referralCode],
+        args:
+          referralCode === undefined
+            ? [usdsToDeposit, receiver]
+            : [usdsToDeposit, receiver, referralCode],
       });
       const depositTx = makeTransactionRequest({
         chainId: chain.chainId,
@@ -263,7 +272,7 @@ function buildMainnetPlan(
         from: request.sender,
         token: usds.address,
         spender: susds.address,
-        amount: usdsOut,
+        amount: usdsToDeposit,
         mainTransaction: depositTx,
       });
 
