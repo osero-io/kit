@@ -57,7 +57,12 @@ export type RedeemSUsdsRequest = {
   readonly receiver?: Address;
 
   /**
-   * Slippage tolerance (basis points).
+   * Slippage tolerance (basis points). On L2s this is applied to the
+   * PSM3 `previewSwapExactIn` quote. On Ethereum mainnet the SDK
+   * computes a USDC exact-out `gemAmt` from the actual USDS received
+   * and live Lite PSM `tout`; if `tout` rises, this tolerance means
+   * the user receives less USDC rather than approving or spending
+   * more USDS than phase 1 produced.
    *
    * @defaultValue {@link ClientConfig.defaultSlippageBps} (5 bps)
    */
@@ -138,7 +143,10 @@ export function previewRedeemSUsds(
  * Phase 2 is refreshed by the SDK adapters after phase 1 confirms,
  * using the actual USDS amount from the redeem receipt and the live
  * Lite PSM `tout`. The plan still includes concrete fallback phase-2
- * transactions for inspection and custom executors.
+ * transactions for inspection and custom executors. A `tout` change
+ * after refresh but before the final `buyGem` is mined can still make
+ * the transaction revert; in that case the sender keeps the USDS and
+ * can continue via {@link redeemUsds}.
  */
 export function redeemSUsds(
   client: OseroClient,
