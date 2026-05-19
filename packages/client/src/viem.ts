@@ -34,6 +34,27 @@ function hasConnectedAccount(walletClient: WalletClient): walletClient is Connec
 }
 
 /**
+ * Verify that the connected wallet is pointing at the chain a
+ * transaction requires before asking viem to estimate or send it.
+ *
+ * @internal
+ */
+function ensureChain(
+  walletClient: ConnectedWalletClient,
+  request: TransactionRequest,
+): ResultAsync<ConnectedWalletClient, UnexpectedError> {
+  const current = walletClient.chain.id;
+  if (current !== request.chainId) {
+    return errAsync(
+      new UnexpectedError(
+        `viem WalletClient is on chain ${current} but the transaction targets chain ${request.chainId}`,
+      ),
+    );
+  }
+  return okAsync(walletClient);
+}
+
+/**
  * Estimate gas for a single transaction and add a 15% buffer. The
  * buffer matches the Aave SDK's default and cushions against minor
  * block-to-block variance (storage writes, fresh slots, etc.).
@@ -87,7 +108,8 @@ function sendSingleTransaction(
   request: TransactionRequest,
   confirmations: number,
 ): ResultAsync<`0x${string}`, CancelError | SigningError | TransactionError | UnexpectedError> {
-  return estimateGas(walletClient, request)
+  return ensureChain(walletClient, request)
+    .andThen(() => estimateGas(walletClient, request))
     .andThen((gas) =>
       ResultAsync.fromPromise(
         sendTransactionWithViem(walletClient, {
