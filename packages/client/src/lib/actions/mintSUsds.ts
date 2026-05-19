@@ -4,14 +4,14 @@ import { erc4626Abi } from '../abis/erc4626.js';
 import { litePsmAbi } from '../abis/litePsm.js';
 import { psm3Abi } from '../abis/psm3.js';
 import { usdsPsmWrapperAbi } from '../abis/usdsPsmWrapper.js';
-import { PSM_ADDRESSES } from '../addresses.js';
+import { ensurePsmTargetHasCode, resolvePsmAddresses } from '../addresses.js';
 import { type ChainMetadata, getChain } from '../chains.js';
 import { UnexpectedError, UnsupportedChainError, ValidationError } from '../errors.js';
 import { applySlippage, usdsFromUsdcViaSellGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
-import { errAsync, okAsync, ResultAsync } from '../result.js';
+import { errAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
 
@@ -202,7 +202,7 @@ function buildMainnetPlan(
   const usdc = getToken(chain.chainId, 'USDC');
   const usds = getToken(chain.chainId, 'USDS');
   const susds = getToken(chain.chainId, 'sUSDS');
-  const psmAddresses = PSM_ADDRESSES[chain.chainId];
+  const psmAddresses = resolvePsmAddresses(client.config, chain.chainId);
   const wrapperAddress = psmAddresses.psm;
   const litePsmAddress = psmAddresses.litePsm;
 
@@ -217,58 +217,61 @@ function buildMainnetPlan(
   const referralCode =
     resolvedReferralCode === undefined ? undefined : Number(resolvedReferralCode);
 
-  return quoteMainnetUsdsBridgeAmount(client, chain, request.amount, litePsmAddress).map(
-    (usdsOut): MultiStepExecution => {
-      // Phase 1 — USDC → USDS via Spark UsdsPsmWrapper.sellGem.
-      // USDS goes to `sender` (the intermediate holder) because `sender`
-      // is the one who will approve it into sUSDS in phase 2.
-      const sellGemData = encodeFunctionData({
-        abi: usdsPsmWrapperAbi,
-        functionName: 'sellGem',
-        args: [request.sender, request.amount],
-      });
-      const sellGemTx = makeTransactionRequest({
-        chainId: chain.chainId,
-        from: request.sender,
-        to: wrapperAddress,
-        data: sellGemData,
-        operation: 'MINT_USDS',
-      });
-      const phase1 = makeSingleApprovalPlan({
-        chainId: chain.chainId,
-        from: request.sender,
-        token: usdc.address,
-        spender: wrapperAddress,
-        amount: request.amount,
-        mainTransaction: sellGemTx,
-      });
+  return ensurePsmTargetHasCode(client, chain.chainId, wrapperAddress).andThen(() =>
+    quoteMainnetUsdsBridgeAmount(client, chain, request.amount, litePsmAddress).map(
+      (usdsOut): MultiStepExecution => {
+        // Phase 1 — USDC → USDS via Spark UsdsPsmWrapper.sellGem.
+        // USDS goes to `sender` (the intermediate holder) because `sender`
+        // is the one who will approve it into sUSDS in phase 2.
+        const sellGemData = encodeFunctionData({
+          abi: usdsPsmWrapperAbi,
+          functionName: 'sellGem',
+          args: [request.sender, request.amount],
+        });
+        const sellGemTx = makeTransactionRequest({
+          chainId: chain.chainId,
+          from: request.sender,
+          to: wrapperAddress,
+          data: sellGemData,
+          operation: 'MINT_USDS',
+        });
+        const phase1 = makeSingleApprovalPlan({
+          chainId: chain.chainId,
+          from: request.sender,
+          token: usdc.address,
+          spender: wrapperAddress,
+          amount: request.amount,
+          mainTransaction: sellGemTx,
+        });
 
-      // Phase 2 — USDS → sUSDS via the ERC-4626 vault. The vault is
-      // at the sUSDS address and must be approved as the spender of
-      // the sender's USDS.
-      const depositData = encodeFunctionData({
-        abi: erc4626Abi,
-        functionName: 'deposit',
-        args: referralCode === undefined ? [usdsOut, receiver] : [usdsOut, receiver, referralCode],
-      });
-      const depositTx = makeTransactionRequest({
-        chainId: chain.chainId,
-        from: request.sender,
-        to: susds.address,
-        data: depositData,
-        operation: 'DEPOSIT_USDS_FOR_SUSDS',
-      });
-      const phase2 = makeSingleApprovalPlan({
-        chainId: chain.chainId,
-        from: request.sender,
-        token: usds.address,
-        spender: susds.address,
-        amount: usdsOut,
-        mainTransaction: depositTx,
-      });
+        // Phase 2 — USDS → sUSDS via the ERC-4626 vault. The vault is
+        // at the sUSDS address and must be approved as the spender of
+        // the sender's USDS.
+        const depositData = encodeFunctionData({
+          abi: erc4626Abi,
+          functionName: 'deposit',
+          args:
+            referralCode === undefined ? [usdsOut, receiver] : [usdsOut, receiver, referralCode],
+        });
+        const depositTx = makeTransactionRequest({
+          chainId: chain.chainId,
+          from: request.sender,
+          to: susds.address,
+          data: depositData,
+          operation: 'DEPOSIT_USDS_FOR_SUSDS',
+        });
+        const phase2 = makeSingleApprovalPlan({
+          chainId: chain.chainId,
+          from: request.sender,
+          token: usds.address,
+          spender: susds.address,
+          amount: usdsOut,
+          mainTransaction: depositTx,
+        });
 
-      return makeMultiStepPlan([phase1, phase2]);
-    },
+        return makeMultiStepPlan([phase1, phase2]);
+      },
+    ),
   );
 }
 
@@ -281,37 +284,37 @@ function buildL2Plan(
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
   const susds = getToken(chain.chainId, 'sUSDS');
-  const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
+  const psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
-  return quoteL2MintSUsds(client, chain, request.amount).andThen((quote) => {
-    const minAmountOut = applySlippage(quote, slippageBps);
+  return ensurePsmTargetHasCode(client, chain.chainId, psmAddress).andThen(() =>
+    quoteL2MintSUsds(client, chain, request.amount, psmAddress).map((quote) => {
+      const minAmountOut = applySlippage(quote, slippageBps);
 
-    const swapData = encodeFunctionData({
-      abi: psm3Abi,
-      functionName: 'swapExactIn',
-      args: [usdc.address, susds.address, request.amount, minAmountOut, receiver, referralCode],
-    });
+      const swapData = encodeFunctionData({
+        abi: psm3Abi,
+        functionName: 'swapExactIn',
+        args: [usdc.address, susds.address, request.amount, minAmountOut, receiver, referralCode],
+      });
 
-    const mainTransaction = makeTransactionRequest({
-      chainId: chain.chainId,
-      from: request.sender,
-      to: psmAddress,
-      data: swapData,
-      operation: 'MINT_SUSDS',
-    });
+      const mainTransaction = makeTransactionRequest({
+        chainId: chain.chainId,
+        from: request.sender,
+        to: psmAddress,
+        data: swapData,
+        operation: 'MINT_SUSDS',
+      });
 
-    return okAsync(
-      makeSingleApprovalPlan({
+      return makeSingleApprovalPlan({
         chainId: chain.chainId,
         from: request.sender,
         token: usdc.address,
         spender: psmAddress,
         amount: request.amount,
         mainTransaction,
-      }),
-    );
-  });
+      });
+    }),
+  );
 }
 
 function quoteMainnetMintSUsds(
@@ -320,7 +323,7 @@ function quoteMainnetMintSUsds(
   amount: bigint,
 ): ResultAsync<bigint, UnexpectedError> {
   const susds = getToken(chain.chainId, 'sUSDS');
-  const litePsmAddress = PSM_ADDRESSES[chain.chainId].litePsm;
+  const litePsmAddress = resolvePsmAddresses(client.config, chain.chainId).litePsm;
 
   if (!litePsmAddress) {
     return errAsync(
@@ -349,7 +352,7 @@ function quoteMainnetUsdsBridgeAmount(
   client: OseroClient,
   chain: ChainMetadata,
   amount: bigint,
-  litePsmAddress = PSM_ADDRESSES[chain.chainId].litePsm,
+  litePsmAddress = resolvePsmAddresses(client.config, chain.chainId).litePsm,
 ): ResultAsync<bigint, UnexpectedError> {
   if (!litePsmAddress) {
     return errAsync(
@@ -375,10 +378,10 @@ function quoteL2MintSUsds(
   client: OseroClient,
   chain: ChainMetadata,
   amount: bigint,
+  psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm,
 ): ResultAsync<bigint, UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
   const susds = getToken(chain.chainId, 'sUSDS');
-  const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
   const publicClient = client.getPublicClient(chain.chainId);
 
   return ResultAsync.fromPromise(

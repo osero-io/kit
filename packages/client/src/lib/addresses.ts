@@ -1,6 +1,10 @@
 import type { Address } from 'viem';
 
 import type { OseroChainId } from './chains.js';
+import type { ResolvedClientConfig } from './config.js';
+import { UnexpectedError } from './errors.js';
+import type { OseroClient } from './OseroClient.js';
+import { errAsync, okAsync, ResultAsync } from './result.js';
 
 /**
  * The Osero SDK only needs one entry-point contract per chain, though
@@ -28,6 +32,10 @@ export type PsmAddresses = {
   readonly litePsm?: Address;
 };
 
+export type PsmAddressOverrides = {
+  readonly [K in OseroChainId]?: Partial<PsmAddresses>;
+};
+
 export const PSM_ADDRESSES: { readonly [K in OseroChainId]: PsmAddresses } = {
   1: {
     psm: '0xA188EEC8F81263234dA3622A406892F3D630f98c',
@@ -46,3 +54,51 @@ export const PSM_ADDRESSES: { readonly [K in OseroChainId]: PsmAddresses } = {
     psm: '0x2B05F8e1cACC6974fD79A673a341Fe1f58d27266',
   },
 };
+
+/**
+ * Resolve the PSM addresses for a chain after applying caller-supplied
+ * overrides from {@link ClientConfig.addressOverrides}.
+ *
+ * @internal
+ */
+export function resolvePsmAddresses(
+  config: Pick<ResolvedClientConfig, 'addressOverrides'>,
+  chainId: OseroChainId,
+): PsmAddresses {
+  return {
+    ...PSM_ADDRESSES[chainId],
+    ...config.addressOverrides[chainId],
+  };
+}
+
+/**
+ * Verify that the configured PSM target has deployed bytecode before
+ * returning a transaction plan that points user approvals or swaps at it.
+ *
+ * @internal
+ */
+export function ensurePsmTargetHasCode(
+  client: OseroClient,
+  chainId: OseroChainId,
+  address: Address,
+  label: 'psm' | 'litePsm' = 'psm',
+): ResultAsync<void, UnexpectedError> {
+  const publicClient = client.getPublicClient(chainId);
+  const targetName = label === 'litePsm' ? 'Lite PSM' : 'PSM';
+
+  return ResultAsync.fromPromise(publicClient.getCode({ address }), (err) =>
+    UnexpectedError.from(err),
+  ).andThen((code) => {
+    if (code && code !== '0x') {
+      return okAsync(undefined);
+    }
+
+    return errAsync(
+      UnexpectedError.from(
+        new Error(
+          `No contract code found at configured ${targetName} address ${address} on chain ${chainId}`,
+        ),
+      ),
+    );
+  });
+}

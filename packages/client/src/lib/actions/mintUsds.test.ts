@@ -14,6 +14,7 @@ import { mintUsds, previewMintUsds } from './mintUsds.js';
 
 const SENDER = '0x1111111111111111111111111111111111111111' as const;
 const RECEIVER = '0x2222222222222222222222222222222222222222' as const;
+const PSM_OVERRIDE = '0x3333333333333333333333333333333333333333' as const;
 
 describe('mintUsds', () => {
   it('rejects an unsupported chain', async () => {
@@ -138,6 +139,9 @@ describe('mintUsds', () => {
   describe('mainnet (chain 1)', () => {
     it('builds an Erc20ApprovalRequired via UsdsPsmWrapper.sellGem', async () => {
       const client = OseroClient.create();
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        throw new Error(`unexpected read ${functionName}`);
+      });
       const amount = parseUnits('100', 6);
       const result = await mintUsds(client, {
         chainId: 1,
@@ -178,6 +182,9 @@ describe('mintUsds', () => {
 
     it('routes the USDS to an explicit receiver when provided', async () => {
       const client = OseroClient.create();
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        throw new Error(`unexpected read ${functionName}`);
+      });
       const amount = parseUnits('100', 6);
       const result = await mintUsds(client, {
         chainId: 1,
@@ -232,6 +239,57 @@ describe('mintUsds', () => {
       expect(args[3]).toBe((quote * 9995n) / 10_000n);
       expect(args[4]).toBe(SENDER); // default receiver
       expect(args[5]).toBe(3000n); // SDK default referral
+    });
+
+    it('uses a configured PSM address override for approvals and the swap target', async () => {
+      const client = OseroClient.create({
+        addressOverrides: {
+          8453: { psm: PSM_OVERRIDE },
+        },
+      });
+      const quote = 99_999_999_999_999_999_999n;
+      const mock = installMockPublicClient(client, 8453, ({ address, functionName }) => {
+        expect(address).toBe(PSM_OVERRIDE);
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const amount = parseUnits('100', 6);
+      const result = await mintUsds(client, {
+        chainId: 8453,
+        amount,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+
+      expect(mock.getCode).toHaveBeenCalledWith({ address: PSM_OVERRIDE });
+      expect(result.value.approvals[0]!.spender).toBe(PSM_OVERRIDE);
+      expect(result.value.originalTransaction.to).toBe(PSM_OVERRIDE);
+    });
+
+    it('rejects a configured PSM target with no deployed code before reading a quote', async () => {
+      const client = OseroClient.create({
+        addressOverrides: {
+          8453: { psm: PSM_OVERRIDE },
+        },
+      });
+      const mock = installMockPublicClient(client, 8453, ({ functionName }) => {
+        throw new Error(`unexpected read ${functionName}`);
+      });
+      mock.getCode.mockResolvedValueOnce('0x');
+
+      const result = await mintUsds(client, {
+        chainId: 8453,
+        amount: parseUnits('100', 6),
+        sender: SENDER,
+      });
+
+      expect(result.isErr()).toBe(true);
+      expect(mock.readContract).not.toHaveBeenCalled();
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(UnexpectedError);
+        expect(result.error.message).toContain(PSM_OVERRIDE);
+      }
     });
 
     it('opts out of the referral code when the request passes referralCode: undefined', async () => {

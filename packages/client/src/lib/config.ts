@@ -1,5 +1,6 @@
 import type { Transport } from 'viem';
 
+import type { PsmAddressOverrides } from './addresses.js';
 import type { OseroChainId } from './chains.js';
 import { DEFAULT_REFERRAL_CODE } from './referrals.js';
 
@@ -30,6 +31,16 @@ export type ClientConfig = {
    * ```
    */
   readonly transports?: Partial<Record<OseroChainId, Transport>>;
+
+  /**
+   * Optional PSM contract address overrides keyed by chain ID. Use this
+   * when a chain migrates to a new PSM deployment before the SDK's
+   * built-in address table has been updated.
+   *
+   * Omitted fields fall back to the SDK defaults, so callers can
+   * override only the address that changed.
+   */
+  readonly addressOverrides?: PsmAddressOverrides;
 
   /**
    * Default slippage tolerance, in basis points, applied by actions
@@ -71,6 +82,7 @@ export type ClientConfig = {
  */
 export type ResolvedClientConfig = {
   readonly transports: Partial<Record<OseroChainId, Transport>>;
+  readonly addressOverrides: PsmAddressOverrides;
   readonly defaultSlippageBps: number;
   readonly confirmations: number;
   readonly defaultReferralCode: bigint | undefined;
@@ -85,6 +97,7 @@ export function resolveConfig(config: ClientConfig): ResolvedClientConfig {
 
   return {
     transports: config.transports ?? {},
+    addressOverrides: config.addressOverrides ?? {},
     defaultSlippageBps: config.defaultSlippageBps ?? 5,
     confirmations: config.confirmations ?? 1,
     defaultReferralCode,

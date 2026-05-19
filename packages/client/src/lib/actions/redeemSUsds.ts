@@ -4,7 +4,7 @@ import { erc4626Abi } from '../abis/erc4626.js';
 import { litePsmAbi } from '../abis/litePsm.js';
 import { psm3Abi } from '../abis/psm3.js';
 import { usdsPsmWrapperAbi } from '../abis/usdsPsmWrapper.js';
-import { PSM_ADDRESSES } from '../addresses.js';
+import { ensurePsmTargetHasCode, resolvePsmAddresses } from '../addresses.js';
 import { type ChainMetadata, getChain } from '../chains.js';
 import { UnexpectedError, UnsupportedChainError, ValidationError } from '../errors.js';
 import { applySlippage, usdcFromUsdsViaBuyGem } from '../math.js';
@@ -164,7 +164,7 @@ function buildMainnetPlan(
 ): ResultAsync<MultiStepExecution, UnexpectedError> {
   const usds = getToken(chain.chainId, 'USDS');
   const susds = getToken(chain.chainId, 'sUSDS');
-  const psmAddresses = PSM_ADDRESSES[chain.chainId];
+  const psmAddresses = resolvePsmAddresses(client.config, chain.chainId);
   const wrapperAddress = psmAddresses.psm;
   const litePsmAddress = psmAddresses.litePsm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
@@ -177,55 +177,57 @@ function buildMainnetPlan(
     );
   }
 
-  return readMainnetRedeemSUsdsQuoteInputs(client, chain, request.amount, litePsmAddress).map(
-    ({ usdsOut, tout }): MultiStepExecution => {
-      // Phase 1 — sUSDS.redeem(shares, sender, sender).
-      // Sender is both owner and receiver of the USDS, so no
-      // allowance is needed. The vault burns `shares` from `sender`
-      // and transfers `assets` (≈ usdsOut) USDS back.
-      const redeemData = encodeFunctionData({
-        abi: erc4626Abi,
-        functionName: 'redeem',
-        args: [request.amount, request.sender, request.sender],
-      });
-      const redeemTx = makeTransactionRequest({
-        chainId: chain.chainId,
-        from: request.sender,
-        to: susds.address,
-        data: redeemData,
-        operation: 'REDEEM_SUSDS_FOR_USDS',
-      });
+  return ensurePsmTargetHasCode(client, chain.chainId, wrapperAddress).andThen(() =>
+    readMainnetRedeemSUsdsQuoteInputs(client, chain, request.amount, litePsmAddress).map(
+      ({ usdsOut, tout }): MultiStepExecution => {
+        // Phase 1 — sUSDS.redeem(shares, sender, sender).
+        // Sender is both owner and receiver of the USDS, so no
+        // allowance is needed. The vault burns `shares` from `sender`
+        // and transfers `assets` (≈ usdsOut) USDS back.
+        const redeemData = encodeFunctionData({
+          abi: erc4626Abi,
+          functionName: 'redeem',
+          args: [request.amount, request.sender, request.sender],
+        });
+        const redeemTx = makeTransactionRequest({
+          chainId: chain.chainId,
+          from: request.sender,
+          to: susds.address,
+          data: redeemData,
+          operation: 'REDEEM_SUSDS_FOR_USDS',
+        });
 
-      // Phase 2 — approve USDS to the wrapper, then buyGem. The
-      // `gemAmt` is computed from `usdsOut` and current `tout`, then
-      // reduced by `slippageBps` to leave headroom for tout
-      // fluctuations.
-      const baseGemAmt = usdcFromUsdsViaBuyGem(usdsOut, tout);
-      const gemAmt = applySlippage(baseGemAmt, slippageBps);
+        // Phase 2 — approve USDS to the wrapper, then buyGem. The
+        // `gemAmt` is computed from `usdsOut` and current `tout`, then
+        // reduced by `slippageBps` to leave headroom for tout
+        // fluctuations.
+        const baseGemAmt = usdcFromUsdsViaBuyGem(usdsOut, tout);
+        const gemAmt = applySlippage(baseGemAmt, slippageBps);
 
-      const buyGemData = encodeFunctionData({
-        abi: usdsPsmWrapperAbi,
-        functionName: 'buyGem',
-        args: [receiver, gemAmt],
-      });
-      const buyGemTx = makeTransactionRequest({
-        chainId: chain.chainId,
-        from: request.sender,
-        to: wrapperAddress,
-        data: buyGemData,
-        operation: 'REDEEM_USDS_FOR_USDC',
-      });
-      const phase2 = makeSingleApprovalPlan({
-        chainId: chain.chainId,
-        from: request.sender,
-        token: usds.address,
-        spender: wrapperAddress,
-        amount: usdsOut,
-        mainTransaction: buyGemTx,
-      });
+        const buyGemData = encodeFunctionData({
+          abi: usdsPsmWrapperAbi,
+          functionName: 'buyGem',
+          args: [receiver, gemAmt],
+        });
+        const buyGemTx = makeTransactionRequest({
+          chainId: chain.chainId,
+          from: request.sender,
+          to: wrapperAddress,
+          data: buyGemData,
+          operation: 'REDEEM_USDS_FOR_USDC',
+        });
+        const phase2 = makeSingleApprovalPlan({
+          chainId: chain.chainId,
+          from: request.sender,
+          token: usds.address,
+          spender: wrapperAddress,
+          amount: usdsOut,
+          mainTransaction: buyGemTx,
+        });
 
-      return makeMultiStepPlan([redeemTx, phase2]);
-    },
+        return makeMultiStepPlan([redeemTx, phase2]);
+      },
+    ),
   );
 }
 
@@ -238,35 +240,39 @@ function buildL2Plan(
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
   const susds = getToken(chain.chainId, 'sUSDS');
-  const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
+  const psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
-  return quoteL2RedeemSUsds(client, chain, request.amount).map((quote): Erc20ApprovalRequired => {
-    const minAmountOut = applySlippage(quote, slippageBps);
+  return ensurePsmTargetHasCode(client, chain.chainId, psmAddress).andThen(() =>
+    quoteL2RedeemSUsds(client, chain, request.amount, psmAddress).map(
+      (quote): Erc20ApprovalRequired => {
+        const minAmountOut = applySlippage(quote, slippageBps);
 
-    const swapData = encodeFunctionData({
-      abi: psm3Abi,
-      functionName: 'swapExactIn',
-      args: [susds.address, usdc.address, request.amount, minAmountOut, receiver, referralCode],
-    });
+        const swapData = encodeFunctionData({
+          abi: psm3Abi,
+          functionName: 'swapExactIn',
+          args: [susds.address, usdc.address, request.amount, minAmountOut, receiver, referralCode],
+        });
 
-    const mainTransaction = makeTransactionRequest({
-      chainId: chain.chainId,
-      from: request.sender,
-      to: psmAddress,
-      data: swapData,
-      operation: 'REDEEM_SUSDS_FOR_USDC',
-    });
+        const mainTransaction = makeTransactionRequest({
+          chainId: chain.chainId,
+          from: request.sender,
+          to: psmAddress,
+          data: swapData,
+          operation: 'REDEEM_SUSDS_FOR_USDC',
+        });
 
-    return makeSingleApprovalPlan({
-      chainId: chain.chainId,
-      from: request.sender,
-      token: susds.address,
-      spender: psmAddress,
-      amount: request.amount,
-      mainTransaction,
-    });
-  });
+        return makeSingleApprovalPlan({
+          chainId: chain.chainId,
+          from: request.sender,
+          token: susds.address,
+          spender: psmAddress,
+          amount: request.amount,
+          mainTransaction,
+        });
+      },
+    ),
+  );
 }
 
 function quoteMainnetRedeemSUsds(
@@ -283,7 +289,7 @@ function readMainnetRedeemSUsdsQuoteInputs(
   client: OseroClient,
   chain: ChainMetadata,
   amount: bigint,
-  litePsmAddress = PSM_ADDRESSES[chain.chainId].litePsm,
+  litePsmAddress = resolvePsmAddresses(client.config, chain.chainId).litePsm,
 ): ResultAsync<{ readonly usdsOut: bigint; readonly tout: bigint }, UnexpectedError> {
   const susds = getToken(chain.chainId, 'sUSDS');
 
@@ -322,10 +328,10 @@ function quoteL2RedeemSUsds(
   client: OseroClient,
   chain: ChainMetadata,
   amount: bigint,
+  psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm,
 ): ResultAsync<bigint, UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
   const susds = getToken(chain.chainId, 'sUSDS');
-  const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
   const publicClient = client.getPublicClient(chain.chainId);
 
   return ResultAsync.fromPromise(

@@ -7,15 +7,21 @@ describe('OseroClient', () => {
     expect(client.config.defaultSlippageBps).toBe(5);
     expect(client.config.confirmations).toBe(1);
     expect(client.config.transports).toEqual({});
+    expect(client.config.addressOverrides).toEqual({});
   });
 
   it('honours caller overrides', () => {
+    const psm = '0x3333333333333333333333333333333333333333' as const;
     const client = OseroClient.create({
       defaultSlippageBps: 25,
       confirmations: 3,
+      addressOverrides: {
+        8453: { psm },
+      },
     });
     expect(client.config.defaultSlippageBps).toBe(25);
     expect(client.config.confirmations).toBe(3);
+    expect(client.config.addressOverrides[8453]?.psm).toBe(psm);
   });
 
   it('throws UnsupportedChainError when asked for an unknown chain', () => {

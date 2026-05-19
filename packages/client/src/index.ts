@@ -17,7 +17,7 @@ export {
 } from './lib/adapters.js';
 
 // Addresses -------------------------------------------------------------
-export { PSM_ADDRESSES, type PsmAddresses } from './lib/addresses.js';
+export { PSM_ADDRESSES, type PsmAddresses, type PsmAddressOverrides } from './lib/addresses.js';
 
 // APY / SSR -------------------------------------------------------------
 export {
