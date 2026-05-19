@@ -182,8 +182,10 @@ export type {
   ExecutionPlanHandler,
   ExecutionStep,
   MultiStepExecution,
+  MainnetMintUsdsTinPreflightCheck,
   OperationType,
   SendWithError,
+  TransactionPreflightCheck,
   TransactionRequest,
   TransactionResult,
 } from './lib/types.js';

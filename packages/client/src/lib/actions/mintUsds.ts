@@ -10,7 +10,7 @@ import { applySlippage, usdsFromUsdcViaSellGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
-import { errAsync, okAsync, ResultAsync } from '../result.js';
+import { errAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired } from '../types.js';
 
@@ -45,10 +45,12 @@ export type MintUsdsRequest = {
   readonly receiver?: Address;
 
   /**
-   * Slippage tolerance (basis points) applied to the PSM3
-   * `previewSwapExactIn` quote when computing `minAmountOut`.
-   * Ignored on Ethereum mainnet because the Sky Lite PSM is
-   * deterministic.
+   * Slippage tolerance (basis points). On L2s this is applied to the
+   * PSM3 `previewSwapExactIn` quote when computing `minAmountOut`.
+   * On Ethereum mainnet this is applied to the current Lite PSM
+   * `tin()` quote and enforced as a pre-send guard by the SDK wallet
+   * adapters because `UsdsPsmWrapper.sellGem` has no `minOut`
+   * argument.
    *
    * @defaultValue {@link ClientConfig.defaultSlippageBps} (5 bps)
    */
@@ -165,41 +167,65 @@ export function mintUsds(
   const receiver = request.receiver ?? request.sender;
 
   if (chain.isMainnet) {
-    return okAsync(buildMainnetPlan(chain, request, receiver));
+    return buildMainnetPlan(client, chain, request, receiver);
   }
 
   return buildL2Plan(client, chain, request, receiver, resolvedReferralCode ?? 0n);
 }
 
 function buildMainnetPlan(
+  client: OseroClient,
   chain: ChainMetadata,
   request: MintUsdsRequest,
   receiver: Address,
-): Erc20ApprovalRequired {
+): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
-  const wrapperAddress = PSM_ADDRESSES[chain.chainId].psm;
+  const psmAddresses = PSM_ADDRESSES[chain.chainId];
+  const wrapperAddress = psmAddresses.psm;
+  const litePsmAddress = psmAddresses.litePsm;
+  const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
-  const sellGemData = encodeFunctionData({
-    abi: usdsPsmWrapperAbi,
-    functionName: 'sellGem',
-    args: [receiver, request.amount],
-  });
+  if (!litePsmAddress) {
+    return errAsync(
+      UnexpectedError.from(
+        new Error('Mainnet PSM_ADDRESSES entry is missing `litePsm`. This is a bug in the SDK.'),
+      ),
+    );
+  }
 
-  const mainTransaction = makeTransactionRequest({
-    chainId: chain.chainId,
-    from: request.sender,
-    to: wrapperAddress,
-    data: sellGemData,
-    operation: 'MINT_USDS',
-  });
+  return quoteMainnetMintUsds(client, chain, request.amount).map((quotedUsdsOut) => {
+    const minUsdsOut = applySlippage(quotedUsdsOut, slippageBps);
 
-  return makeSingleApprovalPlan({
-    chainId: chain.chainId,
-    from: request.sender,
-    token: usdc.address,
-    spender: wrapperAddress,
-    amount: request.amount,
-    mainTransaction,
+    const sellGemData = encodeFunctionData({
+      abi: usdsPsmWrapperAbi,
+      functionName: 'sellGem',
+      args: [receiver, request.amount],
+    });
+
+    const mainTransaction = makeTransactionRequest({
+      chainId: chain.chainId,
+      from: request.sender,
+      to: wrapperAddress,
+      data: sellGemData,
+      operation: 'MINT_USDS',
+      preflightChecks: [
+        {
+          kind: 'MAINNET_MINT_USDS_TIN',
+          litePsm: litePsmAddress,
+          amount: request.amount,
+          minUsdsOut,
+        },
+      ],
+    });
+
+    return makeSingleApprovalPlan({
+      chainId: chain.chainId,
+      from: request.sender,
+      token: usdc.address,
+      spender: wrapperAddress,
+      amount: request.amount,
+      mainTransaction,
+    });
   });
 }
 

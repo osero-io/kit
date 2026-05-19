@@ -8,12 +8,15 @@ import {
 } from 'viem';
 import {
   estimateGas as estimateGasWithViem,
+  readContract as readContractWithViem,
   sendTransaction as sendTransactionWithViem,
   waitForTransactionReceipt,
 } from 'viem/actions';
 
+import { litePsmAbi } from './lib/abis/litePsm.js';
 import { type SingleTxExecutor, runExecutionPlan } from './lib/adapters.js';
 import { CancelError, SigningError, TransactionError, UnexpectedError } from './lib/errors.js';
+import { runTransactionPreflightChecks } from './lib/preflight.js';
 import { errAsync, okAsync, ResultAsync } from './lib/result.js';
 import type {
   ExecutionPlan,
@@ -75,6 +78,23 @@ function mapSendError(err: unknown): CancelError | SigningError {
   return SigningError.from(err);
 }
 
+function runPreflightChecks(
+  walletClient: ConnectedWalletClient,
+  request: TransactionRequest,
+): ResultAsync<void, UnexpectedError> {
+  return runTransactionPreflightChecks(request, {
+    readLitePsmTin: (address) =>
+      ResultAsync.fromPromise(
+        readContractWithViem(walletClient, {
+          address,
+          abi: litePsmAbi,
+          functionName: 'tin',
+        }),
+        (err) => UnexpectedError.from(err),
+      ),
+  });
+}
+
 /**
  * Broadcast a single transaction with a connected viem wallet and
  * wait for it to be mined. Returns the resulting tx hash or a typed
@@ -87,7 +107,8 @@ function sendSingleTransaction(
   request: TransactionRequest,
   confirmations: number,
 ): ResultAsync<`0x${string}`, CancelError | SigningError | TransactionError | UnexpectedError> {
-  return estimateGas(walletClient, request)
+  return runPreflightChecks(walletClient, request)
+    .andThen(() => estimateGas(walletClient, request))
     .andThen((gas) =>
       ResultAsync.fromPromise(
         sendTransactionWithViem(walletClient, {
