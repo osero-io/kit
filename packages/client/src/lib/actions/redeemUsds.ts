@@ -10,9 +10,11 @@ import { applySlippage, usdcFromUsdsViaBuyGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
-import { errAsync, ResultAsync } from '../result.js';
+import { errAsync, okAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired } from '../types.js';
+
+const ZERO_USDC_OUTPUT_ERROR = 'amount too small: would produce 0 USDC output';
 
 /**
  * Parameters accepted by {@link redeemUsds}.
@@ -167,7 +169,7 @@ function buildMainnetPlan(
   chain: ChainMetadata,
   request: RedeemUsdsRequest,
   receiver: Address,
-): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
+): ResultAsync<Erc20ApprovalRequired, ValidationError | UnexpectedError> {
   const usds = getToken(chain.chainId, 'USDS');
   const psmAddresses = PSM_ADDRESSES[chain.chainId];
   const wrapperAddress = psmAddresses.psm;
@@ -182,8 +184,8 @@ function buildMainnetPlan(
     );
   }
 
-  return quoteMainnetRedeemUsds(client, chain, request.amount, litePsmAddress).map(
-    (baseGemAmt): Erc20ApprovalRequired => {
+  return quoteMainnetRedeemUsds(client, chain, request.amount, litePsmAddress).andThen(
+    (baseGemAmt) => {
       // Exact-in from the caller's point of view: the caller is
       // willing to spend up to `request.amount` USDS. We back out
       // `gemAmt` (USDC out, 6-dec) from the wrapper's exact-out
@@ -191,6 +193,9 @@ function buildMainnetPlan(
       // `tout` bump between plan and execution still leaves the
       // approval large enough to cover the pulled USDS.
       const gemAmt = applySlippage(baseGemAmt, slippageBps);
+      if (gemAmt === 0n) {
+        return errAsync(ValidationError.forField('amount', ZERO_USDC_OUTPUT_ERROR));
+      }
 
       const buyGemData = encodeFunctionData({
         abi: usdsPsmWrapperAbi,
@@ -206,14 +211,16 @@ function buildMainnetPlan(
         operation: 'REDEEM_USDS_FOR_USDC',
       });
 
-      return makeSingleApprovalPlan({
-        chainId: chain.chainId,
-        from: request.sender,
-        token: usds.address,
-        spender: wrapperAddress,
-        amount: request.amount,
-        mainTransaction,
-      });
+      return okAsync(
+        makeSingleApprovalPlan({
+          chainId: chain.chainId,
+          from: request.sender,
+          token: usds.address,
+          spender: wrapperAddress,
+          amount: request.amount,
+          mainTransaction,
+        }),
+      );
     },
   );
 }

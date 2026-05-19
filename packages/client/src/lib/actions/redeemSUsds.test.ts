@@ -136,6 +136,30 @@ describe('redeemSUsds', () => {
   });
 
   describe('mainnet (chain 1)', () => {
+    it('rejects a mainnet redemption that would buy 0 USDC', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 0 });
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'previewRedeem') return 1n;
+        if (functionName === 'tout') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 1,
+        amount: 1n,
+        sender: SENDER,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+        expect(result.error).toMatchObject({
+          context: { field: 'amount' },
+          message: 'amount too small: would produce 0 USDC output',
+        });
+      }
+    });
+
     it('builds a two-phase plan: redeem then approve+buyGem', async () => {
       const client = OseroClient.create({ defaultSlippageBps: 5 });
       const shares = parseUnits('1000', 18);

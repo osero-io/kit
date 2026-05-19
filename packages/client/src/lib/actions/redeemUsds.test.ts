@@ -133,6 +133,29 @@ describe('redeemUsds', () => {
   });
 
   describe('mainnet (chain 1)', () => {
+    it('rejects a mainnet redemption that would buy 0 USDC', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 0 });
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tout') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemUsds(client, {
+        chainId: 1,
+        amount: 1n,
+        sender: SENDER,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+        expect(result.error).toMatchObject({
+          context: { field: 'amount' },
+          message: 'amount too small: would produce 0 USDC output',
+        });
+      }
+    });
+
     it('builds an Erc20ApprovalRequired via UsdsPsmWrapper.buyGem', async () => {
       const client = OseroClient.create({ defaultSlippageBps: 5 });
       const tout = 0n;
