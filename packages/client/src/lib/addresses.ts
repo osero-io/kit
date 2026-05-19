@@ -67,7 +67,7 @@ export function resolvePsmAddresses(
 ): PsmAddresses {
   return {
     ...PSM_ADDRESSES[chainId],
-    ...config.addressOverrides[chainId],
+    ...config.addressOverrides?.[chainId],
   };
 }
 
@@ -81,6 +81,7 @@ export function ensurePsmTargetHasCode(
   client: OseroClient,
   chainId: OseroChainId,
   address: Address,
+  label = 'PSM',
 ): ResultAsync<void, UnexpectedError> {
   const publicClient = client.getPublicClient(chainId);
 
@@ -94,7 +95,7 @@ export function ensurePsmTargetHasCode(
     return errAsync(
       UnexpectedError.from(
         new Error(
-          `No contract code found at configured PSM address ${address} on chain ${chainId}`,
+          `No contract code found at configured ${label} address ${address} on chain ${chainId}`,
         ),
       ),
     );

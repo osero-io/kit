@@ -12,6 +12,9 @@ import { installMockPublicClient } from './_testing.js';
 import { previewRedeemSUsds, redeemSUsds } from './redeemSUsds.js';
 
 const SENDER = '0x1111111111111111111111111111111111111111' as const;
+const PSM_OVERRIDE = '0x3333333333333333333333333333333333333333' as const;
+const USDC_OVERRIDE = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+const SUSDS_OVERRIDE = '0xcccccccccccccccccccccccccccccccccccccccc' as const;
 
 describe('redeemSUsds', () => {
   it('rejects an unsupported chain', async () => {
@@ -219,6 +222,47 @@ describe('redeemSUsds', () => {
       expect(args[1]).toBe(getToken(8453, 'USDC').address);
       expect(args[5]).toBe(3000n); // SDK default referral
       expect(result.value.originalTransaction.operation).toBe('REDEEM_SUSDS_FOR_USDC');
+    });
+
+    it('uses configured PSM and token overrides in approvals and swap calldata', async () => {
+      const client = OseroClient.create({
+        defaultSlippageBps: 5,
+        addressOverrides: {
+          8453: { psm: PSM_OVERRIDE },
+        },
+        tokenOverrides: {
+          8453: {
+            USDC: USDC_OVERRIDE,
+            sUSDS: SUSDS_OVERRIDE,
+          },
+        },
+      });
+      const quote = 999_500_000n;
+      installMockPublicClient(client, 8453, ({ address, functionName }) => {
+        expect(address).toBe(PSM_OVERRIDE);
+        if (functionName === 'previewSwapExactIn') return quote;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const amount = parseUnits('1000', 18);
+      const result = await redeemSUsds(client, {
+        chainId: 8453,
+        amount,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'Erc20ApprovalRequired') return;
+
+      expect(result.value.approvals[0]!.token).toBe(client.config.tokenOverrides?.[8453]?.sUSDS);
+      expect(result.value.approvals[0]!.spender).toBe(PSM_OVERRIDE);
+      expect(result.value.originalTransaction.to).toBe(PSM_OVERRIDE);
+
+      const args = decodeFunctionData({
+        abi: psm3Abi,
+        data: result.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(args[0]).toBe(client.config.tokenOverrides?.[8453]?.sUSDS);
+      expect(args[1]).toBe(client.config.tokenOverrides?.[8453]?.USDC);
     });
 
     it('opts out when the request passes referralCode: undefined', async () => {

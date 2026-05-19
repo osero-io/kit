@@ -11,7 +11,7 @@ import type { OseroClient } from '../OseroClient.js';
 import { makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
 import { errAsync, ResultAsync } from '../result.js';
-import { getToken } from '../tokens.js';
+import { resolveToken } from '../tokens.js';
 import type { Erc20ApprovalRequired } from '../types.js';
 
 /**
@@ -168,7 +168,7 @@ function buildMainnetPlan(
   request: RedeemUsdsRequest,
   receiver: Address,
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
-  const usds = getToken(chain.chainId, 'USDS');
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
   const psmAddresses = resolvePsmAddresses(client.config, chain.chainId);
   const wrapperAddress = psmAddresses.psm;
   const litePsmAddress = psmAddresses.litePsm;
@@ -227,8 +227,8 @@ function buildL2Plan(
   receiver: Address,
   referralCode: bigint,
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
-  const usdc = getToken(chain.chainId, 'USDC');
-  const usds = getToken(chain.chainId, 'USDS');
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
   const psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
@@ -280,14 +280,16 @@ function quoteMainnetRedeemUsds(
 
   const publicClient = client.getPublicClient(chain.chainId);
 
-  return ResultAsync.fromPromise(
-    publicClient.readContract({
-      address: litePsmAddress,
-      abi: litePsmAbi,
-      functionName: 'tout',
-    }),
-    (err) => UnexpectedError.from(err),
-  ).map((tout) => usdcFromUsdsViaBuyGem(amount, tout));
+  return ensurePsmTargetHasCode(client, chain.chainId, litePsmAddress, 'Lite PSM').andThen(() =>
+    ResultAsync.fromPromise(
+      publicClient.readContract({
+        address: litePsmAddress,
+        abi: litePsmAbi,
+        functionName: 'tout',
+      }),
+      (err) => UnexpectedError.from(err),
+    ).map((tout) => usdcFromUsdsViaBuyGem(amount, tout)),
+  );
 }
 
 function quoteL2RedeemUsds(
@@ -296,8 +298,8 @@ function quoteL2RedeemUsds(
   amount: bigint,
   psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm,
 ): ResultAsync<bigint, UnexpectedError> {
-  const usdc = getToken(chain.chainId, 'USDC');
-  const usds = getToken(chain.chainId, 'USDS');
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
   const publicClient = client.getPublicClient(chain.chainId);
 
   return ResultAsync.fromPromise(

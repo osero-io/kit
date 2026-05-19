@@ -1,3 +1,5 @@
+import { getAddress, type Address } from 'viem';
+
 import { UnsupportedChainError } from './errors.js';
 import { OseroClient } from './OseroClient.js';
 
@@ -8,20 +10,46 @@ describe('OseroClient', () => {
     expect(client.config.confirmations).toBe(1);
     expect(client.config.transports).toEqual({});
     expect(client.config.addressOverrides).toEqual({});
+    expect(client.config.tokenOverrides).toEqual({});
   });
 
   it('honours caller overrides', () => {
     const psm = '0x3333333333333333333333333333333333333333' as const;
+    const usdc = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
     const client = OseroClient.create({
       defaultSlippageBps: 25,
       confirmations: 3,
       addressOverrides: {
         8453: { psm },
       },
+      tokenOverrides: {
+        8453: { USDC: usdc },
+      },
     });
     expect(client.config.defaultSlippageBps).toBe(25);
     expect(client.config.confirmations).toBe(3);
-    expect(client.config.addressOverrides[8453]?.psm).toBe(psm);
+    expect(client.config.addressOverrides?.[8453]?.psm).toBe(psm);
+    expect(client.config.tokenOverrides?.[8453]?.USDC).toBe(getAddress(usdc));
+  });
+
+  it('rejects invalid configured PSM addresses at client creation time', () => {
+    expect(() =>
+      OseroClient.create({
+        addressOverrides: {
+          8453: { psm: '0x1234' as Address },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects invalid configured token addresses at client creation time', () => {
+    expect(() =>
+      OseroClient.create({
+        tokenOverrides: {
+          8453: { USDC: '0x1234' as Address },
+        },
+      }),
+    ).toThrow();
   });
 
   it('throws UnsupportedChainError when asked for an unknown chain', () => {

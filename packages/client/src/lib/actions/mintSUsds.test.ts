@@ -13,6 +13,11 @@ import { mintSUsds, previewMintSUsds } from './mintSUsds.js';
 
 const SENDER = '0x1111111111111111111111111111111111111111' as const;
 const RECEIVER = '0x2222222222222222222222222222222222222222' as const;
+const PSM_OVERRIDE = '0x3333333333333333333333333333333333333333' as const;
+const LITE_PSM_OVERRIDE = '0x4444444444444444444444444444444444444444' as const;
+const USDC_OVERRIDE = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+const USDS_OVERRIDE = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const;
+const SUSDS_OVERRIDE = '0xcccccccccccccccccccccccccccccccccccccccc' as const;
 
 describe('mintSUsds', () => {
   it('rejects an unsupported chain', async () => {
@@ -251,6 +256,59 @@ describe('mintSUsds', () => {
       expect(depositArgs[1]).toBe(RECEIVER);
       expect(depositArgs).toHaveLength(3);
       expect(depositArgs[2]).toBe(3000); // SDK default referral
+    });
+
+    it('uses configured PSM, Lite PSM, and token overrides throughout the mainnet plan', async () => {
+      const client = OseroClient.create({
+        addressOverrides: {
+          1: {
+            psm: PSM_OVERRIDE,
+            litePsm: LITE_PSM_OVERRIDE,
+          },
+        },
+        tokenOverrides: {
+          1: {
+            USDC: USDC_OVERRIDE,
+            USDS: USDS_OVERRIDE,
+            sUSDS: SUSDS_OVERRIDE,
+          },
+        },
+      });
+      const amount = parseUnits('1000', 6);
+      const tin = 0n;
+      const mock = installMockPublicClient(client, 1, ({ address, functionName }) => {
+        expect(address).toBe(LITE_PSM_OVERRIDE);
+        if (functionName === 'tin') return tin;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 1,
+        amount,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+
+      expect(mock.getCode).toHaveBeenCalledWith({ address: PSM_OVERRIDE });
+      expect(mock.getCode).toHaveBeenCalledWith({
+        address: client.config.tokenOverrides?.[1]?.sUSDS,
+      });
+      expect(mock.getCode).toHaveBeenCalledWith({ address: LITE_PSM_OVERRIDE });
+
+      const phase1 = result.value.steps[0]!;
+      expect(phase1.__typename).toBe('Erc20ApprovalRequired');
+      if (phase1.__typename !== 'Erc20ApprovalRequired') return;
+      expect(phase1.approvals[0]!.token).toBe(client.config.tokenOverrides?.[1]?.USDC);
+      expect(phase1.approvals[0]!.spender).toBe(PSM_OVERRIDE);
+      expect(phase1.originalTransaction.to).toBe(PSM_OVERRIDE);
+
+      const phase2 = result.value.steps[1]!;
+      expect(phase2.__typename).toBe('Erc20ApprovalRequired');
+      if (phase2.__typename !== 'Erc20ApprovalRequired') return;
+      expect(phase2.approvals[0]!.token).toBe(client.config.tokenOverrides?.[1]?.USDS);
+      expect(phase2.approvals[0]!.spender).toBe(client.config.tokenOverrides?.[1]?.sUSDS);
+      expect(phase2.originalTransaction.to).toBe(client.config.tokenOverrides?.[1]?.sUSDS);
     });
 
     it('uses the mainnet deposit referral overload when a referral code is provided', async () => {

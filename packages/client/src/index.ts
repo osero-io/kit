@@ -171,7 +171,13 @@ export {
 } from './lib/result.js';
 
 // Tokens ----------------------------------------------------------------
-export { getToken, listTokens, type Token, type TokenSymbol } from './lib/tokens.js';
+export {
+  getToken,
+  listTokens,
+  type Token,
+  type TokenAddressOverrides,
+  type TokenSymbol,
+} from './lib/tokens.js';
 
 // Core types ------------------------------------------------------------
 export type {

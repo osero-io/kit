@@ -1,7 +1,8 @@
 import { getAddress } from 'viem';
 
 import { SUPPORTED_CHAIN_IDS } from './chains.js';
-import { getToken, listTokens, type TokenSymbol } from './tokens.js';
+import { resolveConfig } from './config.js';
+import { getToken, listTokens, resolveToken, type TokenSymbol } from './tokens.js';
 
 const ALL_SYMBOLS: TokenSymbol[] = ['USDC', 'USDS', 'sUSDS'];
 
@@ -53,5 +54,21 @@ describe('token registry', () => {
     expect(getToken(8453, 'USDC').address).toBe('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913');
     expect(getToken(8453, 'USDS').address).toBe('0x820C137fa70C8691f0e44Dc420a5e53c168921Dc');
     expect(getToken(8453, 'sUSDS').address).toBe('0x5875eEE11Cf8398102FdAd704C9E96607675467a');
+  });
+
+  it('resolves configured token address overrides without mutating the canonical registry', () => {
+    const usdsOverride = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+    const config = resolveConfig({
+      tokenOverrides: {
+        8453: { USDS: usdsOverride },
+      },
+    });
+
+    expect(resolveToken(config, 8453, 'USDS')).toEqual({
+      ...getToken(8453, 'USDS'),
+      address: getAddress(usdsOverride),
+    });
+    expect(resolveToken(config, 8453, 'USDC')).toBe(getToken(8453, 'USDC'));
+    expect(getToken(8453, 'USDS').address).not.toBe(getAddress(usdsOverride));
   });
 });

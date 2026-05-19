@@ -1,6 +1,7 @@
 import type { Address } from 'viem';
 
 import type { OseroChainId } from './chains.js';
+import type { ResolvedClientConfig } from './config.js';
 
 /**
  * The three tokens that matter to Osero actions:
@@ -17,6 +18,10 @@ export type Token = {
   readonly symbol: TokenSymbol;
   readonly decimals: number;
   readonly name: string;
+};
+
+export type TokenAddressOverrides = {
+  readonly [K in OseroChainId]?: Partial<Record<TokenSymbol, Address>>;
 };
 
 const TOKENS: {
@@ -147,6 +152,23 @@ const TOKENS: {
  */
 export function getToken(chainId: OseroChainId, symbol: TokenSymbol): Token {
   return TOKENS[chainId][symbol];
+}
+
+/**
+ * Resolve a token descriptor after applying caller-supplied address
+ * overrides from {@link ClientConfig.tokenOverrides}. Public
+ * {@link getToken} remains the canonical registry accessor.
+ *
+ * @internal
+ */
+export function resolveToken(
+  config: Pick<ResolvedClientConfig, 'tokenOverrides'>,
+  chainId: OseroChainId,
+  symbol: TokenSymbol,
+): Token {
+  const canonical = getToken(chainId, symbol);
+  const address = config.tokenOverrides?.[chainId]?.[symbol];
+  return address ? { ...canonical, address } : canonical;
 }
 
 /**

@@ -11,7 +11,7 @@ import type { OseroClient } from '../OseroClient.js';
 import { makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
 import { errAsync, ResultAsync } from '../result.js';
-import { getToken } from '../tokens.js';
+import { resolveToken } from '../tokens.js';
 import type { Erc20ApprovalRequired } from '../types.js';
 
 /**
@@ -167,7 +167,7 @@ export function mintUsds(
   if (chain.isMainnet) {
     const wrapperAddress = resolvePsmAddresses(client.config, chain.chainId).psm;
     return ensurePsmTargetHasCode(client, chain.chainId, wrapperAddress).map(() =>
-      buildMainnetPlan(chain, request, receiver, wrapperAddress),
+      buildMainnetPlan(client, chain, request, receiver, wrapperAddress),
     );
   }
 
@@ -175,12 +175,13 @@ export function mintUsds(
 }
 
 function buildMainnetPlan(
+  client: OseroClient,
   chain: ChainMetadata,
   request: MintUsdsRequest,
   receiver: Address,
   wrapperAddress: Address,
 ): Erc20ApprovalRequired {
-  const usdc = getToken(chain.chainId, 'USDC');
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
 
   const sellGemData = encodeFunctionData({
     abi: usdsPsmWrapperAbi,
@@ -213,8 +214,8 @@ function buildL2Plan(
   receiver: Address,
   referralCode: bigint,
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
-  const usdc = getToken(chain.chainId, 'USDC');
-  const usds = getToken(chain.chainId, 'USDS');
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
   const psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
@@ -267,14 +268,16 @@ function quoteMainnetMintUsds(
 
   const publicClient = client.getPublicClient(chain.chainId);
 
-  return ResultAsync.fromPromise(
-    publicClient.readContract({
-      address: litePsmAddress,
-      abi: litePsmAbi,
-      functionName: 'tin',
-    }),
-    (err) => UnexpectedError.from(err),
-  ).map((tin) => usdsFromUsdcViaSellGem(amount, tin));
+  return ensurePsmTargetHasCode(client, chain.chainId, litePsmAddress, 'Lite PSM').andThen(() =>
+    ResultAsync.fromPromise(
+      publicClient.readContract({
+        address: litePsmAddress,
+        abi: litePsmAbi,
+        functionName: 'tin',
+      }),
+      (err) => UnexpectedError.from(err),
+    ).map((tin) => usdsFromUsdcViaSellGem(amount, tin)),
+  );
 }
 
 function quoteL2MintUsds(
@@ -283,8 +286,8 @@ function quoteL2MintUsds(
   amount: bigint,
   psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm,
 ): ResultAsync<bigint, UnexpectedError> {
-  const usdc = getToken(chain.chainId, 'USDC');
-  const usds = getToken(chain.chainId, 'USDS');
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
   const publicClient = client.getPublicClient(chain.chainId);
 
   return ResultAsync.fromPromise(

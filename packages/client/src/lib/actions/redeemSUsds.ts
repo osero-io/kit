@@ -12,7 +12,7 @@ import type { OseroClient } from '../OseroClient.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
 import { errAsync, ResultAsync } from '../result.js';
-import { getToken } from '../tokens.js';
+import { resolveToken } from '../tokens.js';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
 
 /**
@@ -162,8 +162,8 @@ function buildMainnetPlan(
   request: RedeemSUsdsRequest,
   receiver: Address,
 ): ResultAsync<MultiStepExecution, UnexpectedError> {
-  const usds = getToken(chain.chainId, 'USDS');
-  const susds = getToken(chain.chainId, 'sUSDS');
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
+  const susds = resolveToken(client.config, chain.chainId, 'sUSDS');
   const psmAddresses = resolvePsmAddresses(client.config, chain.chainId);
   const wrapperAddress = psmAddresses.psm;
   const litePsmAddress = psmAddresses.litePsm;
@@ -238,8 +238,8 @@ function buildL2Plan(
   receiver: Address,
   referralCode: bigint,
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
-  const usdc = getToken(chain.chainId, 'USDC');
-  const susds = getToken(chain.chainId, 'sUSDS');
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
+  const susds = resolveToken(client.config, chain.chainId, 'sUSDS');
   const psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
@@ -291,7 +291,7 @@ function readMainnetRedeemSUsdsQuoteInputs(
   amount: bigint,
   litePsmAddress = resolvePsmAddresses(client.config, chain.chainId).litePsm,
 ): ResultAsync<{ readonly usdsOut: bigint; readonly tout: bigint }, UnexpectedError> {
-  const susds = getToken(chain.chainId, 'sUSDS');
+  const susds = resolveToken(client.config, chain.chainId, 'sUSDS');
 
   if (!litePsmAddress) {
     return errAsync(
@@ -303,25 +303,29 @@ function readMainnetRedeemSUsdsQuoteInputs(
 
   const publicClient = client.getPublicClient(chain.chainId);
 
-  return ResultAsync.combine([
-    ResultAsync.fromPromise(
-      publicClient.readContract({
-        address: susds.address,
-        abi: erc4626Abi,
-        functionName: 'previewRedeem',
-        args: [amount],
-      }),
-      (err) => UnexpectedError.from(err),
+  return ensurePsmTargetHasCode(client, chain.chainId, susds.address, 'sUSDS').andThen(() =>
+    ensurePsmTargetHasCode(client, chain.chainId, litePsmAddress, 'Lite PSM').andThen(() =>
+      ResultAsync.combine([
+        ResultAsync.fromPromise(
+          publicClient.readContract({
+            address: susds.address,
+            abi: erc4626Abi,
+            functionName: 'previewRedeem',
+            args: [amount],
+          }),
+          (err) => UnexpectedError.from(err),
+        ),
+        ResultAsync.fromPromise(
+          publicClient.readContract({
+            address: litePsmAddress,
+            abi: litePsmAbi,
+            functionName: 'tout',
+          }),
+          (err) => UnexpectedError.from(err),
+        ),
+      ]).map(([usdsOut, tout]) => ({ usdsOut, tout })),
     ),
-    ResultAsync.fromPromise(
-      publicClient.readContract({
-        address: litePsmAddress,
-        abi: litePsmAbi,
-        functionName: 'tout',
-      }),
-      (err) => UnexpectedError.from(err),
-    ),
-  ]).map(([usdsOut, tout]) => ({ usdsOut, tout }));
+  );
 }
 
 function quoteL2RedeemSUsds(
@@ -330,8 +334,8 @@ function quoteL2RedeemSUsds(
   amount: bigint,
   psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm,
 ): ResultAsync<bigint, UnexpectedError> {
-  const usdc = getToken(chain.chainId, 'USDC');
-  const susds = getToken(chain.chainId, 'sUSDS');
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
+  const susds = resolveToken(client.config, chain.chainId, 'sUSDS');
   const publicClient = client.getPublicClient(chain.chainId);
 
   return ResultAsync.fromPromise(
