@@ -2,4 +2,4 @@
 '@osero/client': patch
 ---
 
-Apply slippage to the static mainnet mintSUsds USDS deposit step so small Lite PSM tin increases can leave leftover USDS with the sender instead of reverting phase 2.
+Refresh the mainnet `mintSUsds` USDS deposit step after `sellGem` confirmation so SDK adapters deposit the actual USDS received. The static fallback plan remains slippage-adjusted for inspection and custom executors that do not evaluate refresh hooks.

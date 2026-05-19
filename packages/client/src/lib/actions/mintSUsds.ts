@@ -1,5 +1,13 @@
-import { type Address, encodeFunctionData } from 'viem';
+import {
+  type Address,
+  encodeFunctionData,
+  type Hex,
+  isAddressEqual,
+  parseEventLogs,
+  type TransactionReceipt,
+} from 'viem';
 
+import { erc20Abi } from '../abis/erc20.js';
 import { erc4626Abi } from '../abis/erc4626.js';
 import { litePsmAbi } from '../abis/litePsm.js';
 import { psm3Abi } from '../abis/psm3.js';
@@ -13,7 +21,11 @@ import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } fro
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
 import { errAsync, okAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
-import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
+import type {
+  Erc20ApprovalRequired,
+  ExecutionStepRefreshContext,
+  MultiStepExecution,
+} from '../types.js';
 
 /**
  * Parameters accepted by {@link mintSUsds}.
@@ -52,10 +64,10 @@ export type MintSUsdsRequest = {
 
   /**
    * Slippage tolerance (basis points). On L2s it is applied to the
-   * PSM3 `previewSwapExactIn` quote. On Ethereum mainnet it is
-   * applied to the intermediate USDS amount deposited in phase 2, so
-   * small Lite PSM `tin` increases between planning and execution can
-   * leave USDS dust with `sender` instead of reverting the deposit.
+   * PSM3 `previewSwapExactIn` quote. On Ethereum mainnet SDK adapters
+   * refresh the deposit amount from the confirmed `sellGem` receipt;
+   * the static fallback plan applies this tolerance to avoid over-
+   * depositing when a custom executor ignores refresh hooks.
    *
    * @defaultValue {@link ClientConfig.defaultSlippageBps} (5 bps)
    */
@@ -146,9 +158,11 @@ export function previewMintSUsds(
  * The exact USDS bridge amount is computed off-chain from
  * `LitePSM.tin()`, which is governance-set and has been `0` since
  * launch. The SDK still reads it on every call so that a future
- * change is handled automatically. Because the returned plan is
- * static, the phase-2 deposit amount is reduced by `slippageBps`;
- * any USDS above that amount remains in `sender`'s balance.
+ * change is handled automatically. SDK adapters rebuild phase 2
+ * after `sellGem` confirms, using the actual USDS transferred to
+ * `sender`. The static fallback transaction in the returned plan is
+ * reduced by `slippageBps` for custom executors that do not evaluate
+ * refresh hooks.
  *
  * ```ts
  * import { mintSUsds } from '@osero/client/actions';
@@ -223,7 +237,7 @@ function buildMainnetPlan(
 
   return quoteMainnetUsdsBridgeAmount(client, chain, request.amount, litePsmAddress).map(
     (usdsOut): MultiStepExecution => {
-      const usdsToDeposit = applySlippage(usdsOut, slippageBps);
+      const fallbackUsdsToDeposit = applySlippage(usdsOut, slippageBps);
 
       // Phase 1 — USDC → USDS via Spark UsdsPsmWrapper.sellGem.
       // USDS goes to `sender` (the intermediate holder) because `sender`
@@ -249,35 +263,104 @@ function buildMainnetPlan(
         mainTransaction: sellGemTx,
       });
 
-      // Phase 2 — USDS → sUSDS via the ERC-4626 vault. The deposit
-      // amount is reduced by slippage because this static phase cannot
-      // re-read the sender's actual USDS balance after sellGem confirms.
-      const depositData = encodeFunctionData({
-        abi: erc4626Abi,
-        functionName: 'deposit',
-        args:
-          referralCode === undefined
-            ? [usdsToDeposit, receiver]
-            : [usdsToDeposit, receiver, referralCode],
-      });
-      const depositTx = makeTransactionRequest({
-        chainId: chain.chainId,
-        from: request.sender,
-        to: susds.address,
-        data: depositData,
-        operation: 'DEPOSIT_USDS_FOR_SUSDS',
-      });
-      const phase2 = makeSingleApprovalPlan({
-        chainId: chain.chainId,
-        from: request.sender,
-        token: usds.address,
-        spender: susds.address,
-        amount: usdsToDeposit,
-        mainTransaction: depositTx,
-      });
+      const phase2 = {
+        ...buildMainnetMintSUsdsPhase2({
+          chain,
+          sender: request.sender,
+          receiver,
+          usds: usds.address,
+          susds: susds.address,
+          usdsAmount: fallbackUsdsToDeposit,
+          referralCode,
+        }),
+        refresh: (context: ExecutionStepRefreshContext) => {
+          if (!context.previousTxHash) {
+            return errAsync(
+              UnexpectedError.from(
+                new Error(
+                  'Cannot refresh mainnet mintSUsds phase 2 without a sellGem transaction hash',
+                ),
+              ),
+            );
+          }
+
+          return refreshMainnetMintSUsdsPhase2(client, chain, {
+            sellGemTxHash: context.previousTxHash,
+            sender: request.sender,
+            receiver,
+            usds: usds.address,
+            susds: susds.address,
+            referralCode,
+          });
+        },
+      } satisfies Erc20ApprovalRequired;
 
       return makeMultiStepPlan([phase1, phase2]);
     },
+  );
+}
+
+function buildMainnetMintSUsdsPhase2(args: {
+  readonly chain: ChainMetadata;
+  readonly sender: Address;
+  readonly receiver: Address;
+  readonly usds: Address;
+  readonly susds: Address;
+  readonly usdsAmount: bigint;
+  readonly referralCode: number | undefined;
+}): Erc20ApprovalRequired {
+  const depositData = encodeFunctionData({
+    abi: erc4626Abi,
+    functionName: 'deposit',
+    args:
+      args.referralCode === undefined
+        ? [args.usdsAmount, args.receiver]
+        : [args.usdsAmount, args.receiver, args.referralCode],
+  });
+  const depositTx = makeTransactionRequest({
+    chainId: args.chain.chainId,
+    from: args.sender,
+    to: args.susds,
+    data: depositData,
+    operation: 'DEPOSIT_USDS_FOR_SUSDS',
+  });
+
+  return makeSingleApprovalPlan({
+    chainId: args.chain.chainId,
+    from: args.sender,
+    token: args.usds,
+    spender: args.susds,
+    amount: args.usdsAmount,
+    mainTransaction: depositTx,
+  });
+}
+
+function refreshMainnetMintSUsdsPhase2(
+  client: OseroClient,
+  chain: ChainMetadata,
+  args: {
+    readonly sellGemTxHash: Hex;
+    readonly sender: Address;
+    readonly receiver: Address;
+    readonly usds: Address;
+    readonly susds: Address;
+    readonly referralCode: number | undefined;
+  },
+): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
+  return readUsdsReceivedFromSellGemReceipt(client, chain, {
+    sellGemTxHash: args.sellGemTxHash,
+    sender: args.sender,
+    usds: args.usds,
+  }).map((usdsAmount) =>
+    buildMainnetMintSUsdsPhase2({
+      chain,
+      sender: args.sender,
+      receiver: args.receiver,
+      usds: args.usds,
+      susds: args.susds,
+      usdsAmount,
+      referralCode: args.referralCode,
+    }),
   );
 }
 
@@ -352,6 +435,53 @@ function quoteMainnetMintSUsds(
       (err) => UnexpectedError.from(err),
     ),
   );
+}
+
+function readUsdsReceivedFromSellGemReceipt(
+  client: OseroClient,
+  chain: ChainMetadata,
+  args: {
+    readonly sellGemTxHash: Hex;
+    readonly sender: Address;
+    readonly usds: Address;
+  },
+): ResultAsync<bigint, UnexpectedError> {
+  const publicClient = client.getPublicClient(chain.chainId);
+
+  return ResultAsync.fromPromise(
+    publicClient.getTransactionReceipt({ hash: args.sellGemTxHash }),
+    (err) => UnexpectedError.from(err),
+  ).andThen((receipt) => readUsdsTransferToSenderFromReceipt(receipt, args));
+}
+
+function readUsdsTransferToSenderFromReceipt(
+  receipt: TransactionReceipt,
+  args: {
+    readonly sender: Address;
+    readonly usds: Address;
+  },
+): ResultAsync<bigint, UnexpectedError> {
+  const logs = receipt.logs.filter((log) => isAddressEqual(log.address, args.usds));
+  const transferLogs = parseEventLogs({
+    abi: erc20Abi,
+    eventName: 'Transfer',
+    logs,
+  });
+  const received = transferLogs
+    .filter((log) => isAddressEqual(log.args.to, args.sender))
+    .reduce((sum, log) => sum + log.args.value, 0n);
+
+  if (received === 0n) {
+    return errAsync(
+      UnexpectedError.from(
+        new Error(
+          'Could not find the USDS Transfer event needed to refresh mainnet mintSUsds phase 2',
+        ),
+      ),
+    );
+  }
+
+  return okAsync(received);
 }
 
 function quoteMainnetUsdsBridgeAmount(
