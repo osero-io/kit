@@ -54,6 +54,27 @@ export type Erc20Approval = {
 };
 
 /**
+ * Context passed to an approval-gated step that can be rebuilt just
+ * before execution. `previousTxHash` is the last confirmed transaction
+ * hash in the containing plan, when there is one.
+ */
+export type ExecutionStepRefreshContext = {
+  readonly previousTxHash?: Hex;
+};
+
+/**
+ * Rebuild an approval-gated step immediately before it executes.
+ *
+ * Static `approvals` and `originalTransaction` remain the concrete
+ * fallback for plan inspection and custom executors. SDK adapters use
+ * this hook when present so multi-phase actions can base later phases
+ * on on-chain state produced by earlier phases.
+ */
+export type ExecutionStepRefresh = (
+  context: ExecutionStepRefreshContext,
+) => ResultAsync<Erc20ApprovalRequired, UnexpectedError>;
+
+/**
  * An action whose final transaction cannot be sent until one or more
  * ERC-20 approvals have landed on-chain. The executor is expected to
  * submit every approval in order before broadcasting
@@ -63,6 +84,7 @@ export type Erc20ApprovalRequired = {
   readonly __typename: 'Erc20ApprovalRequired';
   readonly approvals: readonly Erc20Approval[];
   readonly originalTransaction: TransactionRequest;
+  readonly refresh?: ExecutionStepRefresh;
 };
 
 /**

@@ -12,7 +12,7 @@ import {
 import { UnexpectedError } from './errors.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from './plan.js';
 import { errAsync, okAsync } from './result.js';
-import type { TransactionRequest } from './types.js';
+import type { ExecutionStepRefresh, TransactionRequest } from './types.js';
 
 function fakeTx(hex: `0x${string}`, op: TransactionRequest['operation'] = 'MINT_USDS') {
   return makeTransactionRequest({
@@ -148,6 +148,60 @@ describe('runExecutionPlan', () => {
       expect(result.value.operations).toEqual(['APPROVE_ERC20', 'MINT_USDS']);
       // Final hash is the LAST tx, not the first.
       expect(result.value.txHash).toBe(`0x${(2).toString(16).padStart(64, '0')}`);
+    }
+  });
+
+  it('refreshes an approval-gated step with the previous transaction hash before execution', async () => {
+    const phase1 = fakeTx('0x01', 'REDEEM_SUSDS_FOR_USDS');
+    const staleMain = fakeTx('0x02', 'REDEEM_USDS_FOR_USDC');
+    const stalePhase2 = makeSingleApprovalPlan({
+      chainId: 1,
+      from: '0x1111111111111111111111111111111111111111',
+      token: '0x2222222222222222222222222222222222222222',
+      spender: '0x3333333333333333333333333333333333333333',
+      amount: 1n,
+      mainTransaction: staleMain,
+    });
+    const refreshedMain = fakeTx('0x03', 'REDEEM_USDS_FOR_USDC');
+    const refreshedPhase2 = makeSingleApprovalPlan({
+      chainId: 1,
+      from: '0x1111111111111111111111111111111111111111',
+      token: '0x2222222222222222222222222222222222222222',
+      spender: '0x3333333333333333333333333333333333333333',
+      amount: 2n,
+      mainTransaction: refreshedMain,
+    });
+    const refresh = vi.fn<ExecutionStepRefresh>(() => okAsync(refreshedPhase2));
+    const plan = makeMultiStepPlan([
+      phase1,
+      {
+        ...stalePhase2,
+        refresh,
+      },
+    ]);
+
+    const calls: TransactionRequest[] = [];
+    const executor = vi.fn<SingleTxExecutor>((tx) => {
+      calls.push(tx);
+      return okAsync(`0x${calls.length.toString(16).padStart(64, '0')}` as `0x${string}`);
+    });
+
+    const result = await runExecutionPlan(plan, executor);
+
+    expect(result.isOk()).toBe(true);
+    expect(refresh).toHaveBeenCalledWith({
+      previousTxHash: `0x${(1).toString(16).padStart(64, '0')}`,
+    });
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toBe(phase1);
+    expect(calls[1]!.data).toBe(refreshedPhase2.approvals[0]!.byTransaction.data);
+    expect(calls[2]).toBe(refreshedMain);
+    if (result.isOk()) {
+      expect(result.value.operations).toEqual([
+        'REDEEM_SUSDS_FOR_USDS',
+        'APPROVE_ERC20',
+        'REDEEM_USDS_FOR_USDC',
+      ]);
     }
   });
 

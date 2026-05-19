@@ -1,4 +1,10 @@
-import { type Address, encodeFunctionData } from 'viem';
+import {
+  type Address,
+  encodeFunctionData,
+  isAddressEqual,
+  parseEventLogs,
+  type TransactionReceipt,
+} from 'viem';
 
 import { erc4626Abi } from '../abis/erc4626.js';
 import { litePsmAbi } from '../abis/litePsm.js';
@@ -11,9 +17,13 @@ import { applySlippage, usdcFromUsdsViaBuyGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
-import { errAsync, ResultAsync } from '../result.js';
+import { errAsync, okAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
-import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
+import type {
+  Erc20ApprovalRequired,
+  ExecutionStepRefreshContext,
+  MultiStepExecution,
+} from '../types.js';
 
 /**
  * Parameters accepted by {@link redeemSUsds}.
@@ -124,11 +134,10 @@ export function previewRedeemSUsds(
  * 2. `USDS.approve(UsdsPsmWrapper, usdsOut)`
  * 3. `UsdsPsmWrapper.buyGem(receiver, gemAmt)`
  *
- * `usdsOut` is read from `sUSDS.previewRedeem(amount)` at plan
- * time; the live number at execution time is strictly greater
- * because the SSR only accrues upwards, so the approval always
- * covers it. Any USDS dust left over after `buyGem` stays in
- * `sender`'s USDS balance.
+ * Phase 2 is refreshed by the SDK adapters after phase 1 confirms,
+ * using the actual USDS amount from the redeem receipt and the live
+ * Lite PSM `tout`. The plan still includes concrete fallback phase-2
+ * transactions for inspection and custom executors.
  */
 export function redeemSUsds(
   client: OseroClient,
@@ -196,36 +205,113 @@ function buildMainnetPlan(
         operation: 'REDEEM_SUSDS_FOR_USDS',
       });
 
-      // Phase 2 — approve USDS to the wrapper, then buyGem. The
-      // `gemAmt` is computed from `usdsOut` and current `tout`, then
-      // reduced by `slippageBps` to leave headroom for tout
-      // fluctuations.
-      const baseGemAmt = usdcFromUsdsViaBuyGem(usdsOut, tout);
-      const gemAmt = applySlippage(baseGemAmt, slippageBps);
-
-      const buyGemData = encodeFunctionData({
-        abi: usdsPsmWrapperAbi,
-        functionName: 'buyGem',
-        args: [receiver, gemAmt],
-      });
-      const buyGemTx = makeTransactionRequest({
-        chainId: chain.chainId,
-        from: request.sender,
-        to: wrapperAddress,
-        data: buyGemData,
-        operation: 'REDEEM_USDS_FOR_USDC',
-      });
-      const phase2 = makeSingleApprovalPlan({
-        chainId: chain.chainId,
-        from: request.sender,
-        token: usds.address,
-        spender: wrapperAddress,
-        amount: usdsOut,
-        mainTransaction: buyGemTx,
-      });
+      const phase2 = {
+        ...buildMainnetRedeemSUsdsPhase2({
+          chain,
+          sender: request.sender,
+          receiver,
+          usds: usds.address,
+          wrapperAddress,
+          usdsAmount: usdsOut,
+          tout,
+          slippageBps,
+        }),
+        refresh: (context: ExecutionStepRefreshContext) =>
+          refreshMainnetRedeemSUsdsPhase2(client, chain, {
+            redeemTxHash: context.previousTxHash,
+            shares: request.amount,
+            sender: request.sender,
+            receiver,
+            usds: usds.address,
+            susds: susds.address,
+            wrapperAddress,
+            litePsmAddress,
+            slippageBps,
+          }),
+      } satisfies Erc20ApprovalRequired;
 
       return makeMultiStepPlan([redeemTx, phase2]);
     },
+  );
+}
+
+function buildMainnetRedeemSUsdsPhase2(args: {
+  readonly chain: ChainMetadata;
+  readonly sender: Address;
+  readonly receiver: Address;
+  readonly usds: Address;
+  readonly wrapperAddress: Address;
+  readonly usdsAmount: bigint;
+  readonly tout: bigint;
+  readonly slippageBps: number;
+}): Erc20ApprovalRequired {
+  const baseGemAmt = usdcFromUsdsViaBuyGem(args.usdsAmount, args.tout);
+  const gemAmt = applySlippage(baseGemAmt, args.slippageBps);
+
+  const buyGemData = encodeFunctionData({
+    abi: usdsPsmWrapperAbi,
+    functionName: 'buyGem',
+    args: [args.receiver, gemAmt],
+  });
+  const buyGemTx = makeTransactionRequest({
+    chainId: args.chain.chainId,
+    from: args.sender,
+    to: args.wrapperAddress,
+    data: buyGemData,
+    operation: 'REDEEM_USDS_FOR_USDC',
+  });
+
+  return makeSingleApprovalPlan({
+    chainId: args.chain.chainId,
+    from: args.sender,
+    token: args.usds,
+    spender: args.wrapperAddress,
+    amount: args.usdsAmount,
+    mainTransaction: buyGemTx,
+  });
+}
+
+function refreshMainnetRedeemSUsdsPhase2(
+  client: OseroClient,
+  chain: ChainMetadata,
+  args: {
+    readonly redeemTxHash?: `0x${string}`;
+    readonly shares: bigint;
+    readonly sender: Address;
+    readonly receiver: Address;
+    readonly usds: Address;
+    readonly susds: Address;
+    readonly wrapperAddress: Address;
+    readonly litePsmAddress: Address;
+    readonly slippageBps: number;
+  },
+): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
+  const redeemTxHash = args.redeemTxHash;
+  if (!redeemTxHash) {
+    return errAsync(
+      UnexpectedError.from(
+        new Error('Cannot refresh mainnet redeemSUsds phase 2 without a redeem transaction hash'),
+      ),
+    );
+  }
+
+  return readConfirmedMainnetRedeemSUsdsPhase2Inputs(client, chain, {
+    redeemTxHash,
+    shares: args.shares,
+    sender: args.sender,
+    susds: args.susds,
+    litePsmAddress: args.litePsmAddress,
+  }).map(({ usdsOut, tout }) =>
+    buildMainnetRedeemSUsdsPhase2({
+      chain,
+      sender: args.sender,
+      receiver: args.receiver,
+      usds: args.usds,
+      wrapperAddress: args.wrapperAddress,
+      usdsAmount: usdsOut,
+      tout,
+      slippageBps: args.slippageBps,
+    }),
   );
 }
 
@@ -316,6 +402,70 @@ function readMainnetRedeemSUsdsQuoteInputs(
       (err) => UnexpectedError.from(err),
     ),
   ]).map(([usdsOut, tout]) => ({ usdsOut, tout }));
+}
+
+function readConfirmedMainnetRedeemSUsdsPhase2Inputs(
+  client: OseroClient,
+  chain: ChainMetadata,
+  args: {
+    readonly redeemTxHash: `0x${string}`;
+    readonly shares: bigint;
+    readonly sender: Address;
+    readonly susds: Address;
+    readonly litePsmAddress: Address;
+  },
+): ResultAsync<{ readonly usdsOut: bigint; readonly tout: bigint }, UnexpectedError> {
+  const publicClient = client.getPublicClient(chain.chainId);
+
+  return ResultAsync.combine([
+    ResultAsync.fromPromise(
+      publicClient.getTransactionReceipt({ hash: args.redeemTxHash }),
+      (err) => UnexpectedError.from(err),
+    ).andThen((receipt) => readUsdsRedeemedFromReceipt(receipt, args)),
+    ResultAsync.fromPromise(
+      publicClient.readContract({
+        address: args.litePsmAddress,
+        abi: litePsmAbi,
+        functionName: 'tout',
+      }),
+      (err) => UnexpectedError.from(err),
+    ),
+  ]).map(([usdsOut, tout]) => ({ usdsOut, tout }));
+}
+
+function readUsdsRedeemedFromReceipt(
+  receipt: TransactionReceipt,
+  args: {
+    readonly shares: bigint;
+    readonly sender: Address;
+    readonly susds: Address;
+  },
+): ResultAsync<bigint, UnexpectedError> {
+  const logs = receipt.logs.filter((log) => isAddressEqual(log.address, args.susds));
+  const withdrawLogs = parseEventLogs({
+    abi: erc4626Abi,
+    eventName: 'Withdraw',
+    logs,
+  });
+  const matchingLog = withdrawLogs.find(
+    (log) =>
+      isAddressEqual(log.args.sender, args.sender) &&
+      isAddressEqual(log.args.receiver, args.sender) &&
+      isAddressEqual(log.args.owner, args.sender) &&
+      log.args.shares === args.shares,
+  );
+
+  if (!matchingLog) {
+    return errAsync(
+      UnexpectedError.from(
+        new Error(
+          'Could not find the sUSDS Withdraw event needed to refresh mainnet redeemSUsds phase 2',
+        ),
+      ),
+    );
+  }
+
+  return okAsync(matchingLog.args.assets);
 }
 
 function quoteL2RedeemSUsds(

@@ -85,6 +85,67 @@ export type SingleTxExecutor = (
   tx: TransactionRequest,
 ) => ResultAsync<`0x${string}`, CancelError | SigningError | TransactionError | UnexpectedError>;
 
+type RunState = {
+  readonly txHash?: TransactionResult['txHash'];
+  readonly operations: readonly OperationType[];
+};
+
+function runTransaction(
+  tx: TransactionRequest,
+  execute: SingleTxExecutor,
+  state: RunState,
+): ResultAsync<RunState, SendWithError> {
+  return execute(tx).map((txHash) => ({
+    txHash,
+    operations: [...state.operations, tx.operation],
+  }));
+}
+
+function runTransactions(
+  transactions: readonly TransactionRequest[],
+  execute: SingleTxExecutor,
+  state: RunState,
+): ResultAsync<RunState, SendWithError> {
+  return transactions.reduce<ResultAsync<RunState, SendWithError>>(
+    (acc, tx) => acc.andThen((current) => runTransaction(tx, execute, current)),
+    okAsync(state),
+  );
+}
+
+function runApprovalRequired(
+  plan: Erc20ApprovalRequired,
+  execute: SingleTxExecutor,
+  state: RunState,
+): ResultAsync<RunState, SendWithError> {
+  const resolved = plan.refresh ? plan.refresh({ previousTxHash: state.txHash }) : okAsync(plan);
+
+  return resolved.andThen((current) =>
+    runTransactions(
+      [...current.approvals.map((approval) => approval.byTransaction), current.originalTransaction],
+      execute,
+      state,
+    ),
+  );
+}
+
+function runExecutionNode(
+  plan: ExecutionPlan | ExecutionStep,
+  execute: SingleTxExecutor,
+  state: RunState,
+): ResultAsync<RunState, SendWithError> {
+  if (isTransactionRequest(plan)) {
+    return runTransaction(plan, execute, state);
+  }
+  if (isErc20ApprovalRequired(plan)) {
+    return runApprovalRequired(plan, execute, state);
+  }
+
+  return plan.steps.reduce<ResultAsync<RunState, SendWithError>>(
+    (acc, step) => acc.andThen((current) => runExecutionNode(step, execute, current)),
+    okAsync(state),
+  );
+}
+
 /**
  * Run an {@link ExecutionPlan} against a wallet-specific
  * {@link SingleTxExecutor}. Every adapter in the SDK reduces to this
@@ -103,23 +164,13 @@ export function runExecutionPlan(
   plan: ExecutionPlan,
   execute: SingleTxExecutor,
 ): ResultAsync<TransactionResult, SendWithError> {
-  const transactions = flattenExecutionPlan(plan);
-  const operations = transactions.map((tx) => tx.operation);
-
-  if (transactions.length === 0) {
-    return errAsync(UnexpectedError.from(new Error('Execution plan has no transactions')));
-  }
-
-  const initial: ResultAsync<`0x${string}`, SendWithError> = execute(transactions[0]!);
-
-  const final = transactions
-    .slice(1)
-    .reduce<typeof initial>((acc, tx) => acc.andThen(() => execute(tx)), initial);
-
-  return final.andThen((txHash) =>
-    okAsync({
-      txHash,
-      operations,
-    } satisfies TransactionResult),
-  );
+  return runExecutionNode(plan, execute, { operations: [] }).andThen((state) => {
+    if (!state.txHash) {
+      return errAsync(UnexpectedError.from(new Error('Execution plan has no transactions')));
+    }
+    return okAsync({
+      txHash: state.txHash,
+      operations: state.operations,
+    } satisfies TransactionResult);
+  });
 }

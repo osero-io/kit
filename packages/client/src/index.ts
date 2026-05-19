@@ -181,6 +181,8 @@ export type {
   ExecutionPlan,
   ExecutionPlanHandler,
   ExecutionStep,
+  ExecutionStepRefresh,
+  ExecutionStepRefreshContext,
   MultiStepExecution,
   OperationType,
   SendWithError,
