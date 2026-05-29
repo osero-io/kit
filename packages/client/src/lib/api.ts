@@ -12,22 +12,131 @@ import type { Erc20ApprovalRequired, OperationType, TransactionRequest } from '.
 
 export const DEFAULT_OSERO_API_BASE_URL = 'https://api.osero.org/v1/';
 
-export const OSERO_API_COUNTER_ASSET_IDS = [
-  'base:usdc',
-  'arbitrum:usdc',
-  'optimism:usdc',
-  'linea:usdc',
-  'ethereum:usdc',
+/**
+ * Chains the Osero swap API can route from or to, as a single source of truth.
+ * Add a chain here to make its id and key decodable in `/swap/assets` and quote
+ * responses. Counter assets bind to a chain through their `<chainKey>:` asset-id
+ * prefix, so every chain listed here backs at least one counter asset.
+ */
+export const OSERO_API_CHAINS = [
+  { chainKey: 'ethereum', chainId: 1 },
+  { chainKey: 'base', chainId: 8453 },
+  { chainKey: 'arbitrum', chainId: 42161 },
+  { chainKey: 'optimism', chainId: 10 },
+  { chainKey: 'linea', chainId: 59144 },
+  { chainKey: 'bnb', chainId: 56 },
+  { chainKey: 'unichain', chainId: 130 },
+  { chainKey: 'polygon', chainId: 137 },
+  { chainKey: 'monad', chainId: 143 },
+  { chainKey: 'hyperevm', chainId: 999 },
+  { chainKey: 'plasma', chainId: 9745 },
+  { chainKey: 'avalanche_c', chainId: 43114 },
+  { chainKey: 'berachain', chainId: 80094 },
 ] as const;
 
-export const OSERO_API_SUSDS_ASSET_ID = 'ethereum:susds' as const;
-
-export const OSERO_API_PUBLIC_ASSET_IDS = [
-  ...OSERO_API_COUNTER_ASSET_IDS,
-  OSERO_API_SUSDS_ASSET_ID,
+/**
+ * Counter assets — the user-facing tokens swappable against the sUSDS vault.
+ * Each id is `<chainKey>:<tokenKey>`, with `chainKey` drawn from
+ * {@link OSERO_API_CHAINS}. Add a row to support a new token, or a new chain
+ * deployment of a token; the derived id, symbol, and decimal sets plus every
+ * response decoder below update from this list. Contract addresses are NOT kept
+ * here — this is an API client, so it only validates that responses carry a
+ * well-formed address and trusts the API for the canonical deployment.
+ */
+export const OSERO_API_COUNTER_ASSETS = [
+  // USDC — native Circle issuance (6 decimals).
+  { assetId: 'base:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'arbitrum:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'optimism:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'linea:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'ethereum:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'avalanche_c:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'hyperevm:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'monad:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'polygon:usdc', symbol: 'USDC', decimals: 6 },
+  { assetId: 'unichain:usdc', symbol: 'USDC', decimals: 6 },
+  // USDC.e — canonical bridged USDC on Berachain (6 decimals).
+  { assetId: 'berachain:usdce', symbol: 'USDC.e', decimals: 6 },
+  // USDe — Ethena synthetic dollar (18 decimals).
+  { assetId: 'ethereum:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'arbitrum:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'base:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'optimism:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'linea:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'avalanche_c:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'bnb:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'berachain:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'hyperevm:usde', symbol: 'USDe', decimals: 18 },
+  { assetId: 'plasma:usde', symbol: 'USDe', decimals: 18 },
+  // Ethereum-native stablecoins.
+  { assetId: 'ethereum:ausd', symbol: 'AUSD', decimals: 6 },
+  { assetId: 'ethereum:gho', symbol: 'GHO', decimals: 18 },
+  { assetId: 'ethereum:pyusd', symbol: 'PYUSD', decimals: 6 },
+  { assetId: 'arbitrum:pyusd', symbol: 'PYUSD', decimals: 6 },
+  { assetId: 'ethereum:rlusd', symbol: 'RLUSD', decimals: 18 },
+  { assetId: 'ethereum:usdd', symbol: 'USDD', decimals: 18 },
+  { assetId: 'ethereum:usdg', symbol: 'USDG', decimals: 6 },
+  { assetId: 'ethereum:usdt', symbol: 'USDT', decimals: 6 },
+  { assetId: 'ethereum:usdtb', symbol: 'USDtb', decimals: 18 },
+  { assetId: 'ethereum:frxusd', symbol: 'frxUSD', decimals: 18 },
 ] as const;
 
-export const OSERO_API_SOURCE_CHAIN_IDS = [1, 8453, 42161, 10, 59144] as const;
+/** The single sUSDS vault asset that every counter asset swaps against. */
+export const OSERO_API_VAULT_ASSET = {
+  assetId: 'ethereum:susds',
+  symbol: 'sUSDS',
+  decimals: 18,
+} as const;
+
+const OSERO_API_ASSETS = [...OSERO_API_COUNTER_ASSETS, OSERO_API_VAULT_ASSET] as const;
+
+export type OseroApiAsset =
+  | (typeof OSERO_API_COUNTER_ASSETS)[number]
+  | typeof OSERO_API_VAULT_ASSET;
+export type OseroApiChain = (typeof OSERO_API_CHAINS)[number];
+export type OseroApiCounterAssetId = (typeof OSERO_API_COUNTER_ASSETS)[number]['assetId'];
+export type OseroApiSusdsAssetId = (typeof OSERO_API_VAULT_ASSET)['assetId'];
+export type OseroApiPublicAssetId = OseroApiAsset['assetId'];
+export type OseroApiChainKey = OseroApiChain['chainKey'];
+export type OseroApiChainId = OseroApiChain['chainId'];
+export type OseroApiSourceChainId = OseroApiChainId;
+export type OseroApiAssetSymbol = OseroApiAsset['symbol'];
+export type OseroApiAssetDecimals = OseroApiAsset['decimals'];
+
+export const OSERO_API_COUNTER_ASSET_IDS: readonly OseroApiCounterAssetId[] =
+  OSERO_API_COUNTER_ASSETS.map((asset) => asset.assetId);
+
+export const OSERO_API_SUSDS_ASSET_ID: OseroApiSusdsAssetId = OSERO_API_VAULT_ASSET.assetId;
+
+export const OSERO_API_PUBLIC_ASSET_IDS: readonly OseroApiPublicAssetId[] = OSERO_API_ASSETS.map(
+  (asset) => asset.assetId,
+);
+
+export const OSERO_API_CHAIN_IDS: readonly OseroApiChainId[] = OSERO_API_CHAINS.map(
+  (chain) => chain.chainId,
+);
+
+export const OSERO_API_SOURCE_CHAIN_IDS: readonly OseroApiSourceChainId[] = OSERO_API_CHAIN_IDS;
+
+const OSERO_API_CHAIN_KEYS: readonly OseroApiChainKey[] = OSERO_API_CHAINS.map(
+  (chain) => chain.chainKey,
+);
+
+const OSERO_API_ASSET_SYMBOLS: readonly OseroApiAssetSymbol[] = [
+  ...new Set(OSERO_API_ASSETS.map((asset) => asset.symbol)),
+];
+
+const OSERO_API_ASSET_DECIMALS: readonly OseroApiAssetDecimals[] = [
+  ...new Set(OSERO_API_ASSETS.map((asset) => asset.decimals)),
+];
+
+const OSERO_API_CHAIN_BY_KEY = new Map<OseroApiChainKey, OseroApiChain>(
+  OSERO_API_CHAINS.map((chain) => [chain.chainKey, chain]),
+);
+
+const OSERO_API_ASSET_BY_ID = new Map<OseroApiPublicAssetId, OseroApiAsset>(
+  OSERO_API_ASSETS.map((asset) => [asset.assetId, asset]),
+);
 
 export const OSERO_API_BRIDGE_PROTOCOLS = ['ccip', 'layerzero', 'relay', 'stargate'] as const;
 export const OSERO_API_KEY_PREFIX = 'osero_';
@@ -36,10 +145,6 @@ export const OSERO_API_REFERRAL_CODE_MIN = 3000;
 export const OSERO_API_REFERRAL_CODE_MAX = 3999;
 const UINT256_MAX = 2n ** 256n - 1n;
 
-export type OseroApiCounterAssetId = (typeof OSERO_API_COUNTER_ASSET_IDS)[number];
-export type OseroApiSusdsAssetId = typeof OSERO_API_SUSDS_ASSET_ID;
-export type OseroApiPublicAssetId = (typeof OSERO_API_PUBLIC_ASSET_IDS)[number];
-export type OseroApiSourceChainId = (typeof OSERO_API_SOURCE_CHAIN_IDS)[number];
 export type OseroApiBridgeProtocol = (typeof OSERO_API_BRIDGE_PROTOCOLS)[number];
 export type OseroApiIntegerString = `${bigint}`;
 export type OseroApiReferralCode = number;
@@ -115,8 +220,6 @@ export type OseroApiClientError =
   | UnexpectedError;
 
 export type OseroApiAssetKind = 'counter' | 'vault';
-export type OseroApiChainKey = 'ethereum' | 'base' | 'arbitrum' | 'optimism' | 'linea';
-export type OseroApiAssetSymbol = 'USDC' | 'sUSDS';
 export type OseroApiSwapDirection = 'to-susds' | 'from-susds';
 export type OseroApiSwapExecutionKind = 'same-chain' | 'cross-chain';
 export type OseroApiBridgeState = 'pending' | 'completed' | 'failed' | 'unknown';
@@ -129,12 +232,12 @@ export type OseroApiBridgeProviderStatus =
 
 export type OseroApiSwapAsset = {
   readonly assetId: OseroApiPublicAssetId;
-  readonly chainId: OseroApiSourceChainId;
+  readonly chainId: OseroApiChainId;
   readonly chainKey: OseroApiChainKey;
   readonly chainName: string;
   readonly chainShortName: string;
   readonly symbol: OseroApiAssetSymbol;
-  readonly decimals: 6 | 18;
+  readonly decimals: OseroApiAssetDecimals;
   readonly address: Address;
   readonly label: string;
 };
@@ -196,7 +299,7 @@ export type OseroApiSwapApproval = {
 export type OseroApiSwapExecution = {
   readonly kind: OseroApiSwapExecutionKind;
   readonly sourceChainId: OseroApiSourceChainId;
-  readonly destinationChainId: OseroApiSourceChainId;
+  readonly destinationChainId: OseroApiChainId;
   readonly transaction: OseroApiSwapTransaction;
   readonly route: readonly OseroApiSwapRouteHop[];
 };
@@ -711,13 +814,20 @@ function decodeSupportedAssetsResponse(
 function decodeSwapQuoteResponse(
   value: unknown,
 ): Result<OseroApiSwapQuoteResponse, UnexpectedError> {
-  return decode(value, (root) => ({
-    pair: decodeSwapPair(requiredField(root, 'pair', '$.pair'), '$.pair'),
-    quote: decodeSwapQuoteInfo(requiredField(root, 'quote', '$.quote'), '$.quote'),
-    approval: decodeSwapApproval(requiredField(root, 'approval', '$.approval'), '$.approval'),
-    execution: decodeSwapExecution(requiredField(root, 'execution', '$.execution'), '$.execution'),
-    bridge: decodeSwapBridge(requiredField(root, 'bridge', '$.bridge'), '$.bridge'),
-  }));
+  return decode(value, (root) => {
+    const response = {
+      pair: decodeSwapPair(requiredField(root, 'pair', '$.pair'), '$.pair'),
+      quote: decodeSwapQuoteInfo(requiredField(root, 'quote', '$.quote'), '$.quote'),
+      approval: decodeSwapApproval(requiredField(root, 'approval', '$.approval'), '$.approval'),
+      execution: decodeSwapExecution(
+        requiredField(root, 'execution', '$.execution'),
+        '$.execution',
+      ),
+      bridge: decodeSwapBridge(requiredField(root, 'bridge', '$.bridge'), '$.bridge'),
+    };
+    assertSwapQuoteInvariants(response);
+    return response;
+  });
 }
 
 function decodeSwapStatusResponse(
@@ -726,6 +836,67 @@ function decodeSwapStatusResponse(
   return decode(value, (root) => ({
     bridge: decodeSwapStatusBridge(requiredField(root, 'bridge', '$.bridge'), '$.bridge'),
   }));
+}
+
+function assertSwapQuoteInvariants(response: OseroApiSwapQuoteResponse): void {
+  const { pair, approval, execution, bridge } = response;
+
+  if (!isSupportedApiSwapPair(pair.from.assetId, pair.to.assetId)) {
+    throw new DecodeError('$.pair must be a supported counter asset <-> sUSDS pair');
+  }
+
+  const expectedDirection =
+    pair.from.assetId === OSERO_API_SUSDS_ASSET_ID ? 'from-susds' : 'to-susds';
+  if (pair.direction !== expectedDirection) {
+    throw new DecodeError(`$.pair.direction must be '${expectedDirection}' for this asset pair`);
+  }
+
+  if (approval.token.assetId !== pair.from.assetId) {
+    throw new DecodeError('$.approval.token must match $.pair.from');
+  }
+  if (approval.token.address !== pair.from.address) {
+    throw new DecodeError('$.approval.token.address must match $.pair.from.address');
+  }
+  if (approval.transaction.to !== approval.token.address) {
+    throw new DecodeError('$.approval.transaction.to must match $.approval.token.address');
+  }
+  if (approval.transaction.value !== '0') {
+    throw new DecodeError('$.approval.transaction.value must be 0');
+  }
+  if (approval.transaction.from !== execution.transaction.from) {
+    throw new DecodeError('$.approval.transaction.from must match $.execution.transaction.from');
+  }
+
+  if (execution.sourceChainId !== pair.from.chainId) {
+    throw new DecodeError('$.execution.sourceChainId must match $.pair.from.chainId');
+  }
+  if (execution.destinationChainId !== pair.to.chainId) {
+    throw new DecodeError('$.execution.destinationChainId must match $.pair.to.chainId');
+  }
+  if (execution.kind === 'same-chain' && execution.sourceChainId !== execution.destinationChainId) {
+    throw new DecodeError('$.execution.kind cannot be same-chain across different chains');
+  }
+  if (
+    execution.kind === 'cross-chain' &&
+    execution.sourceChainId === execution.destinationChainId
+  ) {
+    throw new DecodeError('$.execution.kind cannot be cross-chain on a single chain');
+  }
+
+  const bridgeRequired = execution.kind === 'cross-chain';
+  if (bridge.required !== bridgeRequired) {
+    throw new DecodeError('$.bridge.required must match $.execution.kind');
+  }
+  if (bridge.required) {
+    if (bridge.statusRequest.sourceChainId !== execution.sourceChainId) {
+      throw new DecodeError(
+        '$.bridge.statusRequest.sourceChainId must match $.execution.sourceChainId',
+      );
+    }
+    if (bridge.statusRequest.bridgeProtocol !== bridge.protocol) {
+      throw new DecodeError('$.bridge.statusRequest.bridgeProtocol must match $.bridge.protocol');
+    }
+  }
 }
 
 function decode<T>(
@@ -741,9 +912,15 @@ function decode<T>(
 
 function decodeSupportedAsset(value: unknown, path: string): OseroApiSupportedAsset {
   const record = asRecord(value, path);
+  const asset = decodeSwapAsset(record, path);
+  const kind = enumStringField(record, 'kind', `${path}.kind`, OSERO_API_ASSET_KINDS);
+  const expectedKind = asset.assetId === OSERO_API_SUSDS_ASSET_ID ? 'vault' : 'counter';
+  if (kind !== expectedKind) {
+    throw new DecodeError(`${path}.kind must be '${expectedKind}' for ${asset.assetId}`);
+  }
   return {
-    ...decodeSwapAsset(record, path),
-    kind: enumStringField(record, 'kind', `${path}.kind`, OSERO_API_ASSET_KINDS),
+    ...asset,
+    kind,
   };
 }
 
@@ -758,17 +935,55 @@ function decodeSwapPair(value: unknown, path: string): OseroApiSwapPair {
 
 function decodeSwapAsset(value: unknown, path: string): OseroApiSwapAsset {
   const record = asRecord(value, path);
+  const assetId = enumStringField(record, 'assetId', `${path}.assetId`, OSERO_API_PUBLIC_ASSET_IDS);
+  const expectedAsset = apiAssetForId(assetId, `${path}.assetId`);
+  const expectedChain = apiChainForAssetId(assetId, `${path}.assetId`);
+  const chainId = sourceChainIdField(record, 'chainId', `${path}.chainId`);
+  const chainKey = enumStringField(record, 'chainKey', `${path}.chainKey`, OSERO_API_CHAIN_KEYS);
+  const symbol = enumStringField(record, 'symbol', `${path}.symbol`, OSERO_API_ASSET_SYMBOLS);
+  const decimals = decimalsField(record, 'decimals', `${path}.decimals`);
+
+  if (chainKey !== expectedChain.chainKey) {
+    throw new DecodeError(`${path}.chainKey must be '${expectedChain.chainKey}' for ${assetId}`);
+  }
+  if (chainId !== expectedChain.chainId) {
+    throw new DecodeError(`${path}.chainId must be ${expectedChain.chainId} for ${assetId}`);
+  }
+  if (symbol !== expectedAsset.symbol) {
+    throw new DecodeError(`${path}.symbol must be '${expectedAsset.symbol}' for ${assetId}`);
+  }
+  if (decimals !== expectedAsset.decimals) {
+    throw new DecodeError(`${path}.decimals must be ${expectedAsset.decimals} for ${assetId}`);
+  }
+
   return {
-    assetId: enumStringField(record, 'assetId', `${path}.assetId`, OSERO_API_PUBLIC_ASSET_IDS),
-    chainId: sourceChainIdField(record, 'chainId', `${path}.chainId`),
-    chainKey: enumStringField(record, 'chainKey', `${path}.chainKey`, OSERO_API_CHAIN_KEYS),
+    assetId,
+    chainId,
+    chainKey,
     chainName: stringField(record, 'chainName', `${path}.chainName`),
     chainShortName: stringField(record, 'chainShortName', `${path}.chainShortName`),
-    symbol: enumStringField(record, 'symbol', `${path}.symbol`, OSERO_API_ASSET_SYMBOLS),
-    decimals: decimalsField(record, 'decimals', `${path}.decimals`),
+    symbol,
+    decimals,
     address: addressField(record, 'address', `${path}.address`),
     label: stringField(record, 'label', `${path}.label`),
   };
+}
+
+function apiAssetForId(assetId: OseroApiPublicAssetId, path: string): OseroApiAsset {
+  const asset = OSERO_API_ASSET_BY_ID.get(assetId);
+  if (asset === undefined) {
+    throw new DecodeError(`${path} has no registered asset metadata`);
+  }
+  return asset;
+}
+
+function apiChainForAssetId(assetId: OseroApiPublicAssetId, path: string): OseroApiChain {
+  const [chainKey] = assetId.split(':') as [OseroApiChainKey, string];
+  const chain = OSERO_API_CHAIN_BY_KEY.get(chainKey);
+  if (chain === undefined) {
+    throw new DecodeError(`${path} references unregistered chain '${chainKey}'`);
+  }
+  return chain;
 }
 
 function decodeSwapQuoteInfo(value: unknown, path: string): OseroApiSwapQuoteInfo {
@@ -793,7 +1008,7 @@ function decodeSwapQuoteInfo(value: unknown, path: string): OseroApiSwapQuoteInf
 function decodeSwapAmount(value: unknown, path: string): OseroApiSwapAmount {
   const record = asRecord(value, path);
   return {
-    raw: nonNegativeIntegerStringField(record, 'raw', `${path}.raw`),
+    raw: uint256StringField(record, 'raw', `${path}.raw`),
     formatted: stringField(record, 'formatted', `${path}.formatted`),
   };
 }
@@ -943,8 +1158,6 @@ function decodeSwapStatusBridge(value: unknown, path: string): OseroApiSwapStatu
 }
 
 const OSERO_API_ASSET_KINDS = ['counter', 'vault'] as const;
-const OSERO_API_CHAIN_KEYS = ['ethereum', 'base', 'arbitrum', 'optimism', 'linea'] as const;
-const OSERO_API_ASSET_SYMBOLS = ['USDC', 'sUSDS'] as const;
 const OSERO_API_DIRECTIONS = ['to-susds', 'from-susds'] as const;
 const OSERO_API_EXECUTION_KINDS = ['same-chain', 'cross-chain'] as const;
 const OSERO_API_BRIDGE_STATES = ['pending', 'completed', 'failed', 'unknown'] as const;
@@ -1084,6 +1297,14 @@ function nonNegativeIntegerStringField(
   return decodeNonNegativeIntegerString(requiredField(record, field, path), path);
 }
 
+function uint256StringField(
+  record: Record<string, unknown>,
+  field: string,
+  path: string,
+): OseroApiIntegerString {
+  return encodeUint256String(BigInt(nonNegativeIntegerStringField(record, field, path)), path);
+}
+
 function decodeNonNegativeIntegerString(value: unknown, path: string): OseroApiIntegerString {
   const text = decodeString(value, path);
   if (!/^(?:0|[1-9][0-9]*)$/.test(text)) {
@@ -1126,12 +1347,16 @@ function encodeUint256String(value: bigint, path: string): OseroApiIntegerString
   return value.toString() as OseroApiIntegerString;
 }
 
-function decimalsField(record: Record<string, unknown>, field: string, path: string): 6 | 18 {
+function decimalsField(
+  record: Record<string, unknown>,
+  field: string,
+  path: string,
+): OseroApiAssetDecimals {
   const value = positiveIntegerField(record, field, path);
-  if (value !== 6 && value !== 18) {
-    throw new DecodeError(`${path} must be 6 or 18`);
+  if (!(OSERO_API_ASSET_DECIMALS as readonly number[]).includes(value)) {
+    throw new DecodeError(`${path} must be one of: ${OSERO_API_ASSET_DECIMALS.join(', ')}`);
   }
-  return value;
+  return value as OseroApiAssetDecimals;
 }
 
 function sourceChainIdField(

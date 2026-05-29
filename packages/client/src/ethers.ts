@@ -12,10 +12,8 @@ import type {
 
 /**
  * Verify that a signer is pointing at the chain a transaction
- * requires. The ethers adapter is intentionally stricter than the
- * viem one: viem can hot-switch chains for us, but ethers signers
- * are usually bound to a single provider, so we error out instead
- * of auto-switching.
+ * requires. ethers signers are usually bound to a single provider,
+ * so we error out instead of attempting an implicit chain switch.
  *
  * @internal
  */

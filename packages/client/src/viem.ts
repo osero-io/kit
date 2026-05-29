@@ -33,6 +33,20 @@ function hasConnectedAccount(walletClient: WalletClient): walletClient is Connec
   return walletClient.account !== undefined && walletClient.chain !== undefined;
 }
 
+function ensureChain(
+  walletClient: ConnectedWalletClient,
+  request: TransactionRequest,
+): ResultAsync<ConnectedWalletClient, UnexpectedError> {
+  if (walletClient.chain.id !== request.chainId) {
+    return errAsync(
+      new UnexpectedError(
+        `viem WalletClient is on chain ${walletClient.chain.id} but the transaction targets chain ${request.chainId}`,
+      ),
+    );
+  }
+  return okAsync(walletClient);
+}
+
 /**
  * Estimate gas for a single transaction and add a 15% buffer. The
  * buffer matches the Aave SDK's default and cushions against minor
@@ -87,7 +101,8 @@ function sendSingleTransaction(
   request: TransactionRequest,
   confirmations: number,
 ): ResultAsync<`0x${string}`, CancelError | SigningError | TransactionError | UnexpectedError> {
-  return estimateGas(walletClient, request)
+  return ensureChain(walletClient, request)
+    .andThen(() => estimateGas(walletClient, request))
     .andThen((gas) =>
       ResultAsync.fromPromise(
         sendTransactionWithViem(walletClient, {
@@ -173,7 +188,8 @@ export type SendWithOptions = {
  *
  * @throws if `walletClient.account` or `walletClient.chain` is
  *   missing — viem wallet clients must be bound to both before being
- *   passed to the adapter.
+ *   passed to the adapter. Sending returns an `UnexpectedError` if
+ *   a transaction targets a different chain than `walletClient.chain`.
  */
 export function sendWith(
   walletClient: WalletClient,
