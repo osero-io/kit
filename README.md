@@ -1,9 +1,9 @@
 # Osero SDK
 
 TypeScript SDK for building and sending USDS and sUSDS mint/redeem transactions across
-Sky/Spark PSM deployments. It supports viem and ethers v6 wallets, returns typed
-`neverthrow` results, and exposes wallet-agnostic execution plans that can be inspected
-before anything is signed.
+Sky/Spark PSM deployments. It supports viem, ethers v6, and Privy server wallets,
+returns typed `neverthrow` results, and exposes wallet-agnostic execution plans that can be
+inspected before anything is signed.
 
 ## Features
 
@@ -13,7 +13,7 @@ before anything is signed.
 - Fetch hosted Osero API swap quotes and convert them into the same execution plan model.
 - Supports Ethereum mainnet, OP Mainnet, Unichain, Base, and Arbitrum One.
 - Uses viem internally for ABI encoding and public RPC reads.
-- Provides adapters for `@osero/client/viem` and `@osero/client/ethers`.
+- Provides adapters for `@osero/client/viem`, `@osero/client/ethers`, and `@osero/client/privy`.
 
 ## Installation
 
@@ -23,17 +23,19 @@ Install the SDK with viem:
 pnpm add @osero/client viem
 ```
 
-If you use the ethers adapter, install ethers v6 as well:
+If you use an optional adapter, install its peer dependency as well:
 
 ```bash
-pnpm add @osero/client viem ethers
+pnpm add ethers          # for @osero/client/ethers
+pnpm add @privy-io/node  # for @osero/client/privy
 ```
 
 With npm:
 
 ```bash
 npm install @osero/client viem
-npm install ethers # optional, only for @osero/client/ethers
+npm install ethers          # optional, only for @osero/client/ethers
+npm install @privy-io/node  # optional, only for @osero/client/privy
 ```
 
 ## Quick Start With viem

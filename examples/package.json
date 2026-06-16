@@ -2,7 +2,7 @@
   "name": "@osero/examples",
   "version": "0.0.0",
   "private": true,
-  "description": "Runnable usage examples for @osero/client — mint and redeem USDS / sUSDS across viem and ethers.",
+  "description": "Runnable usage examples for @osero/client — mint and redeem USDS / sUSDS across viem, ethers, and Privy.",
   "type": "module",
   "scripts": {
     "api:execute-quote-viem": "tsx src/api/execute-quote-viem.ts",
@@ -15,6 +15,7 @@
     "viem:roundtrip": "tsx src/viem/roundtrip-usdc-susds.ts",
     "ethers:mint-usds": "tsx src/ethers/mint-usds.ts",
     "ethers:roundtrip": "tsx src/ethers/roundtrip-usdc-susds.ts",
+    "privy:mint-usds": "tsx src/privy/mint-usds.ts",
     "lint": "oxlint src",
     "lint:fix": "oxlint --fix src",
     "format": "oxfmt src",
@@ -22,6 +23,7 @@
   },
   "dependencies": {
     "@osero/client": "workspace:*",
+    "@privy-io/node": "^0.19.0",
     "ethers": "^6.14.0",
     "viem": "^2.48.11"
   },
