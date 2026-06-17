@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a pnpm/Nx TypeScript workspace. The SDK lives in `packages/client`, with public entrypoints in `src/index.ts`, `src/viem.ts`, and `src/ethers.ts`. Core logic is under `packages/client/src/lib`, action builders are in `src/lib/actions`, and contract ABIs are in `src/lib/abis`. Tests are colocated with implementation as `*.test.ts`. Runnable examples live in `examples/src`, split by adapter (`viem`, `ethers`) plus shared helpers in `examples/src/shared`.
+This is a pnpm/Nx TypeScript workspace. The SDK lives in `packages/client`, with public entrypoints in `src/index.ts`, `src/viem.ts`, `src/ethers.ts`, and `src/privy.ts`. Core logic is under `packages/client/src/lib`, action builders are in `src/lib/actions`, and contract ABIs are in `src/lib/abis`. Tests are colocated with implementation as `*.test.ts`. Runnable examples live in `examples/src`, split by adapter (`viem`, `ethers`, `privy`) plus shared helpers in `examples/src/shared`.
 
 ## Build, Test, and Development Commands
 

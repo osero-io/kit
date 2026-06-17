@@ -22,9 +22,11 @@ src/
 │   ├── mint-susds-mainnet.ts  USDC → sUSDS on Ethereum mainnet (MultiStepExecution)
 │   ├── redeem-susds.ts        sUSDS → USDC on Base
 │   └── roundtrip-usdc-susds.ts  USDC → sUSDS → USDC, full round-trip on Base
-└── ethers/
-    ├── mint-usds.ts           Same as viem/mint-usds.ts but through an ethers v6 Wallet
-    └── roundtrip-usdc-susds.ts  Full round-trip on Base through ethers
+├── ethers/
+│   ├── mint-usds.ts           Same as viem/mint-usds.ts but through an ethers v6 Wallet
+│   └── roundtrip-usdc-susds.ts  Full round-trip on Base through ethers
+└── privy/
+    └── mint-usds.ts           Same as viem/mint-usds.ts but through a Privy server wallet
 ```
 
 ## Running
@@ -56,6 +58,9 @@ pnpm --filter @osero/examples viem:roundtrip
 # ethers examples
 pnpm --filter @osero/examples ethers:mint-usds
 pnpm --filter @osero/examples ethers:roundtrip
+
+# Privy server-wallet example: requires the PRIVY_* env vars.
+pnpm --filter @osero/examples privy:mint-usds
 ```
 
 > **The examples broadcast real transactions** against whichever RPC
@@ -87,9 +92,10 @@ The SDK splits "what to do" from "how to sign":
    - `Erc20ApprovalRequired` — approvals then a main tx
    - `MultiStepExecution` — multiple phases, each depending on the
      previous one landing on-chain
-3. **Adapters** (`@osero/client/viem`, `@osero/client/ethers`)
-   expose a `sendWith(wallet)` that walks the plan, broadcasts every
-   tx in order, and returns a `TransactionResult` or a typed error.
+3. **Adapters** (`@osero/client/viem`, `@osero/client/ethers`,
+   `@osero/client/privy`) expose a `sendWith(...)` that walks the
+   plan, broadcasts every tx in order, and returns a
+   `TransactionResult` or a typed error.
 
 The roundtrip examples also show the read side of the SDK: they use
 preview helpers to print expected output amounts up front, then use

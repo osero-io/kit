@@ -1,8 +1,8 @@
 # `@osero/client`
 
 The official TypeScript SDK for minting **USDS** and **sUSDS** on every
-chain where Sky / Spark runs a PSM. One API, two wallet libraries
-(**viem** and **ethers v6**), five chains out of the box.
+chain where Sky / Spark runs a PSM. One API, wallet integrations for
+**viem**, **ethers v6**, and **Privy server wallets**, five chains out of the box.
 
 ---
 
@@ -23,7 +23,7 @@ you name, no matter which chain you are on:
 The SDK figures out which contract to talk to, reads the live fee
 (`tin` / `tout`) or swap quote, assembles the approval and swap
 transactions, and hands you back a wallet-agnostic `ExecutionPlan`
-that either adapter can broadcast.
+that any adapter can broadcast.
 
 It also exposes preview helpers for every exact-in flow so callers can
 quote the expected output amount before building or sending a plan.
@@ -39,12 +39,14 @@ bridge status for cross-chain quotes.
 pnpm add @osero/client viem
 # (optional) for the ethers adapter:
 pnpm add ethers
+# (optional) for the Privy server-wallet adapter:
+pnpm add @privy-io/node
 ```
 
 `viem` is a required peer dependency — the SDK uses it to encode
 calldata and to build public clients internally.
-`ethers` is optional; install it only if you use
-`@osero/client/ethers`.
+`ethers` and `@privy-io/node` are optional; install them only if
+you use `@osero/client/ethers` or `@osero/client/privy`.
 
 ## Quick start
 
@@ -114,11 +116,49 @@ if (result.isOk()) {
 }
 ```
 
+### With Privy server wallets
+
+```ts
+import { PrivyClient } from '@privy-io/node';
+import { OseroClient } from '@osero/client';
+import { mintUsds } from '@osero/client/actions';
+import { sendWith, type PrivyWallet } from '@osero/client/privy';
+import { parseUnits } from 'viem';
+
+const privy = new PrivyClient({
+  appId: process.env.PRIVY_APP_ID!,
+  appSecret: process.env.PRIVY_APP_SECRET!,
+});
+
+const wallet = {
+  id: process.env.PRIVY_WALLET_ID!,
+  address: process.env.PRIVY_WALLET_ADDRESS as `0x${string}`,
+  authorizationContext: {
+    authorization_private_keys: [process.env.PRIVY_AUTHORIZATION_PRIVATE_KEY!],
+  },
+} satisfies PrivyWallet;
+const client = OseroClient.create();
+
+const result = await mintUsds(client, {
+  chainId: 8453,
+  amount: parseUnits('100', 6),
+  sender: wallet.address,
+}).andThen(sendWith(privy, wallet));
+
+if (result.isOk()) {
+  console.log('USDS minted in tx', result.value.txHash);
+}
+```
+
+`authorization_private_keys` must be the base64-encoded PKCS8 private
+key registered for your Privy app. Omit `authorizationContext` only if
+your Privy wallet configuration does not require request authorization.
+
 ## Actions
 
 Every action returns a `ResultAsync<ExecutionPlan, …>` that you pipe
-into `sendWith` (from either `@osero/client/viem` or
-`@osero/client/ethers`) to execute.
+into `sendWith` (from `@osero/client/viem`, `@osero/client/ethers`, or
+`@osero/client/privy`) to execute.
 
 | Action        | Direction    | Mainnet shape      | L2 shape            |
 | ------------- | ------------ | ------------------ | ------------------- |
@@ -244,8 +284,8 @@ console.log(flattenExecutionPlan(quote.value.executionPlan));
 ```
 
 To execute the hosted quote through a wallet, hand off the attached
-`executionPlan` to the same viem or ethers adapter used by local action
-builders:
+`executionPlan` to the same viem, ethers, or Privy adapter used by local
+action builders:
 
 ```ts
 import { sendWith } from '@osero/client/viem';
@@ -341,12 +381,36 @@ const client = OseroClient.create({
 });
 ```
 
-Set confirmation waits on the viem or ethers adapter when
+Set confirmation waits on the viem, ethers, or Privy adapter when
 broadcasting:
 
 ```ts
 const result = await mintUsds(client, request).andThen(sendWith(wallet, { confirmations: 2 }));
 ```
+
+The Privy adapter can also receive `transports` for receipt polling,
+using the same chain-keyed shape as `OseroClient.create({ transports })`.
+
+For server-side retries with Privy, pass caller-managed idempotency
+keys. The SDK does not derive keys from transaction contents because
+two unrelated operations can produce identical transaction data. Store
+a fresh key with the operation you are about to execute and reuse that
+same key only when retrying that operation:
+
+```ts
+const result = await mintUsds(client, request).andThen(
+  sendWith(privy, wallet, {
+    idempotencyKeys: [storedIdempotencyKey],
+  }),
+);
+```
+
+Plans with approvals or multiple phases send more than one
+transaction. In those cases, provide one key per transaction in the
+same order returned by `flattenExecutionPlan(plan)`. The adapter
+fails before broadcasting anything if the number of keys does not
+match the number of transactions, so no transaction is ever sent
+without its retry protection.
 
 ## The execution plan model
 
@@ -369,8 +433,8 @@ gives you three things for free:
    ```
 
 2. **Portability** — pass the same plan to a viem wallet, an ethers
-   signer, a custom batching relayer, or an account-abstraction
-   bundler. Only `sendWith` needs to change.
+   signer, a Privy server wallet, a custom batching relayer, or an
+   account-abstraction bundler. Only `sendWith` needs to change.
 3. **Testability** — actions are pure functions over an `OseroClient`;
    unit-testing them without a live chain is a matter of injecting a
    mock `PublicClient`.

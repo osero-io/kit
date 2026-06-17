@@ -60,4 +60,4 @@ Never throw from an action path. Errors are typed classes in `src/lib/errors.ts`
 
 ## Package exports
 
-`@osero/client` ships four subpath exports: `.` (types, client, registries), `./actions`, `./viem`, `./ethers`. The `package.json` `exports` map has an `osero-sdk` condition pointing at raw `.ts` source for in-repo consumers (examples), and `import`/`default` for the built `./dist/*.js` for published consumers. Keep those in sync when adding a new entrypoint.
+`@osero/client` ships five subpath exports: `.` (types, client, registries), `./actions`, `./viem`, `./ethers`, `./privy`. The `package.json` `exports` map has an `osero-sdk` condition pointing at raw `.ts` source for in-repo consumers (examples), and `import`/`default` for the built `./dist/*.js` for published consumers. Keep those in sync when adding a new entrypoint.
