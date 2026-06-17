@@ -1,5 +1,11 @@
 # @osero/client
 
+## 0.8.0
+
+### Minor Changes
+
+- 45abd63: Add an optional Privy server-wallet adapter at `@osero/client/privy` using `@privy-io/node`.
+
 ## 0.7.0
 
 ### Minor Changes
