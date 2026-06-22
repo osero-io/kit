@@ -3,7 +3,7 @@
  *
  * Run with:
  *
- *   pnpm --filter @osero/examples api:quote-susds
+ *   pnpm --filter @osero/examples api:quote-swap
  */
 import { flattenExecutionPlan } from '@osero/client';
 import { OseroApiClient } from '@osero/client/api';
@@ -40,11 +40,11 @@ async function main() {
     console.log(`${asset.assetId.padEnd(16)} ${asset.label.padEnd(18)} ${asset.address}`);
   }
 
-  banner('Quote Base USDC → Ethereum sUSDS');
+  banner('Quote Ethereum USDT → Ethereum USDS');
   const quote = await api.getSwapQuote({
     fromAddress: fromAddress as `0x${string}`,
-    fromAssetId: 'base:usdc',
-    toAssetId: 'ethereum:susds',
+    fromAssetId: 'ethereum:usdt',
+    toAssetId: 'ethereum:usds',
     amount: parseUnits('1', 6),
     slippage: '0.5',
     referralCode: optionalReferralCode(),
@@ -52,9 +52,9 @@ async function main() {
 
   if (quote.isErr()) throw quote.error;
 
-  console.log(`amount in:  ${quote.value.quote.amountIn.formatted} USDC`);
+  console.log(`amount in:  ${quote.value.quote.amountIn.formatted} USDT`);
   console.log(
-    `amount out: ${quote.value.quote.amountOut?.formatted ?? 'preview unavailable'} sUSDS`,
+    `amount out: ${quote.value.quote.amountOut?.formatted ?? 'preview unavailable'} USDS`,
   );
   console.log(`bridge:     ${quote.value.bridge.required ? quote.value.bridge.protocol : 'none'}`);
   console.log(`tx count:   ${flattenExecutionPlan(quote.value.executionPlan).length}`);

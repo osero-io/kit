@@ -1,16 +1,19 @@
 # `@osero/client`
 
-The official TypeScript SDK for minting **USDS** and **sUSDS** on every
-chain where Sky / Spark runs a PSM. One API, wallet integrations for
-**viem**, **ethers v6**, and **Privy server wallets**, five chains out of the box.
+The official TypeScript SDK for local Sky/Spark USDS and sUSDS action builders,
+hosted Osero API swap quotes, and wallet-adapter execution. Version 1.0.0 keeps
+the local PSM helpers focused on canonical USDC/USDS/sUSDS flows while the hosted
+API client supports every registered non-USDS asset into `ethereum:usds`, and
+`ethereum:usds` back out to every registered asset such as USDC, sUSDS, USDe,
+and USDT.
 
 ---
 
 ## What it does
 
 Given a wallet holding USDC, `@osero/client` builds and sends the
-right sequence of transactions to land USDS or sUSDS in any address
-you name, no matter which chain you are on:
+right local PSM transactions to land USDS or sUSDS in any address you name,
+no matter which supported PSM chain you are on:
 
 | Chain        | Chain ID | Route                                               |
 | ------------ | -------: | --------------------------------------------------- |
@@ -29,9 +32,11 @@ It also exposes preview helpers for every exact-in flow so callers can
 quote the expected output amount before building or sending a plan.
 
 The package also includes `@osero/client/api`, a small HTTP client for
-the hosted Osero API. It can fetch supported API assets, build API
-swap quotes, convert those quotes into SDK execution plans, and poll
-bridge status for cross-chain quotes.
+the hosted Osero API. It can fetch supported API assets, build flexible
+input/output swap quotes, convert those quotes into SDK execution plans,
+and poll bridge status for cross-chain quotes.
+
+For 0.x migrations, see [`docs/osero-sdk/upgrading-0-to-1.md`](../../docs/osero-sdk/upgrading-0-to-1.md).
 
 ## Install
 
@@ -267,8 +272,8 @@ const api = OseroApiClient.create({
 
 const quote = await api.getSwapQuote({
   fromAddress: '0x1111111111111111111111111111111111111111',
-  fromAssetId: 'base:usdc',
-  toAssetId: 'ethereum:susds',
+  fromAssetId: 'ethereum:usdt',
+  toAssetId: 'ethereum:usds',
   amount: parseUnits('1', 6),
   slippage: '0.5',
   referralCode: 3000,
@@ -279,7 +284,7 @@ if (quote.isErr()) {
   return;
 }
 
-console.log('sUSDS out:', quote.value.quote.amountOut?.formatted);
+console.log('USDS out:', quote.value.quote.amountOut?.formatted);
 console.log(flattenExecutionPlan(quote.value.executionPlan));
 ```
 
@@ -300,8 +305,9 @@ Common calls:
 
 - `getSupportedAssets()` returns the public asset IDs accepted by the
   quote endpoint.
-- `getSwapQuote(request)` builds approval and execution transactions
-  for supported counter asset ↔ sUSDS routes.
+- `getSwapQuote(request)` builds approval and execution transactions for
+  every registered non-USDS asset → USDS route and every USDS → registered
+  asset route, such as USDC → USDS, sUSDS → USDS, USDe → USDS, and USDS → USDC.
 - `getSwapStatus({ txHash, sourceChainId, bridgeProtocol })` checks a
   bridge status request returned by a cross-chain quote.
 - `getSwapStatusForQuote(quote, txHash)` is a convenience wrapper that

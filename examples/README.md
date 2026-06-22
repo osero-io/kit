@@ -12,7 +12,7 @@ src/
 │   ├── env.ts         Loads PRIVATE_KEY + RPC URLs from process.env
 │   └── format.ts      Pretty-printing + small logging helpers
 ├── api/
-│   ├── quote-susds.ts        Request a hosted API quote without sending it.
+│   ├── quote-swap.ts         Request a hosted API swap quote without sending it.
 │   └── execute-quote-viem.ts Request a hosted API quote and send it with viem.
 ├── dry-run/
 │   ├── inspect-plan.ts        Build a plan without sending it. No funds needed.
@@ -44,7 +44,7 @@ pnpm --filter @osero/examples dry-run:inspect-plan
 pnpm --filter @osero/examples dry-run:susds-apy
 
 # Osero API quote example (no private key, no tx): requires OSERO_API_KEY.
-pnpm --filter @osero/examples api:quote-susds
+pnpm --filter @osero/examples api:quote-swap
 
 # Osero API quote execution: requires OSERO_API_KEY + PRIVATE_KEY.
 pnpm --filter @osero/examples api:execute-quote-viem
@@ -68,8 +68,8 @@ pnpm --filter @osero/examples privy:mint-usds
 > and double-check the chain ID and amounts printed at the top of
 > each script before confirming.
 
-The `api:quote-susds` example is read-only from your wallet's
-perspective. It calls the hosted Osero API and prints ready-to-sign
+The `api:quote-swap` example is read-only from your wallet's
+perspective. It calls the hosted Osero API for an example swap quote and prints
 transactions, but does not require `PRIVATE_KEY` and does not broadcast.
 The `api:execute-quote-viem` example uses the same hosted quote shape,
 then passes `quote.value.executionPlan` to `sendWith(wallet)` and
@@ -104,10 +104,10 @@ the balance delta across the mint and redeem legs without hand-writing
 ERC-20 `balanceOf` calls.
 
 The API example shows the hosted route-building side of the SDK:
-`OseroApiClient` lists supported API assets, requests a Base USDC →
-Ethereum sUSDS quote, and prints the `ExecutionPlan` attached to the
-API response. That plan uses the same adapter-compatible structure as
-the local action builders.
+`OseroApiClient` lists supported API assets, requests an Ethereum USDT →
+Ethereum USDS quote, and prints the `ExecutionPlan` attached to the API
+response. That plan uses the same adapter-compatible structure as the
+local action builders.
 
 The API execution example takes that one step further:
 

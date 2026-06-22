@@ -1,15 +1,15 @@
 ---
 name: osero-sdk
-description: "Reference for the Osero SDK (`@osero/client`), a TypeScript client for USDS/sUSDS mint and redeem transactions across Ethereum mainnet and L2s via viem or ethers v6. This skill should be used whenever code imports `@osero/client`, `@osero/client/actions`, `@osero/client/viem`, or `@osero/client/ethers`, or when the user asks about the SDK's public API, `ExecutionPlan` model, supported chains/tokens/PSM addresses, error taxonomy, or wallet adapters. Triggers: 'mint USDS on Base', 'redeem sUSDS', 'inspect a plan without signing', 'use the SDK with ethers v6'."
+description: "Reference for the Osero SDK (`@osero/client`), a TypeScript client for local USDS/sUSDS mint/redeem transactions, hosted Osero API swap quotes, and wallet-adapter execution via viem, ethers v6, or Privy server wallets. This skill should be used whenever code imports `@osero/client`, `@osero/client/actions`, `@osero/client/api`, `@osero/client/viem`, `@osero/client/ethers`, or `@osero/client/privy`, or when the user asks about the SDK's public API, `ExecutionPlan` model, supported chains/tokens/PSM addresses, hosted API assets, error taxonomy, or wallet adapters. Triggers: 'mint USDS on Base', 'redeem sUSDS', 'quote USDT to USDS', 'inspect a plan without signing', 'use the SDK with ethers v6'."
 ---
 
 # Osero SDK (`@osero/client`)
 
-A TypeScript SDK for routing USDC through Sky's USDS / sUSDS peg-stability
-infrastructure. One API surface, wallet-agnostic plans, two first-class
-adapters (viem and ethers v6), five supported chains. Every action returns
-a `ResultAsync` from `neverthrow` — nothing in the action or plan layer
-throws.
+A TypeScript SDK for local Sky/Spark USDS and sUSDS action builders, hosted
+Osero API swap quotes, and wallet-agnostic execution plans. It ships first-class
+adapters for viem, ethers v6, and Privy server wallets. Every action and hosted
+API call returns a `ResultAsync` from `neverthrow` — nothing in the action, API,
+or plan layer throws.
 
 > **Single-file by design.** This skill is a complete API reference for
 > a small, stable SDK; splitting it across `references/*.md` would force
@@ -23,12 +23,12 @@ throws.
 Load this skill when any of the following is true:
 
 - Writing, reviewing, refactoring, or generating TypeScript that imports
-  `@osero/client`, `@osero/client/actions`, `@osero/client/viem`, or
-  `@osero/client/ethers`.
+  `@osero/client`, `@osero/client/actions`, `@osero/client/api`,
+  `@osero/client/viem`, `@osero/client/ethers`, or `@osero/client/privy`.
 - Building or inspecting an `ExecutionPlan` — including dry-runs, gas
   estimation, or UI previews — even when no transaction will be broadcast.
-- Wiring up a viem `WalletClient` or ethers v6 `Signer` to call
-  `sendWith(...)`.
+- Wiring up a viem `WalletClient`, ethers v6 `Signer`, or Privy server wallet to
+  call `sendWith(...)`.
 - Answering questions about supported chains, tokens, PSM addresses,
   referral-code semantics, slippage handling, or the `neverthrow` error
   taxonomy used by every action.
@@ -88,33 +88,38 @@ action(client, request)   ──►  ExecutionPlan (wallet-agnostic)
 
 `viem` is a **required** peer dependency even for ethers users — the SDK
 uses it internally to encode calldata and build public clients.
-`ethers` is optional; install it only if the caller uses the ethers
-adapter.
+`ethers` and `@privy-io/node` are optional; install them only if the caller uses
+the matching adapter.
 
 ```bash
 pnpm add @osero/client viem
 # Optional — only when @osero/client/ethers is in use:
 pnpm add ethers
+# Optional — only when @osero/client/privy is in use:
+pnpm add @privy-io/node
 ```
 
 Peer-dep ranges (`packages/client/package.json`):
 
 - `viem ^2.21.0` (required)
 - `ethers ^6.14.0` (optional)
+- `@privy-io/node ^0.19.0` (optional)
 
 ---
 
 ## Package exports
 
-`@osero/client` ships exactly **four subpath exports**. Do not invent
+`@osero/client` ships exactly **six subpath exports**. Do not invent
 other import paths.
 
-| Subpath                 | What it exports                                                                                                                                                              |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@osero/client`         | `OseroClient`, chain/token/address registries, balance helpers, plan helpers, error classes, math helpers, ABIs, all core types, and the `neverthrow` re-exports             |
-| `@osero/client/actions` | Action builders (`mintUsds`, `mintSUsds`, `redeemUsds`, `redeemSUsds`), preview helpers (`previewMint*`, `previewRedeem*`), and chain action helpers (`chain`, `listChains`) |
-| `@osero/client/viem`    | `sendWith(walletClient[, options])` viem adapter + its option type + `ConnectedWalletClient`                                                                                 |
-| `@osero/client/ethers`  | `sendWith(signer[, options])` ethers adapter + its option type                                                                                                               |
+| Subpath                 | What it exports                                                                                                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@osero/client`         | `OseroClient`, hosted API client, chain/token/address/API registries, balance helpers, plan helpers, error classes, math helpers, ABIs, all core types, and neverthrow exports |
+| `@osero/client/actions` | Action builders (`mintUsds`, `mintSUsds`, `redeemUsds`, `redeemSUsds`), preview helpers (`previewMint*`, `previewRedeem*`), and chain action helpers (`chain`, `listChains`)   |
+| `@osero/client/api`     | Hosted API client (`OseroApiClient`), API asset registries, quote/status types, and `swapQuoteToExecutionPlan`                                                                 |
+| `@osero/client/viem`    | `sendWith(walletClient[, options])` viem adapter + its option type + `ConnectedWalletClient`                                                                                   |
+| `@osero/client/ethers`  | `sendWith(signer[, options])` ethers adapter + its option type                                                                                                                 |
+| `@osero/client/privy`   | `sendWith(privy, wallet[, options])` Privy server-wallet adapter + its option and wallet types                                                                                 |
 
 ### Everything re-exported from `@osero/client`
 
@@ -143,6 +148,16 @@ OseroChainId, SUPPORTED_CHAIN_IDS
 
 // Client config
 ClientConfig, ResolvedClientConfig
+
+// Hosted API client and registries
+DEFAULT_OSERO_API_BASE_URL, OseroApiClient,
+OSERO_API_ASSET_IDS, OSERO_API_ASSETS,
+OSERO_API_INPUT_ASSET_IDS, OSERO_API_INPUT_ASSETS,
+OSERO_API_OUTPUT_ASSET_IDS, OSERO_API_OUTPUT_ASSETS,
+OSERO_API_SUSDS_ASSET_ID, OSERO_API_SWAP_ASSETS, OSERO_API_USDS_ASSET_ID,
+swapQuoteToExecutionPlan,
+OseroApiAsset, OseroApiAssetId, OseroApiInputAssetId, OseroApiOutputAssetId,
+OseroApiSwapQuoteRequest, OseroApiSwapQuoteResponse, OseroApiSwapStatusRequest
 
 // Errors
 CancelError, InsufficientBalanceError, OseroError, SigningError,
@@ -287,6 +302,47 @@ callers who want to verify `tin()` / `tout()` independently.
 > converting USDS back into USDC. Both have been `0` since launch; the
 > SDK reads them on every call so that a future governance change is
 > picked up automatically.
+
+---
+
+## Hosted API client
+
+Use `@osero/client/api` when the hosted Osero API should build a swap route.
+`OseroApiClient` validates requests and responses through registry-derived
+asset ids, returns `ResultAsync`, and attaches an adapter-compatible
+`executionPlan` to each quote.
+The hosted API registry supports every registered non-USDS asset into
+`ethereum:usds`, and `ethereum:usds` back out to every registered asset.
+Examples include USDC → USDS, sUSDS → USDS, USDe → USDS, USDT → USDS, and
+USDS → USDC.
+
+```ts
+import { OseroApiClient, OSERO_API_USDS_ASSET_ID } from '@osero/client/api';
+import { parseUnits } from 'viem';
+
+const api = OseroApiClient.create({ apiKey: process.env.OSERO_API_KEY! });
+
+const quote = await api.getSwapQuote({
+  fromAddress: account,
+  fromAssetId: 'ethereum:usdt',
+  toAssetId: OSERO_API_USDS_ASSET_ID,
+  amount: parseUnits('1', 6),
+});
+
+if (quote.isOk()) {
+  quote.value.executionPlan; // Erc20ApprovalRequired
+}
+```
+
+Registry rules:
+
+- `OSERO_API_SWAP_ASSETS` is the single source of truth for hosted API assets.
+- `canSwapFrom` derives `OSERO_API_INPUT_ASSET_IDS`.
+- `canSwapTo` derives `OSERO_API_OUTPUT_ASSET_IDS`.
+- Add new hosted assets by editing the registry row, not by adding hard-coded
+  decoder branches.
+- API quote execution transactions use operation `SWAP`; derive user-facing
+  labels from `quote.pair.from` and `quote.pair.to`.
 
 ---
 
@@ -617,11 +673,12 @@ type MultiStepExecution = {
 ### `OperationType`
 
 Stable provenance tag on every `TransactionRequest`. Lets callers classify
-a step without decoding calldata. The union is exactly **7 string literals**:
+a step without decoding calldata. The union is exactly **8 string literals**:
 
 ```ts
 type OperationType =
   | 'APPROVE_ERC20'
+  | 'SWAP'
   | 'MINT_USDS'
   | 'MINT_SUSDS'
   | 'DEPOSIT_USDS_FOR_SUSDS'
@@ -636,6 +693,12 @@ the sequence of `OperationType`s in execution order. For a mainnet
 
 ```
 ['APPROVE_ERC20', 'MINT_USDS', 'APPROVE_ERC20', 'DEPOSIT_USDS_FOR_SUSDS']
+```
+
+Hosted API quote execution plans use:
+
+```
+['APPROVE_ERC20', 'SWAP']
 ```
 
 ### Plan introspection helpers
@@ -1311,7 +1374,7 @@ RedeemUsdsError                type
 RedeemSUsdsError               type
 
 // Plans
-OperationType                  type     union of 7 string literals
+OperationType                  type     union of 8 string literals
 TransactionRequest             type
 Erc20Approval                  type
 Erc20ApprovalRequired          type

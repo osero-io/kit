@@ -1,7 +1,7 @@
 {
   "name": "@osero/client",
   "version": "0.8.0",
-  "description": "The official TypeScript SDK for minting USDS and sUSDS across supported chains",
+  "description": "The official TypeScript SDK for minting and swapping USDS and sUSDS across supported chains",
   "keywords": [
     "defi",
     "ethers",

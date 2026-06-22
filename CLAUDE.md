@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository layout
 
-pnpm + Nx TypeScript monorepo. The only publishable package is `@osero/client` in `packages/client`. Runnable broadcast/dry-run examples live in `examples/` (private package `@osero/examples`). Design notes for the underlying Sky/Spark contracts are in `PSM_GUIDE.md` and additional contributor conventions in `AGENTS.md`.
+pnpm + Nx TypeScript monorepo. The only publishable package is `@osero/client` in `packages/client`. Runnable broadcast/dry-run/API examples live in `examples/` (private package `@osero/examples`). GitBook-staged docs live in `docs/osero-sdk`, including the 0.x → 1.0 upgrade guide. Design notes for the underlying Sky/Spark contracts are in `PSM_GUIDE.md` and additional contributor conventions in `AGENTS.md`.
 
 ## Commands
 
@@ -15,7 +15,8 @@ pnpm + Nx TypeScript monorepo. The only publishable package is `@osero/client` i
 - Run a single test: `pnpm nx test @osero/client -- -t "<test name>"` or point vitest at a file: `pnpm nx test @osero/client -- packages/client/src/lib/actions/mintUsds.test.ts`
 - `pnpm lint` / `pnpm lint:fix` — oxlint across workspace
 - `pnpm format:check` / `pnpm format` — oxfmt
-- `pnpm --filter @osero/examples dry-run:inspect-plan` — safe plan-building example (no broadcast)
+- `pnpm --filter @osero/examples dry-run:inspect-plan` — safe local plan-building example (no broadcast)
+- `OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-swap` — safe hosted API quote example (no broadcast)
 
 Broadcasting examples (`pnpm --filter @osero/examples viem:mint-usds`, etc.) send real transactions — they require `examples/.env` with a disposable `PRIVATE_KEY`.
 
@@ -25,7 +26,7 @@ Changesets drives independent package versioning. When touching anything under `
 
 ## Architecture
 
-The SDK's central abstraction is the **`ExecutionPlan`** (`packages/client/src/lib/types.ts`): a wallet-agnostic, inspectable description of the transactions needed to fulfil an action. This is what makes the SDK viem/ethers-neutral — actions never touch a wallet, adapters never touch PSM logic.
+The SDK's central abstraction is the **`ExecutionPlan`** (`packages/client/src/lib/types.ts`): a wallet-agnostic, inspectable description of the transactions needed to fulfil a local action or hosted API quote. This is what makes the SDK viem/ethers/Privy-neutral — action/API clients never touch a wallet, adapters never touch PSM or routing logic.
 
 Three plan variants, discriminated by `__typename`:
 
@@ -37,19 +38,21 @@ Three plan variants, discriminated by `__typename`:
 
 1. `OseroClient.create({ transports, defaultSlippageBps })` — stateless; lazily builds viem public clients per chain in `getPublicClient(chainId)` (memoised in a `Map`). `_setPublicClientForTesting` is how tests inject fakes.
 2. Actions in `src/lib/actions/` (`mintUsds`, `mintSUsds`, `redeemUsds`, `redeemSUsds`, plus `preview*` helpers) take `(client, request)` and return `ResultAsync<ExecutionPlan, ActionError>` — they branch on `chain.isMainnet` because mainnet uses Sky's `UsdsPsmWrapper` + Lite PSM while L2s use Spark's PSM3.
-3. Adapter `sendWith(wallet)` in `src/viem.ts` or `src/ethers.ts` returns an `ExecutionPlanHandler` that the caller chains with `.andThen()`. Both adapters collapse to a single `SingleTxExecutor` and reuse `runExecutionPlan` from `adapters.ts` — `flattenExecutionPlan` defines the canonical broadcast order.
+3. `OseroApiClient` in `src/lib/api.ts` calls the hosted API, validates registry-derived input/output asset ids, and attaches an adapter-compatible `ExecutionPlan` to every quote. API quote execution transactions use operation `SWAP`; local actions keep specific mint/redeem operation tags.
 
 ### Plan construction
 
-Never hand-build plan objects. Use the helpers in `src/lib/plan.ts` (`makeTransactionRequest`, `makeApprovalTransaction`, `makeSingleApprovalPlan`, `makeApprovalRequiredPlan`, `makeMultiStepPlan`) so the `__typename` tags and `operation` provenance stay consistent.
+Never hand-build plan objects. Use the helpers in `src/lib/plan.ts` (`makeTransactionRequest`, `makeApprovalTransaction`, `makeSingleApprovalPlan`, `makeApprovalRequiredPlan`, `makeMultiStepPlan`) so the `__typename` tags and `operation` provenance stay consistent. Hosted API quote conversion belongs in `swapQuoteToExecutionPlan`.
 
 ### Errors & results
 
 Never throw from an action path. Errors are typed classes in `src/lib/errors.ts` (`ValidationError`, `UnsupportedChainError`, `InsufficientBalanceError`, `TransactionError`, `SigningError`, `CancelError`, `UnexpectedError`) and returned via `neverthrow`. Re-exports of `Result`/`ResultAsync` come from `src/lib/result.ts` — import from there, not directly from `neverthrow`, so the dependency stays swappable.
 
-### Chain/token registry
+### Chain/token/API registries
 
-`src/lib/chains.ts` (`SUPPORTED_CHAIN_IDS`, `CHAINS`, `isSupportedChainId`), `src/lib/tokens.ts`, and `src/lib/addresses.ts` are the single source of truth — any new chain requires updating all three plus the `PSM_ADDRESSES` entry (and a `litePsm` entry if mainnet-style). `isMainnet` is semantic (only chain ID 1) because it switches the action flow, not a geographic flag.
+`src/lib/chains.ts` (`SUPPORTED_CHAIN_IDS`, `CHAINS`, `isSupportedChainId`), `src/lib/tokens.ts`, and `src/lib/addresses.ts` are the single source of truth for local action builders — any new local PSM chain requires updating all three plus the `PSM_ADDRESSES` entry (and a `litePsm` entry if mainnet-style). `isMainnet` is semantic (only chain ID 1) because it switches the action flow, not a geographic flag.
+
+Hosted API assets are separate and live in `src/lib/api.ts` as `OSERO_API_SWAP_ASSETS`. Add API quote assets there by declaring `assetId`, metadata, and `canSwapFrom` / `canSwapTo`; derived input/output id arrays and decoders must remain registry-driven. Do not reintroduce sUSDS-only counter/vault assumptions.
 
 ## Code style
 
@@ -60,4 +63,4 @@ Never throw from an action path. Errors are typed classes in `src/lib/errors.ts`
 
 ## Package exports
 
-`@osero/client` ships five subpath exports: `.` (types, client, registries), `./actions`, `./viem`, `./ethers`, `./privy`. The `package.json` `exports` map has an `osero-sdk` condition pointing at raw `.ts` source for in-repo consumers (examples), and `import`/`default` for the built `./dist/*.js` for published consumers. Keep those in sync when adding a new entrypoint.
+`@osero/client` ships six subpath exports: `.` (types, client, registries), `./actions`, `./api`, `./viem`, `./ethers`, `./privy`. The `package.json` `exports` map has an `osero-sdk` condition pointing at raw `.ts` source for in-repo consumers (examples), and `import`/`default` for the built `./dist/*.js` for published consumers. Keep those in sync when adding a new entrypoint.

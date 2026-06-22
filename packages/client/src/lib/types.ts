@@ -19,6 +19,7 @@ import type { ResultAsync } from './result.js';
  */
 export type OperationType =
   | 'APPROVE_ERC20'
+  | 'SWAP'
   | 'MINT_USDS'
   | 'MINT_SUSDS'
   | 'DEPOSIT_USDS_FOR_SUSDS'

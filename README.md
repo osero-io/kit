@@ -1,17 +1,29 @@
 # Osero SDK
 
-TypeScript SDK for building and sending USDS and sUSDS mint/redeem transactions across
-Sky/Spark PSM deployments. It supports viem, ethers v6, and Privy server wallets,
-returns typed `neverthrow` results, and exposes wallet-agnostic execution plans that can be
-inspected before anything is signed.
+TypeScript SDK for building and sending USDS and sUSDS mint/redeem transactions,
+fetching hosted Osero API swap quotes, and executing wallet-agnostic plans through
+viem, ethers v6, or Privy server wallets. The SDK returns typed `neverthrow`
+results and exposes inspectable `ExecutionPlan`s before anything is signed.
+
+## Current package status
+
+- `@osero/client` is at **1.0.0**.
+- Local action builders cover the canonical Sky/Spark PSM flows on Ethereum
+  mainnet, OP Mainnet, Unichain, Base, and Arbitrum One.
+- The hosted Osero API client supports every registered non-USDS asset into
+  `ethereum:usds`, and `ethereum:usds` back out to every registered asset
+  such as USDC, sUSDS, USDe, and USDT.
+- API quote execution plans use the generic `SWAP` operation; local action
+  builders keep their specific mint/redeem operation tags.
+- Upgrade guide: [`docs/osero-sdk/upgrading-0-to-1.md`](docs/osero-sdk/upgrading-0-to-1.md).
 
 ## Features
 
-- Mint USDS from USDC and redeem USDS back to USDC.
-- Mint sUSDS from USDC and redeem sUSDS back to USDC.
-- Preview exact-in output amounts before building or sending a plan.
-- Fetch hosted Osero API swap quotes and convert them into the same execution plan model.
-- Supports Ethereum mainnet, OP Mainnet, Unichain, Base, and Arbitrum One.
+- Mint USDS from USDC and redeem USDS back to USDC with local action builders.
+- Mint sUSDS from USDC and redeem sUSDS back to USDC with local action builders.
+- Preview exact-in local action output amounts before building or sending a plan.
+- Fetch hosted Osero API swap quotes for registered input/output asset pairs.
+- Convert hosted API quotes into the same execution plan model used by local actions.
 - Uses viem internally for ABI encoding and public RPC reads.
 - Provides adapters for `@osero/client/viem`, `@osero/client/ethers`, and `@osero/client/privy`.
 
@@ -163,8 +175,8 @@ const api = OseroApiClient.create({
 
 const quote = await api.getSwapQuote({
   fromAddress: '0x1111111111111111111111111111111111111111',
-  fromAssetId: 'base:usdc',
-  toAssetId: 'ethereum:susds',
+  fromAssetId: 'ethereum:usdt',
+  toAssetId: 'ethereum:usds',
   amount: parseUnits('1', 6),
   slippage: '0.5',
   referralCode: 3000,
@@ -191,7 +203,7 @@ const result = await api
 Run the API example without a private key:
 
 ```bash
-OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-susds
+OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-swap
 ```
 
 Run the API-to-viem broadcast example with an API key and funded wallet:
@@ -411,7 +423,7 @@ pnpm --filter @osero/examples viem:mint-usds
 pnpm --filter @osero/examples viem:redeem-susds
 pnpm --filter @osero/examples ethers:mint-usds
 pnpm --filter @osero/examples ethers:roundtrip
-pnpm --filter @osero/examples api:quote-susds
+pnpm --filter @osero/examples api:quote-swap
 ```
 
 The examples broadcast real transactions. Use a disposable wallet with small balances

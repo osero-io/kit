@@ -15,8 +15,8 @@ export const DEFAULT_OSERO_API_BASE_URL = 'https://api.osero.org/v1/';
 /**
  * Chains the Osero swap API can route from or to, as a single source of truth.
  * Add a chain here to make its id and key decodable in `/swap/assets` and quote
- * responses. Counter assets bind to a chain through their `<chainKey>:` asset-id
- * prefix, so every chain listed here backs at least one counter asset.
+ * responses. Every chain listed here must back at least one registered swap
+ * asset through its `<chainKey>:` asset-id prefix.
  */
 export const OSERO_API_CHAINS = [
   { chainKey: 'ethereum', chainId: 1 },
@@ -35,82 +35,327 @@ export const OSERO_API_CHAINS = [
 ] as const;
 
 /**
- * Counter assets — the user-facing tokens swappable against the sUSDS vault.
- * Each id is `<chainKey>:<tokenKey>`, with `chainKey` drawn from
- * {@link OSERO_API_CHAINS}. Add a row to support a new token, or a new chain
- * deployment of a token; the derived id, symbol, and decimal sets plus every
- * response decoder below update from this list. Contract addresses are NOT kept
- * here — this is an API client, so it only validates that responses carry a
- * well-formed address and trusts the API for the canonical deployment.
+ * Assets the hosted Osero swap API accepts.
+ *
+ * Each row declares the API asset id, response metadata, and whether the asset
+ * is valid on the input and/or output side of `swap/quote`. Adding a token is a
+ * single registry change: derived id lists, request types, and response decoders
+ * all update from these capabilities.
+ *
+ * Contract addresses are intentionally not kept here. This client validates the
+ * API response shape and trusts the hosted API for canonical deployments.
  */
-export const OSERO_API_COUNTER_ASSETS = [
+export const OSERO_API_SWAP_ASSETS = [
   // USDC — native Circle issuance (6 decimals).
-  { assetId: 'base:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'arbitrum:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'optimism:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'linea:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'ethereum:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'avalanche_c:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'hyperevm:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'monad:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'polygon:usdc', symbol: 'USDC', decimals: 6 },
-  { assetId: 'unichain:usdc', symbol: 'USDC', decimals: 6 },
+  {
+    assetId: 'base:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'arbitrum:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'optimism:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'linea:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'avalanche_c:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'hyperevm:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'monad:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'polygon:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'unichain:usdc',
+    symbol: 'USDC',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
   // USDC.e — canonical bridged USDC on Berachain (6 decimals).
-  { assetId: 'berachain:usdce', symbol: 'USDC.e', decimals: 6 },
+  {
+    assetId: 'berachain:usdce',
+    symbol: 'USDC.e',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
   // USDe — Ethena synthetic dollar (18 decimals).
-  { assetId: 'ethereum:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'arbitrum:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'base:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'optimism:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'linea:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'avalanche_c:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'bnb:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'berachain:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'hyperevm:usde', symbol: 'USDe', decimals: 18 },
-  { assetId: 'plasma:usde', symbol: 'USDe', decimals: 18 },
-  // Ethereum-native stablecoins.
-  { assetId: 'ethereum:ausd', symbol: 'AUSD', decimals: 6 },
-  { assetId: 'ethereum:gho', symbol: 'GHO', decimals: 18 },
-  { assetId: 'ethereum:pyusd', symbol: 'PYUSD', decimals: 6 },
-  { assetId: 'arbitrum:pyusd', symbol: 'PYUSD', decimals: 6 },
-  { assetId: 'ethereum:rlusd', symbol: 'RLUSD', decimals: 18 },
-  { assetId: 'ethereum:usdd', symbol: 'USDD', decimals: 18 },
-  { assetId: 'ethereum:usdg', symbol: 'USDG', decimals: 6 },
-  { assetId: 'ethereum:usdt', symbol: 'USDT', decimals: 6 },
-  { assetId: 'ethereum:usdtb', symbol: 'USDtb', decimals: 18 },
-  { assetId: 'ethereum:frxusd', symbol: 'frxUSD', decimals: 18 },
+  {
+    assetId: 'ethereum:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'arbitrum:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'base:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'optimism:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'linea:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'avalanche_c:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'bnb:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'berachain:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'hyperevm:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'plasma:usde',
+    symbol: 'USDe',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  // Ethereum-native stablecoins and Sky assets.
+  {
+    assetId: 'ethereum:ausd',
+    symbol: 'AUSD',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:gho',
+    symbol: 'GHO',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:pyusd',
+    symbol: 'PYUSD',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'arbitrum:pyusd',
+    symbol: 'PYUSD',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:rlusd',
+    symbol: 'RLUSD',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:usdd',
+    symbol: 'USDD',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:usdg',
+    symbol: 'USDG',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:usdt',
+    symbol: 'USDT',
+    decimals: 6,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:usdtb',
+    symbol: 'USDtb',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:frxusd',
+    symbol: 'frxUSD',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:usds',
+    symbol: 'USDS',
+    decimals: 18,
+    kind: 'counter',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
+  {
+    assetId: 'ethereum:susds',
+    symbol: 'sUSDS',
+    decimals: 18,
+    kind: 'vault',
+    canSwapFrom: true,
+    canSwapTo: true,
+  },
 ] as const;
 
-/** The single sUSDS vault asset that every counter asset swaps against. */
-export const OSERO_API_VAULT_ASSET = {
-  assetId: 'ethereum:susds',
-  symbol: 'sUSDS',
-  decimals: 18,
-} as const;
-
-const OSERO_API_ASSETS = [...OSERO_API_COUNTER_ASSETS, OSERO_API_VAULT_ASSET] as const;
-
-export type OseroApiAsset =
-  | (typeof OSERO_API_COUNTER_ASSETS)[number]
-  | typeof OSERO_API_VAULT_ASSET;
+export type OseroApiAsset = (typeof OSERO_API_SWAP_ASSETS)[number];
 export type OseroApiChain = (typeof OSERO_API_CHAINS)[number];
-export type OseroApiCounterAssetId = (typeof OSERO_API_COUNTER_ASSETS)[number]['assetId'];
-export type OseroApiSusdsAssetId = (typeof OSERO_API_VAULT_ASSET)['assetId'];
-export type OseroApiPublicAssetId = OseroApiAsset['assetId'];
+export type OseroApiAssetId = OseroApiAsset['assetId'];
+export type OseroApiInputAsset = Extract<OseroApiAsset, { readonly canSwapFrom: true }>;
+export type OseroApiOutputAsset = Extract<OseroApiAsset, { readonly canSwapTo: true }>;
+export type OseroApiInputAssetId = OseroApiInputAsset['assetId'];
+export type OseroApiOutputAssetId = OseroApiOutputAsset['assetId'];
 export type OseroApiChainKey = OseroApiChain['chainKey'];
 export type OseroApiChainId = OseroApiChain['chainId'];
 export type OseroApiSourceChainId = OseroApiChainId;
 export type OseroApiAssetSymbol = OseroApiAsset['symbol'];
 export type OseroApiAssetDecimals = OseroApiAsset['decimals'];
 
-export const OSERO_API_COUNTER_ASSET_IDS: readonly OseroApiCounterAssetId[] =
-  OSERO_API_COUNTER_ASSETS.map((asset) => asset.assetId);
+export const OSERO_API_ASSETS: readonly OseroApiAsset[] = OSERO_API_SWAP_ASSETS;
+export const OSERO_API_INPUT_ASSETS: readonly OseroApiInputAsset[] = OSERO_API_SWAP_ASSETS.filter(
+  (asset): asset is OseroApiInputAsset => asset.canSwapFrom,
+);
+export const OSERO_API_OUTPUT_ASSETS: readonly OseroApiOutputAsset[] = OSERO_API_SWAP_ASSETS.filter(
+  (asset): asset is OseroApiOutputAsset => asset.canSwapTo,
+);
 
-export const OSERO_API_SUSDS_ASSET_ID: OseroApiSusdsAssetId = OSERO_API_VAULT_ASSET.assetId;
-
-export const OSERO_API_PUBLIC_ASSET_IDS: readonly OseroApiPublicAssetId[] = OSERO_API_ASSETS.map(
+export const OSERO_API_ASSET_IDS: readonly OseroApiAssetId[] = OSERO_API_ASSETS.map(
   (asset) => asset.assetId,
 );
+export const OSERO_API_INPUT_ASSET_IDS: readonly OseroApiInputAssetId[] =
+  OSERO_API_INPUT_ASSETS.map((asset) => asset.assetId);
+export const OSERO_API_OUTPUT_ASSET_IDS: readonly OseroApiOutputAssetId[] =
+  OSERO_API_OUTPUT_ASSETS.map((asset) => asset.assetId);
+
+export type OseroApiUsdsAssetId = Extract<
+  OseroApiAsset,
+  { readonly assetId: 'ethereum:usds' }
+>['assetId'];
+export type OseroApiSusdsAssetId = Extract<
+  OseroApiAsset,
+  { readonly assetId: 'ethereum:susds' }
+>['assetId'];
+
+export const OSERO_API_USDS_ASSET_ID: OseroApiUsdsAssetId = 'ethereum:usds';
+export const OSERO_API_SUSDS_ASSET_ID: OseroApiSusdsAssetId = 'ethereum:susds';
 
 export const OSERO_API_CHAIN_IDS: readonly OseroApiChainId[] = OSERO_API_CHAINS.map(
   (chain) => chain.chainId,
@@ -134,11 +379,12 @@ const OSERO_API_CHAIN_BY_KEY = new Map<OseroApiChainKey, OseroApiChain>(
   OSERO_API_CHAINS.map((chain) => [chain.chainKey, chain]),
 );
 
-const OSERO_API_ASSET_BY_ID = new Map<OseroApiPublicAssetId, OseroApiAsset>(
+const OSERO_API_ASSET_BY_ID = new Map<OseroApiAssetId, OseroApiAsset>(
   OSERO_API_ASSETS.map((asset) => [asset.assetId, asset]),
 );
 
 export const OSERO_API_BRIDGE_PROTOCOLS = ['ccip', 'layerzero', 'relay', 'stargate'] as const;
+export const OSERO_API_SWAP_DIRECTIONS = ['to-susds', 'from-susds', 'swap'] as const;
 export const OSERO_API_KEY_PREFIX = 'osero_';
 export const OSERO_API_KEY_MAX_LENGTH = 256;
 export const OSERO_API_REFERRAL_CODE_MIN = 3000;
@@ -149,21 +395,10 @@ export type OseroApiBridgeProtocol = (typeof OSERO_API_BRIDGE_PROTOCOLS)[number]
 export type OseroApiIntegerString = `${bigint}`;
 export type OseroApiReferralCode = number;
 
-export type OseroApiSwapQuoteRequest = OseroApiToSusdsQuoteRequest | OseroApiFromSusdsQuoteRequest;
-
-export type OseroApiToSusdsQuoteRequest = {
+export type OseroApiSwapQuoteRequest = {
   readonly fromAddress: Address;
-  readonly fromAssetId: OseroApiCounterAssetId;
-  readonly toAssetId: OseroApiSusdsAssetId;
-  readonly amount: bigint | OseroApiIntegerString;
-  readonly slippage?: string;
-  readonly referralCode?: OseroApiReferralCode;
-};
-
-export type OseroApiFromSusdsQuoteRequest = {
-  readonly fromAddress: Address;
-  readonly fromAssetId: OseroApiSusdsAssetId;
-  readonly toAssetId: OseroApiCounterAssetId;
+  readonly fromAssetId: OseroApiInputAssetId;
+  readonly toAssetId: OseroApiOutputAssetId;
   readonly amount: bigint | OseroApiIntegerString;
   readonly slippage?: string;
   readonly referralCode?: OseroApiReferralCode;
@@ -219,8 +454,8 @@ export type OseroApiClientError =
   | ApiRequestError
   | UnexpectedError;
 
-export type OseroApiAssetKind = 'counter' | 'vault';
-export type OseroApiSwapDirection = 'to-susds' | 'from-susds';
+export type OseroApiAssetKind = OseroApiAsset['kind'];
+export type OseroApiSwapDirection = (typeof OSERO_API_SWAP_DIRECTIONS)[number];
 export type OseroApiSwapExecutionKind = 'same-chain' | 'cross-chain';
 export type OseroApiBridgeState = 'pending' | 'completed' | 'failed' | 'unknown';
 export type OseroApiBridgeProviderStatus =
@@ -231,7 +466,7 @@ export type OseroApiBridgeProviderStatus =
   | 'unknown';
 
 export type OseroApiSwapAsset = {
-  readonly assetId: OseroApiPublicAssetId;
+  readonly assetId: OseroApiAssetId;
   readonly chainId: OseroApiChainId;
   readonly chainKey: OseroApiChainKey;
   readonly chainName: string;
@@ -361,8 +596,8 @@ export type OseroApiSwapStatusResponse = {
 
 type OseroApiSwapQuoteBody = {
   readonly fromAddress: Address;
-  readonly fromAssetId: OseroApiPublicAssetId;
-  readonly toAssetId: OseroApiPublicAssetId;
+  readonly fromAssetId: OseroApiInputAssetId;
+  readonly toAssetId: OseroApiOutputAssetId;
   readonly amount: OseroApiIntegerString;
   readonly slippage?: string;
   readonly referralCode?: OseroApiReferralCode;
@@ -559,7 +794,7 @@ export function swapQuoteToExecutionPlan(quote: OseroApiSwapQuoteResponse): Erc2
   const executionTransaction = apiTransactionToTransactionRequest(
     quote.execution.transaction,
     quote.execution.sourceChainId,
-    operationForQuoteDirection(quote.pair.direction),
+    'SWAP',
   );
 
   return makeApprovalRequiredPlan(executionTransaction, [
@@ -585,10 +820,6 @@ function apiTransactionToTransactionRequest(
     value: BigInt(transaction.value),
     operation,
   });
-}
-
-function operationForQuoteDirection(direction: OseroApiSwapDirection): OperationType {
-  return direction === 'to-susds' ? 'MINT_SUSDS' : 'REDEEM_SUSDS_FOR_USDC';
 }
 
 function normalizeBaseUrl(baseUrl: string | URL): URL {
@@ -653,26 +884,26 @@ function encodeSwapQuoteRequest(
   if (!isAddress(request.fromAddress)) {
     return err(ValidationError.forField('fromAddress', 'fromAddress must be an EVM address'));
   }
-  if (!isOseroApiPublicAssetId(request.fromAssetId)) {
+  if (!isOseroApiInputAssetId(request.fromAssetId)) {
     return err(
-      ValidationError.forField('fromAssetId', 'fromAssetId is not supported by the Osero API'),
+      ValidationError.forField(
+        'fromAssetId',
+        'fromAssetId is not a supported Osero API input asset',
+      ),
     );
   }
-  if (!isOseroApiPublicAssetId(request.toAssetId)) {
+  if (!isOseroApiOutputAssetId(request.toAssetId)) {
     return err(
-      ValidationError.forField('toAssetId', 'toAssetId is not supported by the Osero API'),
+      ValidationError.forField('toAssetId', 'toAssetId is not a supported Osero API output asset'),
     );
   }
   if (!isSupportedApiSwapPair(request.fromAssetId, request.toAssetId)) {
     return err(
-      new ValidationError(
-        'Only supported counter assets -> sUSDS or sUSDS -> supported counter assets are supported',
-        {
-          field: 'assetPair',
-          fromAssetId: request.fromAssetId,
-          toAssetId: request.toAssetId,
-        },
-      ),
+      new ValidationError('fromAssetId and toAssetId must be different supported swap assets', {
+        field: 'assetPair',
+        fromAssetId: request.fromAssetId,
+        toAssetId: request.toAssetId,
+      }),
     );
   }
 
@@ -730,19 +961,20 @@ function encodePositiveInteger(
   value: bigint | string,
   field: string,
 ): Result<OseroApiIntegerString, ValidationError> {
-  if (typeof value === 'bigint') {
-    if (value <= 0n) {
-      return err(ValidationError.forField(field, `${field} must be greater than 0`));
-    }
-    return ok(value.toString() as OseroApiIntegerString);
-  }
-
-  if (!/^[1-9][0-9]*$/.test(value)) {
+  if (typeof value === 'string' && !/^[1-9][0-9]*$/.test(value)) {
     return err(
       ValidationError.forField(field, `${field} must be a positive base-10 integer string`),
     );
   }
-  return ok(value as OseroApiIntegerString);
+
+  const amount = typeof value === 'bigint' ? value : BigInt(value);
+  if (amount <= 0n) {
+    return err(ValidationError.forField(field, `${field} must be greater than 0`));
+  }
+  if (amount > UINT256_MAX) {
+    return err(ValidationError.forField(field, `${field} must fit within uint256`));
+  }
+  return ok(amount.toString() as OseroApiIntegerString);
 }
 
 function encodeSlippage(value: string | undefined): Result<string | undefined, ValidationError> {
@@ -842,13 +1074,7 @@ function assertSwapQuoteInvariants(response: OseroApiSwapQuoteResponse): void {
   const { pair, approval, execution, bridge } = response;
 
   if (!isSupportedApiSwapPair(pair.from.assetId, pair.to.assetId)) {
-    throw new DecodeError('$.pair must be a supported counter asset <-> sUSDS pair');
-  }
-
-  const expectedDirection =
-    pair.from.assetId === OSERO_API_SUSDS_ASSET_ID ? 'from-susds' : 'to-susds';
-  if (pair.direction !== expectedDirection) {
-    throw new DecodeError(`$.pair.direction must be '${expectedDirection}' for this asset pair`);
+    throw new DecodeError('$.pair must be a supported input/output swap pair');
   }
 
   if (approval.token.assetId !== pair.from.assetId) {
@@ -914,7 +1140,7 @@ function decodeSupportedAsset(value: unknown, path: string): OseroApiSupportedAs
   const record = asRecord(value, path);
   const asset = decodeSwapAsset(record, path);
   const kind = enumStringField(record, 'kind', `${path}.kind`, OSERO_API_ASSET_KINDS);
-  const expectedKind = asset.assetId === OSERO_API_SUSDS_ASSET_ID ? 'vault' : 'counter';
+  const expectedKind = apiAssetForId(asset.assetId, `${path}.assetId`).kind;
   if (kind !== expectedKind) {
     throw new DecodeError(`${path}.kind must be '${expectedKind}' for ${asset.assetId}`);
   }
@@ -927,7 +1153,7 @@ function decodeSupportedAsset(value: unknown, path: string): OseroApiSupportedAs
 function decodeSwapPair(value: unknown, path: string): OseroApiSwapPair {
   const record = asRecord(value, path);
   return {
-    direction: enumStringField(record, 'direction', `${path}.direction`, OSERO_API_DIRECTIONS),
+    direction: enumStringField(record, 'direction', `${path}.direction`, OSERO_API_SWAP_DIRECTIONS),
     from: decodeSwapAsset(requiredField(record, 'from', `${path}.from`), `${path}.from`),
     to: decodeSwapAsset(requiredField(record, 'to', `${path}.to`), `${path}.to`),
   };
@@ -935,7 +1161,7 @@ function decodeSwapPair(value: unknown, path: string): OseroApiSwapPair {
 
 function decodeSwapAsset(value: unknown, path: string): OseroApiSwapAsset {
   const record = asRecord(value, path);
-  const assetId = enumStringField(record, 'assetId', `${path}.assetId`, OSERO_API_PUBLIC_ASSET_IDS);
+  const assetId = enumStringField(record, 'assetId', `${path}.assetId`, OSERO_API_ASSET_IDS);
   const expectedAsset = apiAssetForId(assetId, `${path}.assetId`);
   const expectedChain = apiChainForAssetId(assetId, `${path}.assetId`);
   const chainId = sourceChainIdField(record, 'chainId', `${path}.chainId`);
@@ -969,7 +1195,7 @@ function decodeSwapAsset(value: unknown, path: string): OseroApiSwapAsset {
   };
 }
 
-function apiAssetForId(assetId: OseroApiPublicAssetId, path: string): OseroApiAsset {
+function apiAssetForId(assetId: OseroApiAssetId, path: string): OseroApiAsset {
   const asset = OSERO_API_ASSET_BY_ID.get(assetId);
   if (asset === undefined) {
     throw new DecodeError(`${path} has no registered asset metadata`);
@@ -977,7 +1203,7 @@ function apiAssetForId(assetId: OseroApiPublicAssetId, path: string): OseroApiAs
   return asset;
 }
 
-function apiChainForAssetId(assetId: OseroApiPublicAssetId, path: string): OseroApiChain {
+function apiChainForAssetId(assetId: OseroApiAssetId, path: string): OseroApiChain {
   const [chainKey] = assetId.split(':') as [OseroApiChainKey, string];
   const chain = OSERO_API_CHAIN_BY_KEY.get(chainKey);
   if (chain === undefined) {
@@ -1157,8 +1383,9 @@ function decodeSwapStatusBridge(value: unknown, path: string): OseroApiSwapStatu
   };
 }
 
-const OSERO_API_ASSET_KINDS = ['counter', 'vault'] as const;
-const OSERO_API_DIRECTIONS = ['to-susds', 'from-susds'] as const;
+const OSERO_API_ASSET_KINDS: readonly OseroApiAssetKind[] = [
+  ...new Set(OSERO_API_ASSETS.map((asset) => asset.kind)),
+];
 const OSERO_API_EXECUTION_KINDS = ['same-chain', 'cross-chain'] as const;
 const OSERO_API_BRIDGE_STATES = ['pending', 'completed', 'failed', 'unknown'] as const;
 const OSERO_API_BRIDGE_PROVIDER_STATUSES = [
@@ -1387,26 +1614,23 @@ function isOseroApiSourceChainId(value: number): value is OseroApiSourceChainId 
   return OSERO_API_SOURCE_CHAIN_IDS.includes(value as OseroApiSourceChainId);
 }
 
-function isOseroApiPublicAssetId(value: unknown): value is OseroApiPublicAssetId {
+function isOseroApiInputAssetId(value: unknown): value is OseroApiInputAssetId {
   return (
-    typeof value === 'string' && OSERO_API_PUBLIC_ASSET_IDS.includes(value as OseroApiPublicAssetId)
+    typeof value === 'string' && OSERO_API_INPUT_ASSET_IDS.includes(value as OseroApiInputAssetId)
   );
 }
 
-function isOseroApiCounterAssetId(value: unknown): value is OseroApiCounterAssetId {
+function isOseroApiOutputAssetId(value: unknown): value is OseroApiOutputAssetId {
   return (
-    typeof value === 'string' &&
-    OSERO_API_COUNTER_ASSET_IDS.includes(value as OseroApiCounterAssetId)
+    typeof value === 'string' && OSERO_API_OUTPUT_ASSET_IDS.includes(value as OseroApiOutputAssetId)
   );
 }
 
-function isSupportedApiSwapPair(
-  fromAssetId: OseroApiPublicAssetId,
-  toAssetId: OseroApiPublicAssetId,
-): boolean {
+function isSupportedApiSwapPair(fromAssetId: OseroApiAssetId, toAssetId: OseroApiAssetId): boolean {
   return (
-    (isOseroApiCounterAssetId(fromAssetId) && toAssetId === OSERO_API_SUSDS_ASSET_ID) ||
-    (fromAssetId === OSERO_API_SUSDS_ASSET_ID && isOseroApiCounterAssetId(toAssetId))
+    fromAssetId !== toAssetId &&
+    isOseroApiInputAssetId(fromAssetId) &&
+    isOseroApiOutputAssetId(toAssetId)
   );
 }
 
