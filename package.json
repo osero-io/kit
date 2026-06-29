@@ -24,7 +24,7 @@
     "@swc-node/register": "1.11.1",
     "@swc/core": "1.15.8",
     "@swc/helpers": "0.5.18",
-    "@types/node": "25.7.0",
+    "@types/node": "26.0.0",
     "@vitest/coverage-v8": "~4.1.0",
     "ethers": "^6.16.0",
     "nx": "22.6.5",
