@@ -20,7 +20,7 @@ function optionalReferralCode(): number | undefined {
 
   const parsed = Number(raw);
   if (!Number.isInteger(parsed)) {
-    throw new Error('OSERO_API_REFERRAL_CODE must be an integer from 3000 to 3999.');
+    throw new Error('OSERO_API_REFERRAL_CODE must be an integer (the API enforces the range).');
   }
   return parsed;
 }
@@ -43,6 +43,9 @@ async function main() {
   banner('Quote Ethereum USDT → Ethereum USDS');
   const quote = await api.getSwapQuote({
     fromAddress: fromAddress as `0x${string}`,
+    // Known ids like this one autocomplete, but any ref is accepted — an
+    // arbitrary id or a '<chainId>:<0xaddress>' locator passes through and
+    // the hosted API decides whether it is supported.
     fromAssetId: 'ethereum:usdt',
     toAssetId: 'ethereum:usds',
     amount: parseUnits('1', 6),

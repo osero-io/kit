@@ -3,22 +3,20 @@ import { vi } from 'vitest';
 
 import { flattenExecutionPlan, runExecutionPlan, type SingleTxExecutor } from './adapters.js';
 import {
-  OSERO_API_ASSET_IDS,
-  OSERO_API_ASSETS,
-  OSERO_API_CHAIN_IDS,
-  OSERO_API_CHAINS,
-  OSERO_API_INPUT_ASSET_IDS,
-  OSERO_API_INPUT_ASSETS,
-  OSERO_API_OUTPUT_ASSET_IDS,
-  OSERO_API_OUTPUT_ASSETS,
-  OSERO_API_SOURCE_CHAIN_IDS,
-  OSERO_API_SUSDS_ASSET_ID,
-  OSERO_API_SWAP_ASSETS,
-  OSERO_API_USDS_ASSET_ID,
+  matchOseroApiAsset,
   OseroApiClient,
+  OSERO_API_KNOWN_ASSET_IDS,
+  OSERO_API_KNOWN_ASSETS,
+  OSERO_API_KNOWN_BRIDGE_PROTOCOLS,
+  OSERO_API_KNOWN_CHAIN_IDS,
+  OSERO_API_KNOWN_CHAINS,
+  OSERO_API_SUSDS_ASSET_ID,
+  OSERO_API_USDS_ASSET_ID,
+  type OseroApiAssetRef,
   type OseroApiFetch,
   type OseroApiFetchInit,
   type OseroApiFetchResponse,
+  type OseroApiIntegerString,
   type OseroApiSupportedAsset,
   type OseroApiSupportedAssetsResponse,
   type OseroApiSwapQuoteResponse,
@@ -32,18 +30,22 @@ const WALLET: Address = '0x1111111111111111111111111111111111111111';
 const SPENDER: Address = '0x2222222222222222222222222222222222222222';
 const EXECUTOR: Address = '0x3333333333333333333333333333333333333333';
 const BASE_USDC: Address = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+const BASE_USDC_UPPERCASE_HEX: Address = '0x833589FCD6EDB6E08F4C7C32D4F71B54BDA02913';
+const BASE_USDC_BAD_CHECKSUM: Address = '0x833589fcD6eDb6E08f4c7C32D4f71b54bdA02913';
 const MAINNET_USDC: Address = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const MAINNET_USDS: Address = '0xdC035D45d973E3EC169d2276DDab16f1e407384F';
 const MAINNET_SUSDS: Address = '0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD';
 const MAINNET_USDT: Address = '0xdAC17F958D2ee523a2206206994597C13D831ec7';
 const PLASMA_USDE: Address = '0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34';
+const SONIC_USDX: Address = '0x4444444444444444444444444444444444444444';
+const SONIC_USDY: Address = '0x5555555555555555555555555555555555555555';
 const SOURCE_HASH: Hex = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const DESTINATION_HASH: Hex = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const DEFAULT_API_KEY = 'osero_default-key_123';
 const OVERRIDE_API_KEY = 'osero_override-key_123';
 const API_KEY = 'osero_test-key_123';
 const UNKNOWN_API_KEY = 'osero_unknown-key_123';
-const INVALID_API_KEY = 'bad-key';
+const UNPREFIXED_API_KEY = `legacy!${'x'.repeat(256)}`;
 const LARGE_HEX_TRANSACTION_VALUE = '0x1000000000000000A';
 const LARGE_HEX_TRANSACTION_VALUE_DECIMAL = BigInt(LARGE_HEX_TRANSACTION_VALUE).toString();
 const UINT256_OVERFLOW_DECIMAL = (2n ** 256n).toString();
@@ -361,10 +363,8 @@ const usdtToUsdsQuoteResponse = {
   },
 } satisfies OseroApiSwapQuoteResponse;
 
-// A cross-chain quote for a newly integrated swap asset (Ethena USDe on
-// Plasma, an 18-decimal token on a chain absent from the original five). The
-// `satisfies` check doubles as a compile-time assertion that the new asset id,
-// chain id, chain key, symbol, and decimals are all wired into the types.
+// A cross-chain quote for a known-snapshot asset beyond the original chains
+// (Ethena USDe on Plasma, an 18-decimal token on chain 9745).
 const plasmaUsdeToSusdsQuote = {
   pair: {
     direction: 'to-susds',
@@ -439,6 +439,82 @@ const plasmaUsdeToSusdsQuote = {
       sourceChainId: 9745,
       bridgeProtocol: 'stargate',
     },
+  },
+} satisfies OseroApiSwapQuoteResponse;
+
+// An asset entirely unknown to this SDK release: a fictional chain (Sonic,
+// chain id 64165) serving an 8-decimal token. The `satisfies` checks below
+// double as compile-time proof that the widened response types represent
+// vocabulary the SDK has never seen.
+const sonicUsdxAsset = {
+  assetId: 'sonic:usdx',
+  chainId: 64_165,
+  chainKey: 'sonic',
+  chainName: 'Sonic',
+  chainShortName: 'Sonic',
+  symbol: 'USDX',
+  decimals: 8,
+  address: SONIC_USDX,
+  label: 'USDX · Sonic',
+} as const;
+
+const unknownAssetQuoteResponse = {
+  pair: {
+    direction: 'rebalance',
+    from: sonicUsdxAsset,
+    to: {
+      ...sonicUsdxAsset,
+      assetId: 'sonic:usdy',
+      symbol: 'USDY',
+      address: SONIC_USDY,
+      label: 'USDY · Sonic',
+    },
+  },
+  quote: {
+    amountIn: { raw: '100000000', formatted: '1' },
+    amountOut: { raw: '99000000', formatted: '0.99' },
+    previewUnavailable: false,
+    slippage: { bps: '50', percent: '0.5' },
+    gas: '500000',
+    priceImpactBps: 3,
+    createdAt: 1_712_345_680,
+  },
+  approval: {
+    token: sonicUsdxAsset,
+    spender: SPENDER,
+    amount: { raw: '100000000', formatted: '1' },
+    gas: '21000',
+    transaction: {
+      to: SONIC_USDX,
+      from: WALLET,
+      data: '0x095ea7b3',
+      value: '0',
+    },
+  },
+  execution: {
+    kind: 'same-chain',
+    sourceChainId: 64_165,
+    destinationChainId: 64_165,
+    transaction: {
+      to: EXECUTOR,
+      from: WALLET,
+      data: '0x9abc',
+      value: '0',
+    },
+    route: [
+      {
+        protocol: 'enso',
+        action: 'route',
+        chainId: 64_165,
+        sourceChainId: null,
+        destinationChainId: null,
+      },
+    ],
+  },
+  bridge: {
+    required: false,
+    protocol: null,
+    statusRequest: null,
   },
 } satisfies OseroApiSwapQuoteResponse;
 
@@ -820,6 +896,77 @@ describe('OseroApiClient', () => {
     );
   });
 
+  it('encodes status requests for chains and bridge protocols unknown to this SDK release', async () => {
+    const statusResponse = {
+      bridge: {
+        protocol: 'across',
+        state: 'pending',
+        providerStatus: 'inflight',
+        sourceChainId: 999_999,
+        destinationChainId: null,
+        sourceTxHash: SOURCE_HASH,
+        destinationTxHash: null,
+        error: null,
+      },
+    } satisfies OseroApiSwapStatusResponse;
+    const { fetch, calls } = makeFetch(jsonResponse(statusResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapStatus({
+      txHash: SOURCE_HASH,
+      sourceChainId: 999_999,
+      bridgeProtocol: 'across',
+    });
+
+    expect(result.isOk()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      `https://api.osero.org/v1/swap/status/${SOURCE_HASH}?sourceChainId=999999&bridgeProtocol=across`,
+    );
+  });
+
+  it('rejects malformed status request tx hashes before making an HTTP call', async () => {
+    const { fetch, calls } = makeFetch(jsonResponse({}));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapStatus({
+      txHash: '0x1234',
+      sourceChainId: 8453,
+      bridgeProtocol: 'stargate',
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a zero sourceChainId', { sourceChainId: 0, bridgeProtocol: 'stargate' }],
+    ['a negative sourceChainId', { sourceChainId: -1, bridgeProtocol: 'stargate' }],
+    ['a fractional sourceChainId', { sourceChainId: 1.5, bridgeProtocol: 'stargate' }],
+    ['an empty bridgeProtocol', { sourceChainId: 8453, bridgeProtocol: '' }],
+    ['a whitespace-only bridgeProtocol', { sourceChainId: 8453, bridgeProtocol: '   ' }],
+  ] as const)(
+    'rejects status requests with %s before making an HTTP call',
+    async (_name, fields) => {
+      const { fetch, calls } = makeFetch(jsonResponse({}));
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+      const result = await client.getSwapStatus({
+        txHash: SOURCE_HASH,
+        ...fields,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+      }
+      expect(calls).toHaveLength(0);
+    },
+  );
+
   it('returns ApiRequestError for non-2xx API responses', async () => {
     const { fetch } = makeFetch(
       jsonResponse(
@@ -849,6 +996,38 @@ describe('OseroApiClient', () => {
     }
   });
 
+  it('extracts the stable API error code from non-2xx quote responses', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse(
+        {
+          statusCode: 400,
+          code: 'SWAP_PAIR_NOT_SUPPORTED',
+          message: 'The requested swap pair is not supported.',
+        },
+        400,
+        'Bad Request',
+      ),
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'base:usdc',
+      toAssetId: 'base:usdc',
+      amount: 1_000_000n,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      const error = result.error;
+      expect(error).toBeInstanceOf(ApiRequestError);
+      if (error instanceof ApiRequestError) {
+        expect(error.statusCode).toBe(400);
+        expect(error.code).toBe('SWAP_PAIR_NOT_SUPPORTED');
+      }
+    }
+  });
+
   it('returns UnexpectedError when a successful response has an invalid shape', async () => {
     const { fetch } = makeFetch(jsonResponse({ assets: [{ assetId: 'base:usdc' }] }));
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
@@ -861,7 +1040,38 @@ describe('OseroApiClient', () => {
     }
   });
 
-  it('validates request input before making an HTTP call', async () => {
+  it.each([
+    ['a truncated hex string', '0x123'],
+    ['a bad-checksum mixed-case address', BASE_USDC_BAD_CHECKSUM],
+  ] as const)(
+    'rejects %s as fromAddress before making an HTTP call',
+    async (_name, fromAddress) => {
+      const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+      const result = await client.getSwapQuote({
+        fromAddress,
+        fromAssetId: 'base:usdc',
+        toAssetId: 'ethereum:susds',
+        amount: 1_000_000n,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+      }
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ['zero', 0n],
+    ['negative bigint', -1n],
+    ['negative integer string', '-1'],
+    ['leading-zero integer string', '01'],
+    ['decimal string', '1.5'],
+    ['garbage string', 'abc'],
+  ])('rejects %s amounts before making an HTTP call', async (_name, amount) => {
     const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
 
@@ -869,8 +1079,7 @@ describe('OseroApiClient', () => {
       fromAddress: WALLET,
       fromAssetId: 'base:usdc',
       toAssetId: 'ethereum:susds',
-      amount: 0n,
-      slippage: '5.01',
+      amount: amount as bigint | OseroApiIntegerString,
     });
 
     expect(result.isErr()).toBe(true);
@@ -880,7 +1089,26 @@ describe('OseroApiClient', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('rejects same-asset quote requests before making an HTTP call', async () => {
+  it('sends asset ids unknown to this SDK release to the API unchanged', async () => {
+    const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'sonic:usdx',
+      toAssetId: 'ethereum:notacoin',
+      amount: 1_000_000n,
+    });
+
+    expect(result.isOk()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.init.body ?? '{}') as unknown).toMatchObject({
+      fromAssetId: 'sonic:usdx',
+      toAssetId: 'ethereum:notacoin',
+    });
+  });
+
+  it('passes same-asset quote requests through to the API', async () => {
     const { fetch, calls } = makeFetch(jsonResponse(usdsToUsdcQuoteResponse));
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
 
@@ -891,58 +1119,12 @@ describe('OseroApiClient', () => {
       amount: '1',
     });
 
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(ValidationError);
-    }
-    expect(calls).toHaveLength(0);
-  });
-
-  it('accepts every registered asset in both directions with USDS before fetching quotes', async () => {
-    const { fetch, calls } = makeFetch(jsonResponse(usdtToUsdsQuoteResponse));
-    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
-    const assetsIntoUsds = OSERO_API_INPUT_ASSET_IDS.filter(
-      (assetId) => assetId !== OSERO_API_USDS_ASSET_ID,
-    );
-    const assetsFromUsds = OSERO_API_OUTPUT_ASSET_IDS.filter(
-      (assetId) => assetId !== OSERO_API_USDS_ASSET_ID,
-    );
-
-    for (const assetId of assetsIntoUsds) {
-      const result = await client.getSwapQuote({
-        fromAddress: WALLET,
-        fromAssetId: assetId,
-        toAssetId: OSERO_API_USDS_ASSET_ID,
-        amount: '1',
-      });
-
-      expect(result.isOk()).toBe(true);
-    }
-
-    for (const assetId of assetsFromUsds) {
-      const result = await client.getSwapQuote({
-        fromAddress: WALLET,
-        fromAssetId: OSERO_API_USDS_ASSET_ID,
-        toAssetId: assetId,
-        amount: '1',
-      });
-
-      expect(result.isOk()).toBe(true);
-    }
-
-    expect(calls).toHaveLength(assetsIntoUsds.length + assetsFromUsds.length);
-    expect(
-      calls.map((call) => {
-        const body = JSON.parse(call.init.body ?? '{}') as {
-          readonly fromAssetId?: string;
-          readonly toAssetId?: string;
-        };
-        return `${body.fromAssetId ?? ''}->${body.toAssetId ?? ''}`;
-      }),
-    ).toEqual([
-      ...assetsIntoUsds.map((assetId) => `${assetId}->${OSERO_API_USDS_ASSET_ID}`),
-      ...assetsFromUsds.map((assetId) => `${OSERO_API_USDS_ASSET_ID}->${assetId}`),
-    ]);
+    expect(result.isOk()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.init.body ?? '{}') as unknown).toMatchObject({
+      fromAssetId: OSERO_API_USDS_ASSET_ID,
+      toAssetId: OSERO_API_USDS_ASSET_ID,
+    });
   });
 
   it('rejects quote request amount overflows before making an HTTP call', async () => {
@@ -963,9 +1145,14 @@ describe('OseroApiClient', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('validates API key candidates before making an HTTP call', async () => {
+  it.each([
+    ['an empty string', ''],
+    ['a whitespace-containing string', 'osero_bad key'],
+    ['a control-character string', 'osero_bad\nkey'],
+    ['a non-ASCII string', 'osero_clé'],
+  ] as const)('rejects %s as an API key before making an HTTP call', async (_name, apiKey) => {
     const { fetch, calls } = makeFetch(jsonResponse(supportedAssetsResponse));
-    const client = OseroApiClient.create({ apiKey: INVALID_API_KEY, fetch });
+    const client = OseroApiClient.create({ apiKey, fetch });
 
     const result = await client.getSupportedAssets();
 
@@ -976,7 +1163,63 @@ describe('OseroApiClient', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('validates quote referral codes before making an HTTP call', async () => {
+  it('accepts visible-ASCII API keys outside the advisory prefix and length conventions', async () => {
+    const { fetch, calls } = makeFetch(jsonResponse(supportedAssetsResponse));
+    const client = OseroApiClient.create({ apiKey: UNPREFIXED_API_KEY, fetch });
+
+    const result = await client.getSupportedAssets();
+
+    expect(result.isOk()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.init.headers['x-api-key']).toBe(UNPREFIXED_API_KEY);
+  });
+
+  it.each([42, 1.5, 9999] as const)(
+    'passes the finite referral code %d through to the API',
+    async (referralCode) => {
+      const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+      const result = await client.getSwapQuote({
+        fromAddress: WALLET,
+        fromAssetId: 'base:usdc',
+        toAssetId: 'ethereum:susds',
+        amount: 1_000_000n,
+        referralCode,
+      });
+
+      expect(result.isOk()).toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(JSON.parse(calls[0]!.init.body ?? '{}') as unknown).toMatchObject({ referralCode });
+    },
+  );
+
+  it.each([
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ] as const)(
+    'rejects the non-finite referral code %s before making an HTTP call',
+    async (_name, referralCode) => {
+      const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+      const result = await client.getSwapQuote({
+        fromAddress: WALLET,
+        fromAssetId: 'base:usdc',
+        toAssetId: 'ethereum:susds',
+        amount: 1_000_000n,
+        referralCode,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+      }
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it('passes slippage strings through to the API verbatim', async () => {
     const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
 
@@ -985,14 +1228,14 @@ describe('OseroApiClient', () => {
       fromAssetId: 'base:usdc',
       toAssetId: 'ethereum:susds',
       amount: 1_000_000n,
-      referralCode: 2999,
+      slippage: '7.123',
     });
 
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(ValidationError);
-    }
-    expect(calls).toHaveLength(0);
+    expect(result.isOk()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.init.body ?? '{}') as unknown).toMatchObject({
+      slippage: '7.123',
+    });
   });
 
   it('uses bridge.statusRequest to call getSwapStatus from a cross-chain quote', async () => {
@@ -1033,166 +1276,39 @@ describe('OseroApiClient', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('rejects quote responses where required=true but bridge metadata is null', async () => {
-    const { fetch } = makeFetch(
-      jsonResponse({
-        ...toSusdsQuoteResponse,
-        bridge: { required: true, protocol: null, statusRequest: null },
-      }),
-    );
-    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
-
-    const result = await client.getSwapQuote({
-      fromAddress: WALLET,
-      fromAssetId: 'base:usdc',
-      toAssetId: 'ethereum:susds',
-      amount: 1_000_000n,
-    });
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-    }
-  });
-
-  it('rejects quote responses where required=false but bridge metadata is set', async () => {
-    const { fetch } = makeFetch(
-      jsonResponse({
-        ...fromSusdsQuoteResponse,
-        bridge: {
-          required: false,
-          protocol: 'stargate',
-          statusRequest: { sourceChainId: 1, bridgeProtocol: 'stargate' },
-        },
-      }),
-    );
-    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
-
-    const result = await client.getSwapQuote({
-      fromAddress: WALLET,
-      fromAssetId: 'ethereum:susds',
-      toAssetId: 'ethereum:usdc',
-      amount: '1000000000000000000',
-    });
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-    }
-  });
-
   it.each([
     [
-      'same asset pair',
-      {
-        pair: {
-          ...toSusdsQuoteResponse.pair,
-          to: toSusdsQuoteResponse.pair.from,
-        },
-      },
+      'protocol and statusRequest are null',
+      { required: true, protocol: null, statusRequest: null },
     ],
     [
-      'unknown direction',
+      'protocol is null',
       {
-        pair: {
-          ...toSusdsQuoteResponse.pair,
-          direction: 'mint',
-        },
+        required: true,
+        protocol: null,
+        statusRequest: { sourceChainId: 8453, bridgeProtocol: 'stargate' },
       },
     ],
-    [
-      'approval token',
-      {
-        approval: {
-          ...toSusdsQuoteResponse.approval,
-          token: toSusdsQuoteResponse.pair.to,
-        },
-      },
-    ],
-    [
-      'approval transaction target',
-      {
-        approval: {
-          ...toSusdsQuoteResponse.approval,
-          transaction: {
-            ...toSusdsQuoteResponse.approval.transaction,
-            to: MAINNET_SUSDS,
-          },
-        },
-      },
-    ],
-    [
-      'approval transaction value',
-      {
-        approval: {
-          ...toSusdsQuoteResponse.approval,
-          transaction: {
-            ...toSusdsQuoteResponse.approval.transaction,
-            value: '1',
-          },
-        },
-      },
-    ],
-    [
-      'execution source chain',
-      {
-        execution: {
-          ...toSusdsQuoteResponse.execution,
-          sourceChainId: 1,
-        },
-      },
-    ],
-    [
-      'same-chain execution over different chains',
-      {
-        execution: {
-          ...toSusdsQuoteResponse.execution,
-          kind: 'same-chain',
-        },
-        bridge: {
-          required: false,
-          protocol: null,
-          statusRequest: null,
-        },
-      },
-    ],
-    [
-      'bridge requirement',
-      {
-        execution: {
-          ...toSusdsQuoteResponse.execution,
-          kind: 'same-chain',
-        },
-      },
-    ],
-    [
-      'bridge status request source chain',
-      {
-        bridge: {
-          ...toSusdsQuoteResponse.bridge,
-          statusRequest: {
-            sourceChainId: 1,
-            bridgeProtocol: 'stargate',
-          },
-        },
-      },
-    ],
-  ] as const)('rejects a quote response with inconsistent %s', async (_name, override) => {
-    const { fetch } = makeFetch(jsonResponse({ ...toSusdsQuoteResponse, ...override }));
-    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+    ['statusRequest is null', { required: true, protocol: 'stargate', statusRequest: null }],
+  ] as const)(
+    'rejects quote responses where bridge.required is true but %s',
+    async (_name, bridge) => {
+      const { fetch } = makeFetch(jsonResponse({ ...toSusdsQuoteResponse, bridge }));
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
 
-    const result = await client.getSwapQuote({
-      fromAddress: WALLET,
-      fromAssetId: 'base:usdc',
-      toAssetId: 'ethereum:susds',
-      amount: 1_000_000n,
-    });
+      const result = await client.getSwapQuote({
+        fromAddress: WALLET,
+        fromAssetId: 'base:usdc',
+        toAssetId: 'ethereum:susds',
+        amount: 1_000_000n,
+      });
 
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-    }
-  });
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(UnexpectedError);
+      }
+    },
+  );
 
   it('rejects quote responses with uint256-sized amount overflows', async () => {
     const { fetch } = makeFetch(
@@ -1304,36 +1420,248 @@ describe('OseroApiClient', () => {
       expect(result.value.assets.map((asset) => asset.decimals)).toEqual([6, 18, 18]);
     }
   });
+});
 
-  it.each([
-    ['unknown chain key', { chainKey: 'fantom' }],
-    ['unknown asset symbol', { symbol: 'NOTUSD' }],
-    ['unsupported chain id', { chainId: 12_345 }],
-    ['unsupported decimals', { decimals: 8 }],
-    ['unknown asset id', { assetId: 'fantom:usdc' }],
-    ['chain key that does not match the asset id', { chainKey: 'base' }],
-    ['chain id that does not match the asset id', { chainId: 1 }],
-    ['symbol that does not match the asset id', { symbol: 'USDC' }],
-    ['registered decimals that do not match the asset id', { decimals: 6 }],
-    ['kind that does not match the asset id', { kind: 'vault' }],
-  ] as const)('rejects a supported-assets response containing an %s', async (_name, override) => {
-    const asset = {
-      assetId: 'plasma:usde',
-      chainId: 9745,
-      chainKey: 'plasma',
-      chainName: 'Plasma',
-      chainShortName: 'Plasma',
-      symbol: 'USDe',
-      decimals: 18,
-      address: PLASMA_USDE,
-      label: 'USDe · Plasma',
-      kind: 'counter',
-      ...override,
-    };
-    const { fetch } = makeFetch(jsonResponse({ assets: [asset] }));
+describe('forward compatibility', () => {
+  it('decodes a supported-assets response listing an asset unknown to this SDK release', async () => {
+    const response = {
+      assets: [
+        {
+          ...sonicUsdxAsset,
+          kind: 'yield',
+        },
+      ],
+    } satisfies OseroApiSupportedAssetsResponse;
+    const { fetch } = makeFetch(jsonResponse(response));
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
 
     const result = await client.getSupportedAssets();
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.assets).toEqual([
+        {
+          assetId: 'sonic:usdx',
+          chainId: 64_165,
+          chainKey: 'sonic',
+          chainName: 'Sonic',
+          chainShortName: 'Sonic',
+          symbol: 'USDX',
+          decimals: 8,
+          address: SONIC_USDX,
+          label: 'USDX · Sonic',
+          kind: 'yield',
+        },
+      ]);
+    }
+  });
+
+  it('decodes a quote between unknown 8-decimal assets with unknown pair vocabulary', async () => {
+    const { fetch } = makeFetch(jsonResponse(unknownAssetQuoteResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'sonic:usdx',
+      toAssetId: 'sonic:usdy',
+      amount: 100_000_000n,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.pair.direction).toBe('rebalance');
+      expect(result.value.pair.from.assetId).toBe('sonic:usdx');
+      expect(result.value.pair.from.decimals).toBe(8);
+      expect(result.value.pair.to.assetId).toBe('sonic:usdy');
+      expect(result.value.execution.kind).toBe('same-chain');
+      const plan = result.value.executionPlan;
+      const transactions = flattenExecutionPlan(plan);
+      expect(plan.__typename).toBe('Erc20ApprovalRequired');
+      expect(plan.approvals[0]!.token).toBe(SONIC_USDX);
+      expect(transactions.map((tx) => tx.operation)).toEqual(['APPROVE_ERC20', 'SWAP']);
+      expect(transactions.every((tx) => tx.chainId === 64_165)).toBe(true);
+    }
+  });
+
+  it('decodes a quote with an unknown execution kind and still builds the execution plan', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse({
+        ...unknownAssetQuoteResponse,
+        execution: {
+          ...unknownAssetQuoteResponse.execution,
+          kind: 'batched',
+        },
+      }),
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'sonic:usdx',
+      toAssetId: 'sonic:usdy',
+      amount: 100_000_000n,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.execution.kind).toBe('batched');
+      expect(flattenExecutionPlan(result.value.executionPlan).map((tx) => tx.operation)).toEqual([
+        'APPROVE_ERC20',
+        'SWAP',
+      ]);
+    }
+  });
+
+  it('round-trips an unknown bridge protocol from quote decoding into status polling', async () => {
+    const acrossQuoteResponse = {
+      ...toSusdsQuoteResponse,
+      bridge: {
+        required: true,
+        protocol: 'across',
+        statusRequest: {
+          sourceChainId: 8453,
+          bridgeProtocol: 'across',
+        },
+      },
+    } satisfies OseroApiSwapQuoteResponse;
+    const quoteFetch = makeFetch(jsonResponse(acrossQuoteResponse));
+    const quoteClient = OseroApiClient.create({ apiKey: API_KEY, fetch: quoteFetch.fetch });
+
+    const quoteResult = await quoteClient.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'base:usdc',
+      toAssetId: 'ethereum:susds',
+      amount: 1_000_000n,
+    });
+
+    expect(quoteResult.isOk()).toBe(true);
+    if (quoteResult.isOk()) {
+      const statusResponse = {
+        bridge: {
+          protocol: 'across',
+          state: 'pending',
+          providerStatus: 'inflight',
+          sourceChainId: 8453,
+          destinationChainId: 1,
+          sourceTxHash: SOURCE_HASH,
+          destinationTxHash: null,
+          error: null,
+        },
+      } satisfies OseroApiSwapStatusResponse;
+      const statusFetch = makeFetch(jsonResponse(statusResponse));
+      const statusClient = OseroApiClient.create({ apiKey: API_KEY, fetch: statusFetch.fetch });
+
+      const statusResult = await statusClient.getSwapStatusForQuote(quoteResult.value, SOURCE_HASH);
+
+      expect(statusResult.isOk()).toBe(true);
+      expect(statusFetch.calls).toHaveLength(1);
+      expect(statusFetch.calls[0]!.url).toBe(
+        `https://api.osero.org/v1/swap/status/${SOURCE_HASH}?sourceChainId=8453&bridgeProtocol=across`,
+      );
+    }
+  });
+
+  it('decodes status responses with unknown state and provider-status vocabulary', async () => {
+    const statusResponse = {
+      bridge: {
+        protocol: 'across',
+        state: 'reorged',
+        providerStatus: 'requeued',
+        sourceChainId: 8453,
+        destinationChainId: null,
+        sourceTxHash: SOURCE_HASH,
+        destinationTxHash: null,
+        error: null,
+      },
+    } satisfies OseroApiSwapStatusResponse;
+    const { fetch } = makeFetch(jsonResponse(statusResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapStatus({
+      txHash: SOURCE_HASH,
+      sourceChainId: 8453,
+      bridgeProtocol: 'across',
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.bridge.state).toBe('reorged');
+      expect(result.value.bridge.providerStatus).toBe('requeued');
+    }
+  });
+
+  it('tolerates non-null bridge metadata when bridge.required is false', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse({
+        ...fromSusdsQuoteResponse,
+        bridge: {
+          required: false,
+          protocol: 'stargate',
+          statusRequest: { sourceChainId: 1, bridgeProtocol: 'stargate' },
+        },
+      }),
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'ethereum:susds',
+      toAssetId: 'ethereum:usdc',
+      amount: '1000000000000000000',
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.bridge.required).toBe(false);
+      expect(result.value.bridge.protocol).toBe('stargate');
+      expect(result.value.bridge.statusRequest).toEqual({
+        sourceChainId: 1,
+        bridgeProtocol: 'stargate',
+      });
+    }
+  });
+
+  it('tolerates absent bridge metadata keys when bridge.required is false', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse({
+        ...fromSusdsQuoteResponse,
+        bridge: { required: false },
+      }),
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'ethereum:susds',
+      toAssetId: 'ethereum:usdc',
+      amount: '1000000000000000000',
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.bridge).toEqual({
+        required: false,
+        protocol: null,
+        statusRequest: null,
+      });
+    }
+  });
+
+  it('still rejects absent bridge metadata keys when bridge.required is true', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse({
+        ...fromSusdsQuoteResponse,
+        bridge: { required: true },
+      }),
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'ethereum:susds',
+      toAssetId: 'ethereum:usdc',
+      amount: '1000000000000000000',
+    });
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) {
@@ -1342,128 +1670,297 @@ describe('OseroApiClient', () => {
   });
 });
 
-describe('OSERO API asset registry', () => {
-  it('derives asset id lists from the capability registry, originals first', () => {
-    expect(OSERO_API_ASSET_IDS).toEqual(OSERO_API_ASSETS.map((asset) => asset.assetId));
-    expect(OSERO_API_ASSET_IDS.slice(0, 5)).toEqual([
-      'base:usdc',
-      'arbitrum:usdc',
-      'optimism:usdc',
-      'linea:usdc',
-      'ethereum:usdc',
-    ]);
-    expect(OSERO_API_ASSET_IDS).toHaveLength(33);
-    expect(OSERO_API_INPUT_ASSET_IDS).toEqual(OSERO_API_INPUT_ASSETS.map((asset) => asset.assetId));
-    expect(OSERO_API_OUTPUT_ASSET_IDS).toEqual(
-      OSERO_API_OUTPUT_ASSETS.map((asset) => asset.assetId),
+describe('dropped correlations', () => {
+  it('decodes quotes whose approval token and execution chains diverge from the display pair', async () => {
+    const { fetch } = makeFetch(
+      jsonResponse({
+        ...toSusdsQuoteResponse,
+        approval: {
+          ...toSusdsQuoteResponse.approval,
+          token: toSusdsQuoteResponse.pair.to,
+          transaction: {
+            ...toSusdsQuoteResponse.approval.transaction,
+            to: MAINNET_SUSDS,
+          },
+        },
+        execution: {
+          ...toSusdsQuoteResponse.execution,
+          sourceChainId: 1,
+        },
+        bridge: {
+          ...toSusdsQuoteResponse.bridge,
+          statusRequest: {
+            ...toSusdsQuoteResponse.bridge.statusRequest,
+            sourceChainId: 1,
+          },
+        },
+      }),
     );
-  });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
 
-  it('includes every newly integrated swap asset', () => {
-    for (const assetId of [
-      'avalanche_c:usdc',
-      'hyperevm:usdc',
-      'monad:usdc',
-      'polygon:usdc',
-      'unichain:usdc',
-      'berachain:usdce',
-      'ethereum:usde',
-      'plasma:usde',
-      'ethereum:ausd',
-      'ethereum:gho',
-      'ethereum:pyusd',
-      'arbitrum:pyusd',
-      'ethereum:rlusd',
-      'ethereum:usdd',
-      'ethereum:usdg',
-      'ethereum:usdt',
-      'ethereum:usdtb',
-      'ethereum:frxusd',
-      OSERO_API_USDS_ASSET_ID,
-      OSERO_API_SUSDS_ASSET_ID,
-    ]) {
-      expect(OSERO_API_ASSET_IDS).toContain(assetId);
-      expect(OSERO_API_INPUT_ASSET_IDS).toContain(assetId);
-      expect(OSERO_API_OUTPUT_ASSET_IDS).toContain(assetId);
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'base:usdc',
+      toAssetId: 'ethereum:susds',
+      amount: 1_000_000n,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.approval.token.assetId).not.toBe(result.value.pair.from.assetId);
+      expect(result.value.execution.sourceChainId).not.toBe(result.value.pair.from.chainId);
+      const transactions = flattenExecutionPlan(result.value.executionPlan);
+      expect(transactions[0]!.to).toBe(MAINNET_SUSDS);
+      expect(transactions.map((tx) => tx.chainId)).toEqual([1, 1]);
     }
   });
 
-  it('excludes pairs Enso cannot serve while keeping reachable ones', () => {
-    // No native Circle USDC on BNB; BNB stays reachable via USDe.
-    expect(OSERO_API_ASSET_IDS).not.toContain('bnb:usdc');
-    expect(OSERO_API_ASSET_IDS).toContain('bnb:usde');
-    expect(OSERO_API_SOURCE_CHAIN_IDS).toContain(56);
-    // World Chain and Ink have no usable Enso bridge route for the swap flow,
-    // so neither the assets nor their (now orphaned) chains are registered.
-    expect(OSERO_API_ASSET_IDS).not.toContain('worldchain:usdc');
-    expect(OSERO_API_ASSET_IDS).not.toContain('ink:usdc');
-    expect(OSERO_API_SOURCE_CHAIN_IDS).not.toContain(480);
-    expect(OSERO_API_SOURCE_CHAIN_IDS).not.toContain(57073);
-  });
+  it.each([
+    [
+      'approval transaction targets a contract other than the approval token',
+      {
+        approval: {
+          ...toSusdsQuoteResponse.approval,
+          transaction: {
+            ...toSusdsQuoteResponse.approval.transaction,
+            to: MAINNET_SUSDS,
+          },
+        },
+      },
+    ],
+    [
+      'approval token belongs to a chain other than the execution source',
+      {
+        approval: {
+          ...toSusdsQuoteResponse.approval,
+          token: toSusdsQuoteResponse.pair.to,
+          transaction: {
+            ...toSusdsQuoteResponse.approval.transaction,
+            to: MAINNET_SUSDS,
+          },
+        },
+      },
+    ],
+    [
+      'approval transaction carries a non-zero value',
+      {
+        approval: {
+          ...toSusdsQuoteResponse.approval,
+          transaction: {
+            ...toSusdsQuoteResponse.approval.transaction,
+            value: '1',
+          },
+        },
+      },
+    ],
+    [
+      'approval and execution transactions have different signers',
+      {
+        approval: {
+          ...toSusdsQuoteResponse.approval,
+          transaction: {
+            ...toSusdsQuoteResponse.approval.transaction,
+            from: SPENDER,
+          },
+        },
+      },
+    ],
+    [
+      'bridge status request targets a chain other than the execution source',
+      {
+        bridge: {
+          ...toSusdsQuoteResponse.bridge,
+          statusRequest: {
+            ...toSusdsQuoteResponse.bridge.statusRequest,
+            sourceChainId: 1,
+          },
+        },
+      },
+    ],
+  ] as const)('still rejects a quote response whose %s', async (_name, override) => {
+    const { fetch } = makeFetch(jsonResponse({ ...toSusdsQuoteResponse, ...override }));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
 
-  it('registers USDS and sUSDS as first-class input and output assets', () => {
-    expect(OSERO_API_USDS_ASSET_ID).toBe('ethereum:usds');
-    expect(OSERO_API_SUSDS_ASSET_ID).toBe('ethereum:susds');
-    expect(OSERO_API_INPUT_ASSET_IDS).toContain(OSERO_API_USDS_ASSET_ID);
-    expect(OSERO_API_OUTPUT_ASSET_IDS).toContain(OSERO_API_USDS_ASSET_ID);
-    expect(OSERO_API_INPUT_ASSET_IDS).toContain(OSERO_API_SUSDS_ASSET_ID);
-    expect(OSERO_API_OUTPUT_ASSET_IDS).toContain(OSERO_API_SUSDS_ASSET_ID);
-  });
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: 'base:usdc',
+      toAssetId: 'ethereum:susds',
+      amount: 1_000_000n,
+    });
 
-  it('supports every registered non-USDS asset in both directions with USDS', () => {
-    const assetsExcludingUsds = OSERO_API_ASSET_IDS.filter(
-      (assetId) => assetId !== OSERO_API_USDS_ASSET_ID,
-    );
-
-    expect(assetsExcludingUsds).toEqual(
-      expect.arrayContaining(['ethereum:usdc', 'ethereum:susds', 'ethereum:usde', 'ethereum:usdt']),
-    );
-
-    for (const assetId of assetsExcludingUsds) {
-      expect(OSERO_API_INPUT_ASSET_IDS).toContain(assetId);
-      expect(OSERO_API_OUTPUT_ASSET_IDS).toContain(assetId);
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(UnexpectedError);
     }
+  });
+});
 
-    expect(OSERO_API_INPUT_ASSET_IDS).toContain(OSERO_API_USDS_ASSET_ID);
-    expect(OSERO_API_OUTPUT_ASSET_IDS).toContain(OSERO_API_USDS_ASSET_ID);
+describe('asset locators', () => {
+  it('serializes locators as lowercased chain-scoped address refs', async () => {
+    const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: { chainId: 8453, address: BASE_USDC },
+      toAssetId: 'ethereum:susds',
+      amount: 1_000_000n,
+    });
+
+    expect(result.isOk()).toBe(true);
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0]!.init.body ?? '{}') as { readonly fromAssetId?: string };
+    expect(body.fromAssetId).toBe('8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913');
   });
 
-  it('keeps asset ids, source chain ids, and chain keys unique', () => {
-    expect(new Set(OSERO_API_ASSET_IDS).size).toBe(OSERO_API_ASSET_IDS.length);
-    expect(new Set(OSERO_API_SOURCE_CHAIN_IDS).size).toBe(OSERO_API_SOURCE_CHAIN_IDS.length);
-    const chainKeys = OSERO_API_CHAINS.map((chain) => chain.chainKey);
+  it.each([0, -1, 1.5] as const)(
+    'rejects locators with chain id %d before making an HTTP call',
+    async (chainId) => {
+      const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+      const result = await client.getSwapQuote({
+        fromAddress: WALLET,
+        fromAssetId: { chainId, address: BASE_USDC },
+        toAssetId: 'ethereum:susds',
+        amount: 1_000_000n,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+      }
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ['a bad-checksum mixed-case address', BASE_USDC_BAD_CHECKSUM],
+    ['a garbage address', '0xnotanaddress'],
+  ] as const)('rejects locators with %s before making an HTTP call', async (_name, address) => {
+    const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: { chainId: 8453, address },
+      toAssetId: 'ethereum:susds',
+      amount: 1_000_000n,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['an empty string', ''],
+    ['a whitespace-only string', '   '],
+  ] as const)('rejects %s as an asset ref before making an HTTP call', async (_name, assetRef) => {
+    const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSwapQuote({
+      fromAddress: WALLET,
+      fromAssetId: assetRef,
+      toAssetId: 'ethereum:susds',
+      amount: 1_000_000n,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a number', 8453],
+  ] as const)(
+    'returns a ValidationError instead of throwing when the asset ref is %s',
+    async (_name, assetRef) => {
+      const { fetch, calls } = makeFetch(jsonResponse(toSusdsQuoteResponse));
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+      // JS callers (or unsound casts) can pass non-ref values; the client
+      // must keep its ResultAsync contract and never throw synchronously.
+      const result = await client.getSwapQuote({
+        fromAddress: WALLET,
+        fromAssetId: assetRef as unknown as OseroApiAssetRef,
+        toAssetId: 'ethereum:susds',
+        amount: 1_000_000n,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+      }
+      expect(calls).toHaveLength(0);
+    },
+  );
+});
+
+describe('matchOseroApiAsset', () => {
+  const assets = supportedAssetsResponse.assets;
+
+  it('matches canonical asset ids', () => {
+    expect(matchOseroApiAsset(assets, 'ethereum:usds')?.address).toBe(MAINNET_USDS);
+  });
+
+  it('matches chain-scoped address string refs case-insensitively', () => {
+    const match = matchOseroApiAsset(assets, `8453:${BASE_USDC_UPPERCASE_HEX}`);
+    expect(match?.assetId).toBe('base:usdc');
+  });
+
+  it('matches structured locators regardless of address casing', () => {
+    const match = matchOseroApiAsset(assets, {
+      chainId: 8453,
+      address: BASE_USDC_UPPERCASE_HEX,
+    });
+    expect(match?.assetId).toBe('base:usdc');
+  });
+
+  it('returns undefined when no listed asset matches', () => {
+    expect(matchOseroApiAsset(assets, 'sonic:usdx')).toBeUndefined();
+    expect(matchOseroApiAsset(assets, { chainId: 999, address: BASE_USDC })).toBeUndefined();
+  });
+
+  it.each([
+    ['a colon-less string', 'nocolon'],
+    ['a non-hex address tail', '8453:nothex'],
+  ] as const)('returns undefined for %s ref instead of throwing', (_name, ref) => {
+    expect(matchOseroApiAsset(assets, ref)).toBeUndefined();
+  });
+});
+
+describe('advisory known registries', () => {
+  it('keeps known asset ids unique', () => {
+    expect(new Set(OSERO_API_KNOWN_ASSET_IDS).size).toBe(OSERO_API_KNOWN_ASSET_IDS.length);
+  });
+
+  it('keeps known chain ids and chain keys unique', () => {
+    expect(new Set(OSERO_API_KNOWN_CHAIN_IDS).size).toBe(OSERO_API_KNOWN_CHAIN_IDS.length);
+    const chainKeys = OSERO_API_KNOWN_CHAINS.map((chain) => chain.chainKey);
     expect(new Set(chainKeys).size).toBe(chainKeys.length);
   });
 
-  it('registers all 13 source chains including the newly added ones', () => {
-    expect(OSERO_API_SOURCE_CHAIN_IDS).toEqual(OSERO_API_CHAIN_IDS);
-    expect(OSERO_API_SOURCE_CHAIN_IDS.slice(0, 5)).toEqual([1, 8453, 42161, 10, 59144]);
-    for (const chainId of [56, 130, 137, 143, 999, 9745, 43114, 80094]) {
-      expect(OSERO_API_SOURCE_CHAIN_IDS).toContain(chainId);
-    }
-    expect(OSERO_API_CHAINS).toHaveLength(13);
-    expect(OSERO_API_SOURCE_CHAIN_IDS).toHaveLength(13);
+  it('lists the USDS and sUSDS hub assets', () => {
+    expect(OSERO_API_KNOWN_ASSET_IDS).toContain(OSERO_API_USDS_ASSET_ID);
+    expect(OSERO_API_KNOWN_ASSET_IDS).toContain(OSERO_API_SUSDS_ASSET_ID);
   });
 
-  it('binds every asset to a registered chain key (no orphan assets)', () => {
-    const chainKeys = new Set<string>(OSERO_API_CHAINS.map((chain) => chain.chainKey));
-    for (const { assetId } of OSERO_API_SWAP_ASSETS) {
+  it('prefixes every known asset id with a known chain key', () => {
+    const chainKeys = new Set<string>(OSERO_API_KNOWN_CHAINS.map((chain) => chain.chainKey));
+    for (const { assetId } of OSERO_API_KNOWN_ASSETS) {
       expect(chainKeys.has(assetId.split(':')[0]!)).toBe(true);
     }
   });
 
-  it('backs every registered chain with at least one asset (no orphan chains)', () => {
-    const usedChainKeys = new Set<string>(
-      OSERO_API_SWAP_ASSETS.map((asset) => asset.assetId.split(':')[0]!),
-    );
-    for (const { chainKey } of OSERO_API_CHAINS) {
-      expect(usedChainKeys.has(chainKey)).toBe(true);
-    }
-  });
-
-  it('uses only 6- or 18-decimal tokens', () => {
-    for (const asset of OSERO_API_SWAP_ASSETS) {
-      expect([6, 18]).toContain(asset.decimals);
-    }
+  it('snapshots the bridge protocols known at this SDK release', () => {
+    expect(OSERO_API_KNOWN_BRIDGE_PROTOCOLS).toEqual(['ccip', 'layerzero', 'relay', 'stargate']);
   });
 });

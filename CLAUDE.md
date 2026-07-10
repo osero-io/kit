@@ -38,7 +38,7 @@ Three plan variants, discriminated by `__typename`:
 
 1. `OseroClient.create({ transports, defaultSlippageBps })` — stateless; lazily builds viem public clients per chain in `getPublicClient(chainId)` (memoised in a `Map`). `_setPublicClientForTesting` is how tests inject fakes.
 2. Actions in `src/lib/actions/` (`mintUsds`, `mintSUsds`, `redeemUsds`, `redeemSUsds`, plus `preview*` helpers) take `(client, request)` and return `ResultAsync<ExecutionPlan, ActionError>` — they branch on `chain.isMainnet` because mainnet uses Sky's `UsdsPsmWrapper` + Lite PSM while L2s use Spark's PSM3.
-3. `OseroApiClient` in `src/lib/api.ts` calls the hosted API, validates registry-derived input/output asset ids, and attaches an adapter-compatible `ExecutionPlan` to every quote. API quote execution transactions use operation `SWAP`; local actions keep specific mint/redeem operation tags.
+3. `OseroApiClient` in `src/lib/api.ts` calls the hosted API, passes asset refs through (the hosted API validates assets, pairs, and policy), and attaches an adapter-compatible `ExecutionPlan` to every quote. API quote execution transactions use operation `SWAP`; local actions keep specific mint/redeem operation tags.
 
 ### Plan construction
 
@@ -52,7 +52,7 @@ Never throw from an action path. Errors are typed classes in `src/lib/errors.ts`
 
 `src/lib/chains.ts` (`SUPPORTED_CHAIN_IDS`, `CHAINS`, `isSupportedChainId`), `src/lib/tokens.ts`, and `src/lib/addresses.ts` are the single source of truth for local action builders — any new local PSM chain requires updating all three plus the `PSM_ADDRESSES` entry (and a `litePsm` entry if mainnet-style). `isMainnet` is semantic (only chain ID 1) because it switches the action flow, not a geographic flag.
 
-Hosted API assets are separate and live in `src/lib/api.ts` as `OSERO_API_SWAP_ASSETS`. Add API quote assets there by declaring `assetId`, metadata, and `canSwapFrom` / `canSwapTo`; derived input/output id arrays and decoders must remain registry-driven. Do not reintroduce sUSDS-only counter/vault assumptions.
+Hosted API vocabulary is different: the client ships **no gate**. The `OSERO_API_KNOWN_*` exports in `src/lib/api.ts` are advisory snapshots that only power editor autocomplete and offline UI hints — refresh them when the hosted API's vocabulary changes, but never validate a request or response against them. Decoders must stay structural (wire grammar and execution safety only); do not add membership checks or registry cross-checks. Adding hosted assets is an API-repo change (the SDK optionally refreshes the `KNOWN_*` rows for autocomplete). The local action registries above stay strict — they gate local plan building.
 
 ## Code style
 

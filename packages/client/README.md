@@ -3,9 +3,10 @@
 The official TypeScript SDK for local Sky/Spark USDS and sUSDS action builders,
 hosted Osero API swap quotes, and wallet-adapter execution. Version 1.0.0 keeps
 the local PSM helpers focused on canonical USDC/USDS/sUSDS flows while the hosted
-API client supports every registered non-USDS asset into `ethereum:usds`, and
-`ethereum:usds` back out to every registered asset such as USDC, sUSDS, USDe,
-and USDT.
+API client passes any asset ref through to the API, which is the sole authority
+on supported assets and pairs. USDS routes are symmetric today: supported
+non-USDS assets such as USDC, sUSDS, USDe, and USDT quote into `ethereum:usds`
+and back out.
 
 ---
 
@@ -32,9 +33,9 @@ It also exposes preview helpers for every exact-in flow so callers can
 quote the expected output amount before building or sending a plan.
 
 The package also includes `@osero/client/api`, a small HTTP client for
-the hosted Osero API. It can fetch supported API assets, build flexible
-input/output swap quotes, convert those quotes into SDK execution plans,
-and poll bridge status for cross-chain quotes.
+the hosted Osero API. It can fetch the live supported-asset list, build
+swap quotes for any asset ref the API supports, convert those quotes
+into SDK execution plans, and poll bridge status for cross-chain quotes.
 
 For 0.x migrations, see [`docs/osero-sdk/upgrading-0-to-1.md`](../../docs/osero-sdk/upgrading-0-to-1.md).
 
@@ -212,9 +213,10 @@ type Request = {
 
 ## Balance helpers
 
-`@osero/client` also exposes read-only helpers for canonical token
-balances so callers can stick with the SDK's chain registry and public
-client wiring instead of dropping down to raw ERC-20 reads.
+`@osero/client` also exposes read-only balance helpers that reuse the
+SDK's supported-chain registry and public-client wiring. Canonical symbols
+resolve through local token metadata; `getTokenBalance` also accepts any
+ERC-20 contract address on the requested chain.
 
 ```ts
 import {
@@ -228,8 +230,9 @@ import {
 
 Choose the helper that matches the job:
 
-- `getTokenBalance(client, { chainId, account, token })` reads one of
-  the three canonical symbols: `USDC`, `USDS`, or `sUSDS`
+- `getTokenBalance(client, { chainId, account, token })` reads a
+  canonical symbol (`USDC`, `USDS`, `sUSDS`) or any ERC-20 contract
+  address on the requested chain
 - `getTokenBalances(client, { chainId, account })` returns all three
   balances in one keyed result object
 - `getUsdcBalance`, `getUsdsBalance`, and `getSUsdsBalance` keep the
@@ -248,16 +251,18 @@ if (result.isOk()) {
 }
 ```
 
-All balance helpers return raw `bigint` values and surface
-`UnsupportedChainError` or `UnexpectedError` through the same
-`ResultAsync` model used by the action builders.
+Single-token helpers return raw `bigint` values; `getTokenBalances`
+returns a keyed `TokenBalances` object. Invalid custom addresses surface
+`ValidationError`, unsupported chains surface `UnsupportedChainError`,
+and RPC failures surface `UnexpectedError` through the same `ResultAsync`
+model used by the action builders.
 
 ## Osero API client
 
 Use `@osero/client/api` for hosted API quotes instead of building the
-route locally. The client sends `x-api-key`, validates the public API
-key shape before making requests, and returns typed `ResultAsync`
-values.
+route locally. The client sends `x-api-key`, checks only wire grammar
+and execution safety locally — the hosted API is the authority on keys,
+assets, and policy — and returns typed `ResultAsync` values.
 
 ```ts
 import { flattenExecutionPlan } from '@osero/client';
@@ -303,11 +308,17 @@ const result = await api
 
 Common calls:
 
-- `getSupportedAssets()` returns the public asset IDs accepted by the
-  quote endpoint.
+- `getSupportedAssets()` returns the live list of assets accepted by the
+  quote endpoint — the sanctioned discovery path. Pair it with
+  `matchOseroApiAsset(assets, ref)` when a UI wants to pre-flight a ref
+  against live data.
 - `getSwapQuote(request)` builds approval and execution transactions for
-  every registered non-USDS asset → USDS route and every USDS → registered
-  asset route, such as USDC → USDS, sUSDS → USDS, USDe → USDS, and USDS → USDC.
+  any pair the hosted API supports, such as USDC → USDS, sUSDS → USDS,
+  USDe → USDS, and USDS → USDC. `fromAssetId` / `toAssetId` accept known
+  asset ids (autocompleted), arbitrary ids, or `{ chainId, address }`
+  locators (`'<chainId>:<0xaddress>'` on the wire); the API rejects
+  unsupported refs with an `ApiRequestError` whose `code` is
+  `'SWAP_ASSET_NOT_SUPPORTED'`.
 - `getSwapStatus({ txHash, sourceChainId, bridgeProtocol })` checks a
   bridge status request returned by a cross-chain quote.
 - `getSwapStatusForQuote(quote, txHash)` is a convenience wrapper that
@@ -321,9 +332,11 @@ The client-level API key can be overridden per request:
 await api.getSupportedAssets({ apiKey: 'osero_partner-key' });
 ```
 
-Quote `referralCode` is optional. When provided, it must be an integer
-from `3000` to `3999` and overrides the referral code attached to the
-authenticated API key for that quote.
+Quote `referralCode` is optional. When provided, it overrides the
+referral code attached to the authenticated API key for that quote. The
+hosted API enforces the accepted range (currently `3000`–`3999`,
+exported as `OSERO_API_REFERRAL_CODE_MIN` / `OSERO_API_REFERRAL_CODE_MAX`
+for reference); the SDK passes the value through.
 
 ## Error handling
 
@@ -350,7 +363,8 @@ if (result.isErr()) {
       // tx was broadcast but reverted — inspect .txHash / .link
       break;
     case 'ApiRequestError':
-      // hosted API returned a non-2xx response — inspect .statusCode / .body
+      // hosted API returned a non-2xx response — branch on .code when
+      // present; inspect .statusCode / .body for every response
       break;
     case 'SigningError':
     case 'UnexpectedError':

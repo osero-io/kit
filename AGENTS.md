@@ -21,7 +21,7 @@ Use strict TypeScript with ESM imports and explicit `.js` extensions for local r
 
 ## Testing Guidelines
 
-Vitest is configured in `packages/client/vitest.config.mts` with Node environment and globals enabled. Add focused tests next to the code under test using `*.test.ts` or `*.spec.ts`; action tests belong beside the action in `src/lib/actions`, and hosted API tests belong in `src/lib/api.test.ts`. For changes touching transaction planning, cover validation failures and the resulting `ExecutionPlan` shape. For hosted API asset changes, cover both the registry-derived types/ids and at least one decoded quote using the new input/output pair. Coverage uses V8 and writes to `packages/client/test-output/vitest/coverage`.
+Vitest is configured in `packages/client/vitest.config.mts` with Node environment and globals enabled. Add focused tests next to the code under test using `*.test.ts` or `*.spec.ts`; action tests belong beside the action in `src/lib/actions`, and hosted API tests belong in `src/lib/api.test.ts`. For changes touching transaction planning, cover validation failures and the resulting `ExecutionPlan` shape. For hosted API changes, cover structural decoding with at least one unknown-vocabulary fixture and one known-pair decoded quote. Coverage uses V8 and writes to `packages/client/test-output/vitest/coverage`.
 
 ## Commit & Pull Request Guidelines
 

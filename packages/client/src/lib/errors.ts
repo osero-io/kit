@@ -131,15 +131,37 @@ export class InsufficientBalanceError extends OseroError {
 }
 
 /**
+ * Error codes the hosted Osero API is known to return in the `code` field
+ * of non-2xx response bodies, as an advisory snapshot for autocomplete.
+ * The API may introduce new codes at any time — they flow through
+ * {@link ApiRequestError.code} unchanged, so never exhaustively `switch`
+ * on this type without a `default` arm.
+ */
+export const OSERO_API_ERROR_CODES = [
+  'SWAP_ASSET_NOT_SUPPORTED',
+  'SWAP_PAIR_NOT_SUPPORTED',
+  'SLIPPAGE_INVALID',
+  'SLIPPAGE_OUT_OF_RANGE',
+  'UPSTREAM_SERVICE_ERROR',
+] as const;
+
+export type OseroApiErrorCode = (typeof OSERO_API_ERROR_CODES)[number] | (string & {});
+
+/**
  * Raised when the Osero HTTP API returns a non-2xx response. The
  * normalized fields expose the stable error metadata returned by the API
  * when available, while {@link ApiRequestError.body} keeps the decoded
  * response for callers that need endpoint-specific details.
+ *
+ * {@link ApiRequestError.code} carries the API's stable machine-readable
+ * verdict (for example `'SWAP_ASSET_NOT_SUPPORTED'` when a requested
+ * asset ref is unknown to the API) — branch on it rather than parsing
+ * messages.
  */
 export class ApiRequestError extends OseroError {
   readonly statusCode: number;
   readonly statusText: string;
-  readonly code?: string;
+  readonly code?: OseroApiErrorCode;
   readonly correlationId?: string;
   readonly body: unknown;
 
@@ -148,7 +170,7 @@ export class ApiRequestError extends OseroError {
     options: ErrorOptions & {
       statusCode: number;
       statusText: string;
-      code?: string;
+      code?: OseroApiErrorCode;
       correlationId?: string;
       body: unknown;
     },

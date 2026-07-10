@@ -28,7 +28,7 @@ function optionalReferralCode(): number | undefined {
 
   const parsed = Number(raw);
   if (!Number.isInteger(parsed)) {
-    throw new Error('OSERO_API_REFERRAL_CODE must be an integer from 3000 to 3999.');
+    throw new Error('OSERO_API_REFERRAL_CODE must be an integer (the API enforces the range).');
   }
   return parsed;
 }

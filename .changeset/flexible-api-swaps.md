@@ -2,10 +2,12 @@
 '@osero/client': major
 ---
 
-Refactor the hosted Osero API client around capability-driven swap assets.
+Refactor the hosted Osero API client around API-authoritative asset refs. The SDK no longer ships a gating registry, so a deployed build keeps working as the hosted API adds and removes assets, chains, and bridge protocols.
 
-`getSwapQuote` now accepts registered input/output asset pairs instead of only counter-asset ↔ sUSDS pairs. The registry adds first-class `ethereum:usds` metadata, enabling routes such as USDS → USDC and USDT → USDS while keeping `ethereum:susds` supported as both an input and output.
+`getSwapQuote` accepts any asset ref — a canonical id (`'ethereum:usdc'`), an arbitrary string id, or a `{ chainId, address }` locator encoded on the wire as `'<chainId>:<0xaddress>'`. Known ids still autocomplete, but nothing is rejected locally on membership: the hosted API is the sole authority and answers unsupported refs with HTTP 400 and a stable `code` (for example `SWAP_ASSET_NOT_SUPPORTED`), surfaced as `ApiRequestError.code`. Responses decode structurally, so assets, chains, protocols, kinds, directions, and states unknown to this SDK release decode normally.
 
-Hosted API quote execution plans now tag execution transactions with the generic `SWAP` operation. Consumers that previously keyed UI or analytics off hosted quote operations like `MINT_SUSDS` or `REDEEM_SUSDS_FOR_USDC` should derive labels from `quote.pair.from` and `quote.pair.to` instead.
+Registry exports are renamed to advisory `KNOWN_` snapshots — `OSERO_API_KNOWN_ASSETS`, `OSERO_API_KNOWN_CHAINS`, `OSERO_API_KNOWN_ASSET_IDS`, `OSERO_API_KNOWN_CHAIN_IDS`, and `OSERO_API_KNOWN_BRIDGE_PROTOCOLS` — that only power editor autocomplete and offline UI hints. The input/output splits (`OSERO_API_INPUT_*`, `OSERO_API_OUTPUT_*`, `OseroApiInputAssetId`, `OseroApiOutputAssetId`) and the source-chain allowlist (`OSERO_API_SOURCE_CHAIN_IDS`, `OseroApiSourceChainId`) are removed. `getSupportedAssets()` is the sanctioned live list, and the new `matchOseroApiAsset(assets, ref)` helper pre-flights a ref against it.
 
-Registry exports were renamed from counter/vault terminology to input/output terminology. See `docs/osero-sdk/upgrading-0-to-1.md` for the full migration guide.
+Client-side validation narrows to wire grammar and execution safety (EVM addresses, hex payloads, uint256 amounts, 32-byte tx hashes). Server-policy checks that 0.x ran locally are now enforced by the API instead of pre-flight `ValidationError`s: asset/pair membership and slippage failures come back as 400s with stable codes (`SWAP_ASSET_NOT_SUPPORTED`, `SWAP_PAIR_NOT_SUPPORTED`, `SLIPPAGE_INVALID`, `SLIPPAGE_OUT_OF_RANGE`), an out-of-range referral code is a plain 400 from request validation, and a printable-ASCII but invalid API key is a 401. Empty keys and keys containing non-ASCII, whitespace, or control characters remain local `ValidationError`s. `getTokenBalance` additionally accepts any ERC-20 address alongside the canonical token symbols.
+
+Hosted API quote execution plans keep tagging execution transactions with the generic `SWAP` operation; derive user-facing labels from `quote.pair.from` and `quote.pair.to`. See `docs/osero-sdk/upgrading-0-to-1.md` for the full migration guide.

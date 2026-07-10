@@ -116,12 +116,12 @@ other import paths.
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `@osero/client`         | `OseroClient`, hosted API client, chain/token/address/API registries, balance helpers, plan helpers, error classes, math helpers, ABIs, all core types, and neverthrow exports |
 | `@osero/client/actions` | Action builders (`mintUsds`, `mintSUsds`, `redeemUsds`, `redeemSUsds`), preview helpers (`previewMint*`, `previewRedeem*`), and chain action helpers (`chain`, `listChains`)   |
-| `@osero/client/api`     | Hosted API client (`OseroApiClient`), API asset registries, quote/status types, and `swapQuoteToExecutionPlan`                                                                 |
+| `@osero/client/api`     | Hosted API client (`OseroApiClient`), advisory `KNOWN_*` asset/chain snapshots, `matchOseroApiAsset`, quote/status types, and `swapQuoteToExecutionPlan`                       |
 | `@osero/client/viem`    | `sendWith(walletClient[, options])` viem adapter + its option type + `ConnectedWalletClient`                                                                                   |
 | `@osero/client/ethers`  | `sendWith(signer[, options])` ethers adapter + its option type                                                                                                                 |
 | `@osero/client/privy`   | `sendWith(privy, wallet[, options])` Privy server-wallet adapter + its option and wallet types                                                                                 |
 
-### Everything re-exported from `@osero/client`
+### Common re-exports from `@osero/client`
 
 ```
 // ABIs
@@ -149,19 +149,23 @@ OseroChainId, SUPPORTED_CHAIN_IDS
 // Client config
 ClientConfig, ResolvedClientConfig
 
-// Hosted API client and registries
-DEFAULT_OSERO_API_BASE_URL, OseroApiClient,
-OSERO_API_ASSET_IDS, OSERO_API_ASSETS,
-OSERO_API_INPUT_ASSET_IDS, OSERO_API_INPUT_ASSETS,
-OSERO_API_OUTPUT_ASSET_IDS, OSERO_API_OUTPUT_ASSETS,
-OSERO_API_SUSDS_ASSET_ID, OSERO_API_SWAP_ASSETS, OSERO_API_USDS_ASSET_ID,
-swapQuoteToExecutionPlan,
-OseroApiAsset, OseroApiAssetId, OseroApiInputAssetId, OseroApiOutputAssetId,
-OseroApiSwapQuoteRequest, OseroApiSwapQuoteResponse, OseroApiSwapStatusRequest
+// Hosted API client and advisory snapshots
+DEFAULT_OSERO_API_BASE_URL, matchOseroApiAsset, OseroApiClient,
+OSERO_API_ERROR_CODES, OSERO_API_KEY_MAX_LENGTH, OSERO_API_KEY_PREFIX,
+OSERO_API_KNOWN_ASSET_IDS, OSERO_API_KNOWN_ASSETS,
+OSERO_API_KNOWN_BRIDGE_PROTOCOLS, OSERO_API_KNOWN_CHAIN_IDS,
+OSERO_API_KNOWN_CHAINS, OSERO_API_REFERRAL_CODE_MAX,
+OSERO_API_REFERRAL_CODE_MIN, OSERO_API_SUSDS_ASSET_ID,
+OSERO_API_USDS_ASSET_ID, swapQuoteToExecutionPlan,
+OseroApiAssetId, OseroApiAssetLocator, OseroApiAssetRef, OseroApiClientError,
+OseroApiErrorCode, OseroApiKnownAsset, OseroApiKnownAssetId,
+OseroApiKnownBridgeProtocol, OseroApiKnownChain, OseroApiKnownChainId,
+OseroApiKnownChainKey, OseroApiSupportedAsset, OseroApiSwapQuoteRequest,
+OseroApiSwapQuoteResponse, OseroApiSwapStatusRequest
 
 // Errors
-CancelError, InsufficientBalanceError, OseroError, SigningError,
-TransactionError, UnexpectedError, UnsupportedChainError,
+ApiRequestError, CancelError, InsufficientBalanceError, OseroError,
+SigningError, TransactionError, UnexpectedError, UnsupportedChainError,
 ValidationError
 
 // Math helpers
@@ -308,13 +312,19 @@ callers who want to verify `tin()` / `tout()` independently.
 ## Hosted API client
 
 Use `@osero/client/api` when the hosted Osero API should build a swap route.
-`OseroApiClient` validates requests and responses through registry-derived
-asset ids, returns `ResultAsync`, and attaches an adapter-compatible
-`executionPlan` to each quote.
-The hosted API registry supports every registered non-USDS asset into
-`ethereum:usds`, and `ethereum:usds` back out to every registered asset.
-Examples include USDC → USDS, sUSDS → USDS, USDe → USDS, USDT → USDS, and
-USDS → USDC.
+`OseroApiClient` validates only wire grammar and execution safety (EVM
+addresses, hex payloads, uint256 amounts, 32-byte tx hashes) plus its own
+response contract, returns `ResultAsync`, and attaches an adapter-compatible
+`executionPlan` to each quote. The hosted API is the sole authority on
+supported assets, pairs, and policy: requests accept any asset ref — known
+ids autocomplete, arbitrary ids and `{ chainId, address }` locators
+(`'<chainId>:<0xaddress>'` on the wire) pass through — and unsupported refs
+come back as an `ApiRequestError` with `code: 'SWAP_ASSET_NOT_SUPPORTED'`.
+Responses decode structurally, so assets, chains, protocols, kinds,
+directions, and states unknown to the SDK release decode normally.
+USDS routes are symmetric on the hosted API today: supported non-USDS assets
+quote into `ethereum:usds` and back out. Examples include USDC → USDS,
+sUSDS → USDS, USDe → USDS, USDT → USDS, and USDS → USDC.
 
 ```ts
 import { OseroApiClient, OSERO_API_USDS_ASSET_ID } from '@osero/client/api';
@@ -334,13 +344,18 @@ if (quote.isOk()) {
 }
 ```
 
-Registry rules:
+Advisory snapshot rules:
 
-- `OSERO_API_SWAP_ASSETS` is the single source of truth for hosted API assets.
-- `canSwapFrom` derives `OSERO_API_INPUT_ASSET_IDS`.
-- `canSwapTo` derives `OSERO_API_OUTPUT_ASSET_IDS`.
-- Add new hosted assets by editing the registry row, not by adding hard-coded
-  decoder branches.
+- `OSERO_API_KNOWN_ASSETS` is an advisory snapshot of the assets known at SDK
+  release, refreshed for editor autocomplete and offline UI hints — never a
+  gate. No request or response is validated against it.
+- `getSupportedAssets()` is the sanctioned live list; use
+  `matchOseroApiAsset(assets, ref)` to pre-flight a ref against live data.
+- Adding hosted assets is an API-repo change; the SDK optionally refreshes
+  the `KNOWN_*` rows afterwards so autocomplete stays current.
+- Widened unions (`OseroApiAssetId`, `OseroApiBridgeState`,
+  `OseroApiErrorCode`, …) admit values beyond the known literals — never
+  `switch` on them without a `default` arm.
 - API quote execution transactions use operation `SWAP`; derive user-facing
   labels from `quote.pair.from` and `quote.pair.to`.
 
@@ -934,10 +949,12 @@ const result = await mintUsds(client, {
 
 ## Balance helpers
 
-All four helpers return a raw `bigint` (in the token's native decimals)
-wrapped in `ResultAsync`. They reuse `OseroClient`'s transport wiring
-and the canonical token registry, so prefer them over hand-rolled
-ERC-20 `balanceOf` calls.
+The single-token helpers return a raw `bigint` in the token's native
+decimals; `getTokenBalances` returns the three canonical balances
+together. Every helper wraps its value in `ResultAsync` and reuses
+`OseroClient`'s transport wiring. Canonical symbols resolve through the
+local token registry; custom ERC-20 addresses are validated and queried
+directly.
 
 ```ts
 import {
@@ -955,7 +972,7 @@ import {
 type GetTokenBalanceRequest = {
   readonly chainId: number;
   readonly account: `0x${string}`;
-  readonly token: TokenSymbol; // 'USDC' | 'USDS' | 'sUSDS'
+  readonly token: TokenSymbol | `0x${string}`; // canonical symbol or ERC-20 address
 };
 
 type GetBalancesRequest = {
@@ -969,7 +986,7 @@ type TokenBalances = {
   readonly sUSDS: bigint;
 };
 
-type GetTokenBalanceError = UnsupportedChainError | UnexpectedError;
+type GetTokenBalanceError = UnsupportedChainError | ValidationError | UnexpectedError;
 ```
 
 | Helper             | Returns                                            |
@@ -995,13 +1012,14 @@ if (result.isOk()) {
 ## Error taxonomy
 
 Every SDK error extends the abstract base class `OseroError`, which itself
-extends `Error`. You can narrow with `instanceof OseroError`, but
-`switch (result.error.name)` is the idiomatic form because the `name`
-field is assigned in every constructor and is part of the public contract.
+extends `Error`. Narrow concrete classes with `instanceof` before reading
+subtype fields. The runtime `name` labels are useful for logging, but their
+TypeScript type is `string`, so switching on `name` does not narrow the union.
 
 ```ts
 import {
   OseroError, // abstract base
+  ApiRequestError,
   ValidationError,
   UnsupportedChainError,
   InsufficientBalanceError,
@@ -1014,15 +1032,16 @@ import {
 
 ### Field reference
 
-| Class                      | `name`                       | Extra fields                          | When it appears                                                                                   |
-| -------------------------- | ---------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `ValidationError<Context>` | `'ValidationError'`          | `context: Context` (e.g. `{ field }`) | Bad input (amount ≤ 0, bad referralCode, etc.)                                                    |
-| `UnsupportedChainError`    | `'UnsupportedChainError'`    | `chainId: number`                     | `chainId` not in `SUPPORTED_CHAIN_IDS`                                                            |
-| `InsufficientBalanceError` | `'InsufficientBalanceError'` | `token`, `required`, `available`      | **Unused today.** Reserved for a future balance-preflight pass; current actions never produce it. |
-| `CancelError`              | `'CancelError'`              | —                                     | User rejected the wallet prompt                                                                   |
-| `SigningError`             | `'SigningError'`             | —                                     | Wallet failed to sign for a non-cancel reason                                                     |
-| `TransactionError`         | `'TransactionError'`         | `txHash: Hex`, `link?: string`        | Tx was broadcast but reverted                                                                     |
-| `UnexpectedError`          | `'UnexpectedError'`          | — (always wraps `cause`)              | RPC failure, ethers chain mismatch, unclassified runtime error                                    |
+| Class                      | `name`                       | Extra fields                                                  | When it appears                                                                                   |
+| -------------------------- | ---------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `ValidationError<Context>` | `'ValidationError'`          | `context: Context` (e.g. `{ field }`)                         | Bad input (amount ≤ 0, bad referralCode, etc.)                                                    |
+| `ApiRequestError`          | `'ApiRequestError'`          | `statusCode`, `statusText`, `code?`, `correlationId?`, `body` | Hosted API returned a non-2xx response; branch on `code` when present                             |
+| `UnsupportedChainError`    | `'UnsupportedChainError'`    | `chainId: number`                                             | `chainId` not in `SUPPORTED_CHAIN_IDS`                                                            |
+| `InsufficientBalanceError` | `'InsufficientBalanceError'` | `token`, `required`, `available`                              | **Unused today.** Reserved for a future balance-preflight pass; current actions never produce it. |
+| `CancelError`              | `'CancelError'`              | —                                                             | User rejected the wallet prompt                                                                   |
+| `SigningError`             | `'SigningError'`             | —                                                             | Wallet failed to sign for a non-cancel reason                                                     |
+| `TransactionError`         | `'TransactionError'`         | `txHash: Hex`, `link?: string`                                | Tx was broadcast but reverted                                                                     |
+| `UnexpectedError`          | `'UnexpectedError'`          | — (always wraps `cause`)                                      | RPC failure, ethers chain mismatch, unclassified runtime error                                    |
 
 ### Union types
 
@@ -1036,6 +1055,9 @@ type ActionError =
 
 // Returned by sendWith:
 type SendWithError = CancelError | SigningError | TransactionError | UnexpectedError;
+
+// Returned by hosted API methods:
+type OseroApiClientError = ValidationError | ApiRequestError | UnexpectedError;
 ```
 
 Each action also exports a per-action alias:
@@ -1053,21 +1075,21 @@ type RedeemSUsdsError = ValidationError | UnsupportedChainError | UnexpectedErro
 const result = await mintUsds(client, request).andThen(sendWith(wallet));
 
 if (result.isErr()) {
-  switch (result.error.name) {
-    case 'ValidationError':
-      /* amount <= 0, bad referralCode, etc. */ break;
-    case 'UnsupportedChainError':
-      /* result.error.chainId */ break;
-    case 'CancelError':
-      /* user rejected */ break;
-    case 'TransactionError': {
-      // .txHash is the reverting tx; .link may be populated on viem
-      console.error(result.error.txHash, result.error.link);
-      break;
-    }
-    case 'SigningError':
-    case 'UnexpectedError':
-      /* inspect .cause */ break;
+  const { error } = result;
+  if (error instanceof ValidationError) {
+    // amount <= 0, bad referralCode, etc.
+  } else if (error instanceof UnsupportedChainError) {
+    console.error(error.chainId);
+  } else if (error instanceof CancelError) {
+    // user rejected
+  } else if (error instanceof TransactionError) {
+    // txHash is the reverting tx; link may be populated on viem
+    console.error(error.txHash, error.link);
+  } else if (error instanceof SigningError) {
+    console.error(error.cause);
+  } else {
+    // UnexpectedError
+    console.error(error.cause);
   }
   return;
 }
@@ -1336,7 +1358,7 @@ Pointers for common tasks (read these for canonical usage patterns):
 
 ## Type index
 
-Quick lookup of every public type name re-exported from `@osero/client`:
+Quick lookup of commonly used public type names re-exported from `@osero/client`:
 
 ```
 // Client

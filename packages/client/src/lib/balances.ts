@@ -1,16 +1,21 @@
-import type { Address } from 'viem';
+import { isAddress, type Address } from 'viem';
 
 import { erc20Abi } from './abis/erc20.js';
-import { getChain } from './chains.js';
-import { UnexpectedError, UnsupportedChainError } from './errors.js';
+import { getChain, type OseroChainId } from './chains.js';
+import { UnexpectedError, UnsupportedChainError, ValidationError } from './errors.js';
 import type { OseroClient } from './OseroClient.js';
-import { ResultAsync, errAsync } from './result.js';
+import { err, errAsync, ok, ResultAsync, type Result } from './result.js';
 import { getToken, type TokenSymbol } from './tokens.js';
 
 export type GetTokenBalanceRequest = {
   readonly chainId: number;
   readonly account: Address;
-  readonly token: TokenSymbol;
+  /**
+   * A canonical Osero token symbol, or the address of any ERC-20 contract
+   * on the requested chain. Symbols resolve through the local token
+   * registry; addresses are queried as-is.
+   */
+  readonly token: TokenSymbol | Address;
 };
 
 export type GetBalancesRequest = {
@@ -24,10 +29,11 @@ export type TokenBalances = {
   readonly sUSDS: bigint;
 };
 
-export type GetTokenBalanceError = UnsupportedChainError | UnexpectedError;
+export type GetTokenBalanceError = UnsupportedChainError | ValidationError | UnexpectedError;
 
 /**
- * Read a wallet's balance for one canonical Osero token on a supported chain.
+ * Read a wallet's balance for a canonical Osero token, or any ERC-20 by
+ * address, on a supported chain.
  */
 export function getTokenBalance(
   client: OseroClient,
@@ -38,18 +44,45 @@ export function getTokenBalance(
     return errAsync(new UnsupportedChainError(request.chainId));
   }
 
-  const token = getToken(chain.chainId, request.token);
+  const address = resolveTokenAddress(chain.chainId, request.token);
+  if (address.isErr()) {
+    return errAsync(address.error);
+  }
   const publicClient = client.getPublicClient(chain.chainId);
 
   return ResultAsync.fromPromise(
     publicClient.readContract({
-      address: token.address,
+      address: address.value,
       abi: erc20Abi,
       functionName: 'balanceOf',
       args: [request.account],
     }),
-    (err) => UnexpectedError.from(err),
+    (cause) => UnexpectedError.from(cause),
   );
+}
+
+/**
+ * Anything 0x-prefixed is treated as an address (and must be a valid one —
+ * lowercase or correct EIP-55 checksum); everything else resolves through
+ * the canonical token registry. A 0x-prefixed typo never falls through to
+ * a registry lookup.
+ */
+function resolveTokenAddress(
+  chainId: OseroChainId,
+  token: TokenSymbol | Address,
+): Result<Address, ValidationError> {
+  if (token.startsWith('0x')) {
+    if (!isAddress(token)) {
+      return err(
+        ValidationError.forField(
+          'token',
+          'token must be a canonical token symbol or a valid EVM address',
+        ),
+      );
+    }
+    return ok(token);
+  }
+  return ok(getToken(chainId, token as TokenSymbol).address);
 }
 
 /**

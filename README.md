@@ -10,9 +10,10 @@ results and exposes inspectable `ExecutionPlan`s before anything is signed.
 - `@osero/client` is at **1.0.0**.
 - Local action builders cover the canonical Sky/Spark PSM flows on Ethereum
   mainnet, OP Mainnet, Unichain, Base, and Arbitrum One.
-- The hosted Osero API client supports every registered non-USDS asset into
-  `ethereum:usds`, and `ethereum:usds` back out to every registered asset
-  such as USDC, sUSDS, USDe, and USDT.
+- The hosted Osero API client passes any asset ref through to the API, which
+  is the sole authority on supported assets and pairs. USDS routes are
+  symmetric today: supported non-USDS assets such as USDC, sUSDS, USDe, and
+  USDT quote into `ethereum:usds` and back out.
 - API quote execution plans use the generic `SWAP` operation; local action
   builders keep their specific mint/redeem operation tags.
 - Upgrade guide: [`docs/osero-sdk/upgrading-0-to-1.md`](docs/osero-sdk/upgrading-0-to-1.md).
@@ -22,7 +23,7 @@ results and exposes inspectable `ExecutionPlan`s before anything is signed.
 - Mint USDS from USDC and redeem USDS back to USDC with local action builders.
 - Mint sUSDS from USDC and redeem sUSDS back to USDC with local action builders.
 - Preview exact-in local action output amounts before building or sending a plan.
-- Fetch hosted Osero API swap quotes for registered input/output asset pairs.
+- Fetch hosted Osero API swap quotes for any asset pair the hosted API supports.
 - Convert hosted API quotes into the same execution plan model used by local actions.
 - Uses viem internally for ABI encoding and public RPC reads.
 - Provides adapters for `@osero/client/viem`, `@osero/client/ethers`, and `@osero/client/privy`.
@@ -162,7 +163,9 @@ Use `@osero/client/api` when you want the hosted Osero API to build a
 ready-to-sign swap quote between supported public assets. The API
 client sends your key as `x-api-key`, returns typed `ResultAsync`
 values, and adds an `executionPlan` that can be inspected or passed to
-the existing wallet adapters.
+the existing wallet adapters. Asset refs are not gated client-side:
+known ids autocomplete, and arbitrary ids or `'<chainId>:<0xaddress>'`
+address locators pass through for the API to accept or reject.
 
 ```ts
 import { flattenExecutionPlan } from '@osero/client';
@@ -324,9 +327,10 @@ import {
 ```
 
 Use `getTokenBalance(client, { chainId, account, token })` for a
-single canonical token, `getTokenBalances(client, { chainId, account })`
-to read `USDC`, `USDS`, and `sUSDS` together, or the convenience
-wrappers for common single-token reads.
+canonical token or any ERC-20 contract address on a supported chain.
+Use `getTokenBalances(client, { chainId, account })` to read `USDC`,
+`USDS`, and `sUSDS` together, or the convenience wrappers for common
+single-token reads.
 
 ```ts
 const balances = await getTokenBalances(client, {
@@ -346,8 +350,9 @@ const susds = await getSUsdsBalance(client, {
 ```
 
 These helpers return `ResultAsync` values and reuse the SDK's
-supported-chain checks, token registry, and configured public
-transports.
+supported-chain checks and configured public transports. Canonical
+symbols resolve through the token registry; custom addresses are
+validated before the ERC-20 `balanceOf` call.
 
 ## Configuration
 
