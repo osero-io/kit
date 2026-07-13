@@ -1,92 +1,116 @@
 import type { Transport } from 'viem';
 
-import type { OseroChainId } from './chains.js';
-import { DEFAULT_REFERRAL_CODE } from './referrals.js';
+import { type OseroChainId, SUPPORTED_CHAIN_IDS } from './capabilities.js';
+import {
+  DEFAULT_SLIPPAGE,
+  parseSlippage,
+  referral,
+  type Referral,
+  type Slippage,
+} from './domain.js';
+import { ConfigurationError } from './errors.js';
+import type { OseroPublicClient } from './OseroClient.js';
 
-/**
- * Configuration options accepted by {@link OseroClient.create}.
- *
- * All fields are optional — an unconfigured client will fall back to
- * viem's built-in public HTTP transports and sensible defaults. You
- * should override `transports` for production usage because the
- * built-in public RPCs are rate-limited and unreliable.
- */
 export type ClientConfig = {
-  /**
-   * Custom viem `Transport`s keyed by chain ID. Any chain without an
-   * entry here falls back to viem's default public HTTP transport for
-   * that chain.
-   *
-   * ```ts
-   * import { http } from 'viem';
-   *
-   * const client = OseroClient.create({
-   *   transports: {
-   *     1:     http('https://eth.llamarpc.com'),
-   *     8453:  http('https://mainnet.base.org'),
-   *     42161: http('https://arb1.arbitrum.io/rpc'),
-   *   },
-   * });
-   * ```
-   */
   readonly transports?: Partial<Record<OseroChainId, Transport>>;
-
-  /**
-   * Default slippage tolerance, in basis points, applied by actions
-   * that don't receive an explicit `slippageBps` in their request.
-   *
-   * @defaultValue 5 (= 0.05%)
-   */
-  readonly defaultSlippageBps?: number;
-
-  /**
-   * Number of block confirmations the SDK's viem/ethers adapters wait
-   * for after broadcasting a transaction before treating it as final.
-   *
-   * @defaultValue 1
-   */
-  readonly confirmations?: number;
-
-  /**
-   * Default referral code attached to every action unless the request
-   * overrides it. Forwarded to PSM3 `Swap` events on L2s and to the
-   * sUSDS `deposit` referral overload on mainnet.
-   *
-   * - Omit to use the SDK's built-in default ({@link DEFAULT_REFERRAL_CODE} = 3000n).
-   * - Set to a bigint to use your own code across every call.
-   * - Set to `undefined` to opt out at the client level: requests that
-   *   do not specify their own `referralCode` will carry no referral.
-   *
-   * Per-request `referralCode` always wins; pass `undefined` there to
-   * opt out for a single call.
-   */
-  readonly defaultReferralCode?: bigint;
+  readonly publicClients?: Partial<Record<OseroChainId, OseroPublicClient>>;
+  /** Public viem RPC URLs are disabled unless explicitly opted into. */
+  readonly allowPublicRpc?: boolean;
+  readonly defaultSlippage?: Slippage;
+  /** No referral attribution is applied unless explicitly configured. */
+  readonly referral?: Referral;
 };
 
-/**
- * The fully-resolved shape of {@link ClientConfig}. Every optional
- * field has been filled in with its default.
- *
- * @internal
- */
 export type ResolvedClientConfig = {
   readonly transports: Partial<Record<OseroChainId, Transport>>;
-  readonly defaultSlippageBps: number;
-  readonly confirmations: number;
-  readonly defaultReferralCode: bigint | undefined;
+  readonly publicClients: Partial<Record<OseroChainId, OseroPublicClient>>;
+  readonly allowPublicRpc: boolean;
+  readonly defaultSlippage: Slippage;
+  readonly referral: Referral;
 };
 
-/**
- * @internal
- */
 export function resolveConfig(config: ClientConfig): ResolvedClientConfig {
-  const defaultReferralCode =
-    'defaultReferralCode' in config ? config.defaultReferralCode : DEFAULT_REFERRAL_CODE;
+  if (typeof config !== 'object' || config === null) {
+    throw new ConfigurationError('Client configuration must be an object');
+  }
+  if (config.allowPublicRpc !== undefined && typeof config.allowPublicRpc !== 'boolean') {
+    throw new ConfigurationError('allowPublicRpc must be a boolean', 'allowPublicRpc');
+  }
+  if (
+    config.transports !== undefined &&
+    (typeof config.transports !== 'object' ||
+      config.transports === null ||
+      Array.isArray(config.transports))
+  ) {
+    throw new ConfigurationError('transports must be an object keyed by chain id', 'transports');
+  }
+  if (
+    config.publicClients !== undefined &&
+    (typeof config.publicClients !== 'object' ||
+      config.publicClients === null ||
+      Array.isArray(config.publicClients))
+  ) {
+    throw new ConfigurationError(
+      'publicClients must be an object keyed by chain id',
+      'publicClients',
+    );
+  }
+
+  const defaultSlippage =
+    config.defaultSlippage === undefined ? DEFAULT_SLIPPAGE : config.defaultSlippage;
+  if (typeof defaultSlippage !== 'object' || defaultSlippage === null) {
+    throw new ConfigurationError(
+      'defaultSlippage must be created with parseSlippage',
+      'defaultSlippage',
+    );
+  }
+  const validatedSlippage = parseSlippage(defaultSlippage.bps);
+  if (validatedSlippage.isErr()) {
+    throw new ConfigurationError(validatedSlippage.error.message, 'defaultSlippage', {
+      cause: validatedSlippage.error,
+    });
+  }
+
+  const configuredReferral = config.referral === undefined ? false : config.referral;
+  let validatedConfiguredReferral: Referral = false;
+  if (configuredReferral !== false) {
+    if (typeof configuredReferral !== 'object' || configuredReferral === null) {
+      throw new ConfigurationError('referral must be false or created with referral()', 'referral');
+    }
+    const validatedReferral = referral(configuredReferral.code);
+    if (validatedReferral.isErr()) {
+      throw new ConfigurationError(validatedReferral.error.message, 'referral', {
+        cause: validatedReferral.error,
+      });
+    }
+    validatedConfiguredReferral = validatedReferral.value;
+  }
+
+  for (const key of [
+    ...Object.keys(config.transports ?? {}),
+    ...Object.keys(config.publicClients ?? {}),
+  ]) {
+    const chainId = Number(key);
+    if (!(SUPPORTED_CHAIN_IDS as readonly number[]).includes(chainId)) {
+      throw new ConfigurationError(`Configuration contains unsupported chain ${key}`, key);
+    }
+  }
+
+  for (const chainId of SUPPORTED_CHAIN_IDS) {
+    const publicClient = config.publicClients?.[chainId];
+    if (publicClient?.chain !== undefined && publicClient.chain.id !== chainId) {
+      throw new ConfigurationError(
+        `Injected public client chain ${publicClient.chain.id} does not match key ${chainId}`,
+        `publicClients.${chainId}`,
+      );
+    }
+  }
 
   return {
     transports: config.transports ?? {},
-    defaultSlippageBps: config.defaultSlippageBps ?? 5,
-    confirmations: config.confirmations ?? 1,
-    defaultReferralCode,
+    publicClients: config.publicClients ?? {},
+    allowPublicRpc: config.allowPublicRpc ?? false,
+    defaultSlippage: validatedSlippage.value,
+    referral: validatedConfiguredReferral,
   };
 }

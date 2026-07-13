@@ -1,99 +1,64 @@
-import type { ResolvedClientConfig } from './config.js';
 import { resolveConfig } from './config.js';
+import { referral, type Referral } from './domain.js';
 import { ValidationError } from './errors.js';
-import { DEFAULT_REFERRAL_CODE, resolveReferralCode, validateReferralCode } from './referrals.js';
+import {
+  OSERO_REFERRAL_CODE,
+  referralCodeForApi,
+  referralCodeForRoute,
+  resolveReferral,
+} from './referrals.js';
 
-function makeResolvedConfig(overrides: Partial<ResolvedClientConfig> = {}): ResolvedClientConfig {
-  return {
-    transports: {},
-    defaultSlippageBps: 5,
-    confirmations: 1,
-    defaultReferralCode: DEFAULT_REFERRAL_CODE,
-    ...overrides,
-  };
+function referralValue(code: bigint): Exclude<Referral, false> {
+  const result = referral(code);
+  if (result.isErr()) throw result.error;
+  return result.value;
 }
 
-describe('DEFAULT_REFERRAL_CODE', () => {
-  it('is 3000n', () => {
-    expect(DEFAULT_REFERRAL_CODE).toBe(3000n);
-  });
-});
-
-describe('resolveConfig', () => {
-  it('fills defaultReferralCode with DEFAULT_REFERRAL_CODE when the key is absent', () => {
-    const resolved = resolveConfig({});
-    expect(resolved.defaultReferralCode).toBe(DEFAULT_REFERRAL_CODE);
+describe('referral attribution', () => {
+  it('defaults to no attribution and exposes Osero attribution as explicit opt-in', () => {
+    expect(resolveConfig({}).referral).toBe(false);
+    expect(OSERO_REFERRAL_CODE).toBe(3000n);
+    expect(resolveConfig({ referral: referralValue(OSERO_REFERRAL_CODE) }).referral).toEqual({
+      code: 3000n,
+    });
   });
 
-  it('passes a caller-supplied bigint through', () => {
-    const resolved = resolveConfig({ defaultReferralCode: 7n });
-    expect(resolved.defaultReferralCode).toBe(7n);
+  it('gives request policy precedence and supports explicit opt-out', () => {
+    const configured = referralValue(3001n);
+
+    expect(resolveReferral({}, configured)).toEqual(configured);
+    expect(resolveReferral({ referral: referralValue(3002n) }, configured)).toEqual({
+      code: 3002n,
+    });
+    expect(resolveReferral({ referral: false }, configured)).toBe(false);
+    expect(resolveReferral({ referral: undefined }, configured)).toBe(false);
   });
 
-  it('keeps undefined when the caller explicitly opts out at the client level', () => {
-    const resolved = resolveConfig({ defaultReferralCode: undefined });
-    expect(resolved.defaultReferralCode).toBeUndefined();
-  });
-});
+  it('adapts referral codes to each route ABI capability', () => {
+    const small = referralValue(3001n);
+    const large = referralValue(70_000n);
+    const disabled = referralCodeForRoute(false, 'none');
+    const unsupported = referralCodeForRoute(small, 'none');
+    const uint16 = referralCodeForRoute(small, 'uint16');
+    const overflow = referralCodeForRoute(large, 'uint16');
+    const uint256 = referralCodeForRoute(large, 'uint256');
 
-describe('resolveReferralCode', () => {
-  it('returns the SDK default when neither request nor client specifies one', () => {
-    const config = makeResolvedConfig();
-    expect(resolveReferralCode({}, config)).toBe(DEFAULT_REFERRAL_CODE);
-  });
-
-  it('returns the request value when provided (request beats client)', () => {
-    const config = makeResolvedConfig({ defaultReferralCode: DEFAULT_REFERRAL_CODE });
-    expect(resolveReferralCode({ referralCode: 42n }, config)).toBe(42n);
-  });
-
-  it('treats request { referralCode: undefined } as an explicit opt-out that beats the client default', () => {
-    const config = makeResolvedConfig({ defaultReferralCode: DEFAULT_REFERRAL_CODE });
-    expect(resolveReferralCode({ referralCode: undefined }, config)).toBeUndefined();
+    expect(disabled.isOk() && disabled.value === 0n).toBe(true);
+    expect(unsupported.isErr()).toBe(true);
+    if (unsupported.isErr()) expect(unsupported.error).toBeInstanceOf(ValidationError);
+    expect(uint16.isOk() && uint16.value === 3001n).toBe(true);
+    expect(overflow.isErr()).toBe(true);
+    expect(uint256.isOk() && uint256.value === 70_000n).toBe(true);
   });
 
-  it('returns the client default when the request does not include the referralCode key', () => {
-    const config = makeResolvedConfig({ defaultReferralCode: 7n });
-    expect(resolveReferralCode({}, config)).toBe(7n);
-  });
+  it('enforces the hosted API safe-integer boundary', () => {
+    const safe = referralCodeForApi(referralValue(BigInt(Number.MAX_SAFE_INTEGER)));
+    const unsafe = referralCodeForApi(referralValue(BigInt(Number.MAX_SAFE_INTEGER) + 1n));
+    const disabled = referralCodeForApi(false);
 
-  it('returns undefined when the client default is undefined and the request does not set one', () => {
-    const config = makeResolvedConfig({ defaultReferralCode: undefined });
-    expect(resolveReferralCode({}, config)).toBeUndefined();
-  });
-});
-
-describe('validateReferralCode', () => {
-  it('accepts the SDK default', () => {
-    expect(validateReferralCode(DEFAULT_REFERRAL_CODE)).toBeUndefined();
-  });
-
-  it('accepts zero', () => {
-    expect(validateReferralCode(0n)).toBeUndefined();
-  });
-
-  it('accepts a large positive value', () => {
-    expect(validateReferralCode(10n ** 70n)).toBeUndefined();
-  });
-
-  it('accepts the maximum uint256 value', () => {
-    const maxUint256 = (1n << 256n) - 1n;
-    expect(validateReferralCode(maxUint256)).toBeUndefined();
-  });
-
-  it('accepts undefined (opt-out)', () => {
-    expect(validateReferralCode(undefined)).toBeUndefined();
-  });
-
-  it('rejects a negative value with a typed ValidationError', () => {
-    const result = validateReferralCode(-1n);
-    expect(result).toBeInstanceOf(ValidationError);
-    expect(result?.context).toEqual({ field: 'referralCode' });
-  });
-
-  it('rejects a value that overflows uint256 with a typed ValidationError', () => {
-    const result = validateReferralCode(1n << 256n);
-    expect(result).toBeInstanceOf(ValidationError);
-    expect(result?.context).toEqual({ field: 'referralCode' });
+    expect(safe.isOk() && safe.value === Number.MAX_SAFE_INTEGER).toBe(true);
+    expect(unsafe.isErr()).toBe(true);
+    if (unsafe.isErr()) expect(unsafe.error.field).toBe('referral.code');
+    expect(disabled.isOk() && disabled.value === undefined).toBe(true);
   });
 });

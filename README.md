@@ -1,438 +1,102 @@
-# Osero SDK
+# Osero TypeScript SDK
 
-TypeScript SDK for building and sending USDS and sUSDS mint/redeem transactions,
-fetching hosted Osero API swap quotes, and executing wallet-agnostic plans through
-viem, ethers v6, or Privy server wallets. The SDK returns typed `neverthrow`
-results and exposes inspectable `ExecutionPlan`s before anything is signed.
+Nx/pnpm workspace for `@osero/client`, the production SDK for preparing and executing USDC, USDS, and sUSDS swaps across Ethereum, OP Mainnet, Unichain, Base, and Arbitrum One.
 
-## Current package status
+The v1 design is plan-first:
 
-- `@osero/client` is at **1.0.0**.
-- Local action builders cover the canonical Sky/Spark PSM flows on Ethereum
-  mainnet, OP Mainnet, Unichain, Base, and Arbitrum One.
-- The hosted Osero API client passes any asset ref through to the API, which
-  is the sole authority on supported assets and pairs. USDS routes are
-  symmetric today: supported non-USDS assets such as USDC, sUSDS, USDe, and
-  USDT quote into `ethereum:usds` and back out.
-- API quote execution plans use the generic `SWAP` operation; local action
-  builders keep their specific mint/redeem operation tags.
-- Upgrade guide: [`docs/osero-sdk/upgrading-0-to-1.md`](docs/osero-sdk/upgrading-0-to-1.md).
+```mermaid
+graph LR
+  A[Validated domain input] --> B[prepareSwap]
+  B --> C[Rich prepared quote]
+  C --> D[Immutable ExecutionPlan]
+  D --> E[Viem / ethers / Privy preflight]
+  E --> F[Sequential confirmed transactions]
+```
 
-## Features
-
-- Mint USDS from USDC and redeem USDS back to USDC with local action builders.
-- Mint sUSDS from USDC and redeem sUSDS back to USDC with local action builders.
-- Preview exact-in local action output amounts before building or sending a plan.
-- Fetch hosted Osero API swap quotes for any asset pair the hosted API supports.
-- Convert hosted API quotes into the same execution plan model used by local actions.
-- Uses viem internally for ABI encoding and public RPC reads.
-- Provides adapters for `@osero/client/viem`, `@osero/client/ethers`, and `@osero/client/privy`.
-
-## Installation
-
-Install the SDK with viem:
+## Install
 
 ```bash
 pnpm add @osero/client viem
 ```
 
-If you use an optional adapter, install its peer dependency as well:
+Optional executor peers:
 
 ```bash
-pnpm add ethers          # for @osero/client/ethers
-pnpm add @privy-io/node  # for @osero/client/privy
+pnpm add ethers
+pnpm add @privy-io/node
 ```
 
-With npm:
+Node.js 20 or newer and ESM are required.
 
-```bash
-npm install @osero/client viem
-npm install ethers          # optional, only for @osero/client/ethers
-npm install @privy-io/node  # optional, only for @osero/client/privy
-```
-
-## Quick Start With viem
+## Prepare and execute
 
 ```ts
-import { OseroClient } from '@osero/client';
-import { mintSUsds } from '@osero/client/actions';
+import { OseroClient, tokenAmount } from '@osero/client';
+import { prepareSwap } from '@osero/client/actions';
 import { sendWith } from '@osero/client/viem';
 import { createWalletClient, http, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
 
-const rpcUrl = 'https://mainnet.base.org';
-const privateKey = process.env.PRIVATE_KEY as `0x${string}` | undefined;
-if (!privateKey) throw new Error('Set PRIVATE_KEY before sending transactions');
+const transport = http(process.env.BASE_RPC_URL);
+const account = privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`);
+const client = OseroClient.create({ transports: { 8453: transport } });
+const wallet = createWalletClient({ account, chain: base, transport });
+const amountIn = tokenAmount('USDC', parseUnits('100', 6));
+if (amountIn.isErr()) throw amountIn.error;
 
-const account = privateKeyToAccount(privateKey);
-
-const client = OseroClient.create({
-  transports: {
-    8453: http(rpcUrl),
-  },
-});
-
-const wallet = createWalletClient({
-  account,
-  chain: base,
-  transport: http(rpcUrl),
-});
-
-const result = await mintSUsds(client, {
+const prepared = await prepareSwap(client, {
   chainId: 8453,
-  amount: parseUnits('100', 6), // 100 USDC
-  sender: account.address,
-}).andThen(sendWith(wallet));
+  account: account.address,
+  mode: 'exact-in',
+  amountIn: amountIn.value,
+  assetOut: 'sUSDS',
+  approvalPolicy: 'exact',
+});
 
-if (result.isErr()) {
-  console.error(result.error.name, result.error.message);
-  process.exit(1);
-}
-
-console.log('sUSDS minted:', result.value.txHash);
-```
-
-## Quick Start With ethers
-
-```ts
-import { OseroClient } from '@osero/client';
-import { mintUsds } from '@osero/client/actions';
-import { sendWith } from '@osero/client/ethers';
-import { JsonRpcProvider, Wallet, parseUnits } from 'ethers';
-
-const privateKey = process.env.PRIVATE_KEY;
-if (!privateKey) throw new Error('Set PRIVATE_KEY before sending transactions');
-
-const provider = new JsonRpcProvider('https://arb1.arbitrum.io/rpc');
-const signer = new Wallet(privateKey, provider);
-const client = OseroClient.create();
-
-const result = await mintUsds(client, {
-  chainId: 42161,
-  amount: parseUnits('100', 6), // 100 USDC
-  sender: await signer.getAddress(),
-}).andThen(sendWith(signer));
-
-if (result.isOk()) {
-  console.log('USDS minted:', result.value.txHash);
+if (prepared.isErr()) {
+  console.error(prepared.error.code, prepared.error.toJSON());
 } else {
-  console.error(result.error.name, result.error.message);
-}
-```
+  console.log(prepared.value.expectedAmountOut);
+  console.log(prepared.value.minimumAmountOut);
+  console.log(prepared.value.plan.steps);
 
-## Inspect a Plan Without Sending
-
-Actions return an `ExecutionPlan` first. You can inspect that plan before sending it to
-a wallet adapter:
-
-```ts
-import { OseroClient, flattenExecutionPlan } from '@osero/client';
-import { mintUsds } from '@osero/client/actions';
-import { http, parseUnits } from 'viem';
-
-const client = OseroClient.create({
-  transports: {
-    8453: http('https://mainnet.base.org'),
-  },
-});
-
-const planResult = await mintUsds(client, {
-  chainId: 8453,
-  amount: parseUnits('25', 6),
-  sender: '0x1111111111111111111111111111111111111111',
-});
-
-if (planResult.isOk()) {
-  for (const tx of flattenExecutionPlan(planResult.value)) {
-    console.log(tx.operation, tx.to);
+  const executed = await sendWith(wallet, prepared.value.plan, {
+    confirmations: 2,
+  });
+  if (executed.isErr()) {
+    console.error(executed.error.code, executed.error.execution);
+  } else {
+    console.log(executed.value.transactions);
   }
 }
 ```
 
-The repository also includes a dry-run script:
+Operational APIs return typed `Result`/`ResultAsync` values. Executor adapters validate the entire plan, connected account, chain, options, and capabilities before transaction 1. Approval defaults are allowance-aware and exact; referral attribution and public RPC fallback are disabled unless explicitly enabled.
 
-```bash
-pnpm install
-pnpm --filter @osero/examples dry-run:inspect-plan
+## Public packages
+
+| Import                    | Contract                                                           |
+| ------------------------- | ------------------------------------------------------------------ |
+| `@osero/client`           | Client, domain values, plans, errors, reads, chain/token discovery |
+| `@osero/client/actions`   | Local swap preparation and honest simulation                       |
+| `@osero/client/api`       | Hosted quotes and cross-chain completion polling                   |
+| `@osero/client/contracts` | Supported ABIs and protocol addresses                              |
+| `@osero/client/viem`      | viem executor                                                      |
+| `@osero/client/ethers`    | ethers v6 executor                                                 |
+| `@osero/client/privy`     | Privy server-wallet executor                                       |
+
+See [`packages/client/README.md`](packages/client/README.md) for the full API, exact-output preparation, approval policies, hosted API verification, execution recovery, simulation semantics, and security guidance.
+
+## Workspace
+
+```text
+packages/client/       SDK source, tests, package metadata, and API report
+examples/              Runnable read-only and wallet-adapter examples
+docs/osero-sdk/        Design and release audit material
+.github/workflows/     CI, pinned-fork, package, and publication gates
+scripts/               Deterministic clean-build and package validation scripts
 ```
-
-## Quote With the Osero API
-
-Use `@osero/client/api` when you want the hosted Osero API to build a
-ready-to-sign swap quote between supported public assets. The API
-client sends your key as `x-api-key`, returns typed `ResultAsync`
-values, and adds an `executionPlan` that can be inspected or passed to
-the existing wallet adapters. Asset refs are not gated client-side:
-known ids autocomplete, and arbitrary ids or `'<chainId>:<0xaddress>'`
-address locators pass through for the API to accept or reject.
-
-```ts
-import { flattenExecutionPlan } from '@osero/client';
-import { OseroApiClient } from '@osero/client/api';
-import { parseUnits } from 'viem';
-
-const api = OseroApiClient.create({
-  apiKey: process.env.OSERO_API_KEY!,
-});
-
-const quote = await api.getSwapQuote({
-  fromAddress: '0x1111111111111111111111111111111111111111',
-  fromAssetId: 'ethereum:usdt',
-  toAssetId: 'ethereum:usds',
-  amount: parseUnits('1', 6),
-  slippage: '0.5',
-  referralCode: 3000,
-});
-
-if (quote.isOk()) {
-  console.log(quote.value.quote.amountOut?.formatted);
-  console.log(flattenExecutionPlan(quote.value.executionPlan));
-}
-```
-
-To broadcast the hosted quote, pass the attached `executionPlan` to the
-same wallet adapter used by local SDK actions:
-
-```ts
-import { sendWith } from '@osero/client/viem';
-
-const result = await api
-  .getSwapQuote(request)
-  .map((quote) => quote.executionPlan)
-  .andThen(sendWith(wallet));
-```
-
-Run the API example without a private key:
-
-```bash
-OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-swap
-```
-
-Run the API-to-viem broadcast example with an API key and funded wallet:
-
-```bash
-OSERO_API_KEY=osero_... PRIVATE_KEY=0x... pnpm --filter @osero/examples api:execute-quote-viem
-```
-
-## Preview a Flow Before Sending
-
-Preview helpers mirror the exact-in action names and return the quoted
-output amount as a `ResultAsync<bigint, ...>`. They only need
-`chainId` and `amount` because they do not build a sender-specific
-plan:
-
-```ts
-import { previewMintSUsds } from '@osero/client/actions';
-import { parseUnits } from 'viem';
-
-const quote = await previewMintSUsds(client, {
-  chainId: 8453,
-  amount: parseUnits('100', 6),
-});
-
-if (quote.isOk()) {
-  console.log('expected sUSDS out:', quote.value);
-}
-```
-
-## Available Actions
-
-Import actions from `@osero/client/actions`:
-
-```ts
-import {
-  mintSUsds,
-  mintUsds,
-  previewMintSUsds,
-  previewMintUsds,
-  previewRedeemSUsds,
-  previewRedeemUsds,
-  redeemSUsds,
-  redeemUsds,
-} from '@osero/client/actions';
-```
-
-| Action        | Direction     | Input decimals |
-| ------------- | ------------- | -------------: |
-| `mintUsds`    | USDC -> USDS  |              6 |
-| `mintSUsds`   | USDC -> sUSDS |              6 |
-| `redeemUsds`  | USDS -> USDC  |             18 |
-| `redeemSUsds` | sUSDS -> USDC |             18 |
-
-Matching preview helpers:
-
-| Helper               | Quotes        | Input decimals |
-| -------------------- | ------------- | -------------: |
-| `previewMintUsds`    | USDC -> USDS  |              6 |
-| `previewMintSUsds`   | USDC -> sUSDS |              6 |
-| `previewRedeemUsds`  | USDS -> USDC  |             18 |
-| `previewRedeemSUsds` | sUSDS -> USDC |             18 |
-
-Every action accepts:
-
-```ts
-type ActionRequest = {
-  chainId: number;
-  amount: bigint;
-  sender: `0x${string}`;
-  receiver?: `0x${string}`;
-  slippageBps?: number;
-  referralCode?: bigint;
-};
-```
-
-### Referral codes
-
-Every action carries an off-chain referral code so that PSM3 `Swap`
-events on L2s and the sUSDS `deposit` referral overload on mainnet
-can attribute flows back to an integrator.
-
-- The SDK defaults to `DEFAULT_REFERRAL_CODE` (`3000n`) when neither
-  the request nor the client specifies a code.
-- Pass `referralCode: undefined` on a specific request to opt out for
-  that call.
-- Set `defaultReferralCode` on `OseroClient.create({ ... })` to replace
-  the SDK default with your own once and forget about it. Pass
-  `defaultReferralCode: undefined` there to opt out at the client
-  level.
-
-```ts
-import { DEFAULT_REFERRAL_CODE, OseroClient } from '@osero/client';
-
-// Use your own code across every action by default.
-const client = OseroClient.create({
-  defaultReferralCode: 12345n,
-});
-
-// Opt out of attribution at the client level.
-const anonymousClient = OseroClient.create({
-  defaultReferralCode: undefined,
-});
-```
-
-## Balance Helpers
-
-Import balance helpers from the root package when you want raw token
-balances without wiring ERC-20 calls yourself:
-
-```ts
-import {
-  getSUsdsBalance,
-  getTokenBalance,
-  getTokenBalances,
-  getUsdcBalance,
-  getUsdsBalance,
-} from '@osero/client';
-```
-
-Use `getTokenBalance(client, { chainId, account, token })` for a
-canonical token or any ERC-20 contract address on a supported chain.
-Use `getTokenBalances(client, { chainId, account })` to read `USDC`,
-`USDS`, and `sUSDS` together, or the convenience wrappers for common
-single-token reads.
-
-```ts
-const balances = await getTokenBalances(client, {
-  chainId: 8453,
-  account: account.address,
-});
-
-if (balances.isOk()) {
-  console.log(balances.value.USDC);
-  console.log(balances.value.sUSDS);
-}
-
-const susds = await getSUsdsBalance(client, {
-  chainId: 8453,
-  account: account.address,
-});
-```
-
-These helpers return `ResultAsync` values and reuse the SDK's
-supported-chain checks and configured public transports. Canonical
-symbols resolve through the token registry; custom addresses are
-validated before the ERC-20 `balanceOf` call.
-
-## Configuration
-
-Create an `OseroClient` once and pass it to action functions:
-
-```ts
-import { OseroClient } from '@osero/client';
-import { http } from 'viem';
-
-const client = OseroClient.create({
-  transports: {
-    1: http('https://eth.llamarpc.com'),
-    10: http('https://mainnet.optimism.io'),
-    130: http('https://mainnet.unichain.org'),
-    8453: http('https://mainnet.base.org'),
-    42161: http('https://arb1.arbitrum.io/rpc'),
-  },
-  defaultSlippageBps: 5,
-});
-```
-
-Set confirmation waits on the adapter when broadcasting:
-
-```ts
-const result = await mintUsds(client, request).andThen(sendWith(wallet, { confirmations: 2 }));
-```
-
-## Supported Chains
-
-| Chain        | Chain ID |
-| ------------ | -------: |
-| Ethereum     |        1 |
-| OP Mainnet   |       10 |
-| Unichain     |      130 |
-| Base         |     8453 |
-| Arbitrum One |    42161 |
-
-You can also read chain and token metadata from the SDK:
-
-```ts
-import { SUPPORTED_CHAIN_IDS, getChain, getToken } from '@osero/client';
-
-console.log(SUPPORTED_CHAIN_IDS);
-console.log(getChain(8453)?.name);
-console.log(getToken(8453, 'USDC').address);
-```
-
-## Examples
-
-Runnable examples live in `examples/src`.
-
-The dry-run script and broadcast examples now show the preview helpers
-alongside plan building so you can compare the expected output quote
-with the eventual balance delta.
-
-## Releases
-
-This repo uses Changesets for independent package versioning.
-
-```bash
-pnpm changeset
-```
-
-When a change affects a publishable package in `packages/*`, add a changeset in the same
-PR. After merge to `main`, the release workflow opens or updates a version PR. Merging
-that PR publishes the changed public packages to npm.
-
-```bash
-cp examples/.env.example examples/.env
-# Edit examples/.env and replace PRIVATE_KEY before running broadcast examples.
-
-pnpm --filter @osero/examples viem:mint-usds
-pnpm --filter @osero/examples viem:redeem-susds
-pnpm --filter @osero/examples ethers:mint-usds
-pnpm --filter @osero/examples ethers:roundtrip
-pnpm --filter @osero/examples api:quote-swap
-```
-
-The examples broadcast real transactions. Use a disposable wallet with small balances
-and explicit RPC URLs when testing against public networks.
 
 ## Development
 
@@ -441,13 +105,33 @@ pnpm install
 pnpm nx build @osero/client
 pnpm nx typecheck @osero/client
 pnpm nx test @osero/client
+pnpm --filter @osero/client test:coverage
 pnpm lint
 pnpm format:check
 ```
 
-The SDK source is in `packages/client/src`. Tests are colocated as `*.test.ts`, and
-Vitest coverage is written to `packages/client/test-output/vitest/coverage`.
+Release-integrity checks:
+
+```bash
+pnpm api:report:check
+pnpm package:validate
+pnpm release:verify
+```
+
+`package:validate` creates a deliberate stale build artifact, performs a clean build, checks the declaration API report and tarball allowlist, installs the actual tarball into an isolated consumer, resolves every public ESM/types entrypoint, verifies removed imports remain unavailable, and confirms root/API imports work without optional wallet peers.
+
+Pinned fork tests run against fixed blocks on all five supported chains in CI/release. They verify deployed bytecode, configured read ABIs, quote math, real plan preparation, and non-broadcasting transaction simulation.
+
+## Safe examples
+
+```bash
+pnpm --filter @osero/examples dry-run:inspect-plan
+pnpm --filter @osero/examples dry-run:susds-apy
+OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-swap
+```
+
+Wallet examples can broadcast real transactions. Use explicit RPC URLs, disposable keys, and small balances.
 
 ## License
 
-MIT
+MIT. See [`LICENSE`](LICENSE).

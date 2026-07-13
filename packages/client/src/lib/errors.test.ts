@@ -1,103 +1,164 @@
 import {
+  AccountMismatchError,
+  ApiRequestError,
+  BroadcastError,
   CancelError,
-  InsufficientBalanceError,
-  OseroError,
+  ChainMismatchError,
+  ConfirmationError,
+  ConfigurationError,
+  InsufficientAllowanceError,
+  ProgressCallbackError,
+  RpcError,
   SigningError,
+  SimulationError,
+  TimeoutError,
   TransactionError,
   UnexpectedError,
+  UnsupportedCapabilityError,
   UnsupportedChainError,
   ValidationError,
+  type ExecutionFailureContext,
+  type OseroError,
 } from './errors.js';
 
-describe('Osero errors', () => {
-  it('every concrete error extends OseroError', () => {
-    const errors = [
-      new CancelError('x'),
-      new SigningError('x'),
-      new TransactionError('x', { txHash: '0xabcd' }),
-      new ValidationError('x', { field: 'amount' }),
-      new UnsupportedChainError(999),
-      new InsufficientBalanceError({
-        token: '0x0000000000000000000000000000000000000000',
-        required: 1n,
-        available: 0n,
-      }),
-      new UnexpectedError('x'),
+const ACCOUNT = '0x1111111111111111111111111111111111111111' as const;
+const OTHER_ACCOUNT = '0x2222222222222222222222222222222222222222' as const;
+const HASH = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+const EXECUTION: ExecutionFailureContext = {
+  planId: 'plan-abc',
+  stepId: 'swap',
+  stepIndex: 1,
+  operation: 'SWAP_EXACT_IN',
+  stage: 'confirmation',
+  hash: HASH,
+  completed: [
+    {
+      planId: 'plan-abc',
+      stepId: 'approve',
+      stepIndex: 0,
+      operation: 'APPROVE_ERC20',
+      hash: HASH,
+    },
+  ],
+};
+
+describe('public error discriminants', () => {
+  it('uses stable code and name pairs across validation, preflight, and execution stages', () => {
+    const errors: readonly OseroError[] = [
+      new ValidationError('invalid', 'amount'),
+      new ConfigurationError('missing transport', 'transport'),
+      new UnsupportedChainError(137),
+      new AccountMismatchError(ACCOUNT, OTHER_ACCOUNT),
+      new ChainMismatchError(1, 8453),
+      new UnsupportedCapabilityError('atomic-batch', 'viem'),
+      new InsufficientAllowanceError(ACCOUNT, ACCOUNT, OTHER_ACCOUNT, 2n, 1n),
+      new CancelError('cancelled'),
+      new SimulationError('simulation'),
+      new SigningError('signing'),
+      new BroadcastError('broadcast'),
+      new ConfirmationError('confirmation', EXECUTION),
+      new TransactionError('reverted', HASH),
+      new TimeoutError('poll', 1_000),
+      UnexpectedError.from(new Error('unexpected')),
     ];
-    for (const err of errors) {
-      expect(err).toBeInstanceOf(OseroError);
-      expect(err).toBeInstanceOf(Error);
+
+    expect(new Set(errors.map((error) => error.code)).size).toBe(errors.length);
+    for (const error of errors) {
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).toMatch(/Error$/);
+      expect(error.code).toMatch(/^[A-Z_]+$/);
+      expect(error.message.length).toBeGreaterThan(0);
     }
   });
 
-  it('every error has a distinct, descriptive name', () => {
-    expect(new CancelError('x').name).toBe('CancelError');
-    expect(new SigningError('x').name).toBe('SigningError');
-    expect(new TransactionError('x', { txHash: '0xabcd' }).name).toBe('TransactionError');
-    expect(new ValidationError('x', {}).name).toBe('ValidationError');
-    expect(new UnsupportedChainError(1).name).toBe('UnsupportedChainError');
-    expect(
-      new InsufficientBalanceError({
-        token: '0x0000000000000000000000000000000000000000',
-        required: 1n,
-        available: 0n,
-      }).name,
-    ).toBe('InsufficientBalanceError');
-    expect(new UnexpectedError('x').name).toBe('UnexpectedError');
-  });
-
-  describe('CancelError.from', () => {
-    it('extracts the message from a plain Error', () => {
-      const original = new Error('user cancelled');
-      const err = CancelError.from(original);
-      expect(err.message).toBe('user cancelled');
-      expect(err.cause).toBe(original);
+  it('preserves field and structured details on validation failures', () => {
+    const error = ValidationError.forField('amount', 'must be positive', {
+      minimum: 1n,
+      received: 0n,
     });
 
-    it('falls back to the default message for non-Error causes', () => {
-      const err = CancelError.from({ anything: 42 });
-      expect(err.message).toBe('The user cancelled the request');
-      expect(err.cause).toEqual({ anything: 42 });
+    expect(error.field).toBe('amount');
+    expect(error.details).toEqual({ minimum: 1n, received: 0n });
+    expect(error.toJSON()).toMatchObject({
+      name: 'ValidationError',
+      code: 'VALIDATION_ERROR',
+      field: 'amount',
+      details: { minimum: '1', received: '0' },
     });
   });
 
-  describe('UnexpectedError.from', () => {
-    it('short-circuits when passed an existing UnexpectedError', () => {
-      const original = new UnexpectedError('boom');
-      expect(UnexpectedError.from(original)).toBe(original);
-    });
+  it('serializes causes, bigint fields, and recovery context without losing hashes', () => {
+    const cause = new Error('receipt unavailable', { cause: new Error('upstream timeout') });
+    const error = ConfirmationError.from(cause, EXECUTION);
 
-    it('wraps any other error', () => {
-      const err = UnexpectedError.from(new Error('rpc down'));
-      expect(err).toBeInstanceOf(UnexpectedError);
-      expect(err.message).toBe('rpc down');
-    });
+    expect(error.cause).toBe(cause);
+    expect(error.execution).toEqual(EXECUTION);
+    expect(error.toJSON()).toEqual(
+      expect.objectContaining({
+        code: 'CONFIRMATION_FAILED',
+        execution: expect.objectContaining({
+          planId: 'plan-abc',
+          hash: HASH,
+          completed: [expect.objectContaining({ stepId: 'approve', hash: HASH })],
+        }),
+        cause: {
+          name: 'Error',
+          message: 'receipt unavailable',
+          cause: { name: 'Error', message: 'upstream timeout' },
+        },
+      }),
+    );
   });
 
-  describe('ValidationError.forField', () => {
-    it('tags the context with the offending field', () => {
-      const err = ValidationError.forField('amount', 'must be > 0');
-      expect(err.context.field).toBe('amount');
-      expect(err.message).toBe('must be > 0');
-    });
+  it('keeps insufficient allowance integers machine-readable and JSON-safe', () => {
+    const error = new InsufficientAllowanceError(ACCOUNT, ACCOUNT, OTHER_ACCOUNT, 10n, 3n);
+
+    expect(error.required).toBe(10n);
+    expect(error.allowance).toBe(3n);
+    expect(error.toJSON()).toMatchObject({ required: '10', allowance: '3' });
+    expect(() => JSON.stringify(error)).not.toThrow();
   });
 
-  describe('TransactionError', () => {
-    it('exposes the tx hash and optional explorer link', () => {
-      const err = TransactionError.from({
-        txHash: '0xdeadbeef',
-        link: 'https://etherscan.io/tx/0xdeadbeef',
-      });
-      expect(err.txHash).toBe('0xdeadbeef');
-      expect(err.link).toBe('https://etherscan.io/tx/0xdeadbeef');
+  it('preserves authoritative HTTP metadata on API request failures', () => {
+    const error = new ApiRequestError({
+      url: 'https://api.osero.org/v1/swap/quote',
+      method: 'POST',
+      statusCode: 429,
+      statusText: 'Too Many Requests',
+      body: { code: 'RATE_LIMITED' },
+      headers: { 'retry-after': '2' },
+      apiCode: 'RATE_LIMITED',
+      correlationId: 'corr-1',
+      retryAfterMs: 2_000,
     });
+
+    expect(error.code).toBe('API_REQUEST_FAILED');
+    expect(error.apiCode).toBe('RATE_LIMITED');
+    expect(error.correlationId).toBe('corr-1');
+    expect(error.retryAfterMs).toBe(2_000);
   });
 
-  describe('UnsupportedChainError', () => {
-    it('captures the unsupported chain ID', () => {
-      const err = new UnsupportedChainError(9999);
-      expect(err.chainId).toBe(9999);
-      expect(err.message).toContain('9999');
-    });
+  it('maps stage causes into truthful error classes', () => {
+    const cause = new Error('provider failure');
+    const errors = [
+      CancelError.from(cause, EXECUTION),
+      SimulationError.from(cause, EXECUTION),
+      SigningError.from(cause, EXECUTION),
+      BroadcastError.from(cause, EXECUTION),
+      ProgressCallbackError.from(cause, EXECUTION),
+      RpcError.from({ cause, operation: 'readContract', chainId: 8453 }),
+      UnexpectedError.from(cause),
+    ] as const;
+
+    expect(errors.map((error) => error.code)).toEqual([
+      'CANCELLED',
+      'SIMULATION_FAILED',
+      'SIGNING_FAILED',
+      'BROADCAST_FAILED',
+      'PROGRESS_CALLBACK_FAILED',
+      'RPC_REQUEST_FAILED',
+      'UNEXPECTED_ERROR',
+    ]);
+    for (const error of errors) expect(error.cause).toBe(cause);
   });
 });

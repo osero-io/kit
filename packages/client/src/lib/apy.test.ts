@@ -1,90 +1,81 @@
-import { installMockPublicClient } from './actions/_testing.js';
-import { getSsr, getSUsdsApy, SECONDS_PER_YEAR, ssrToApy } from './apy.js';
-import { UnexpectedError, UnsupportedChainError } from './errors.js';
+import { createMockClient, mockFn } from './_testing.js';
+import { getSsr, getSUsdsApy, RAY, SECONDS_PER_YEAR, ssrToApy } from './apy.js';
+import { RpcError, UnsupportedChainError, ValidationError } from './errors.js';
 import { OseroClient } from './OseroClient.js';
 
-// Live SSR on mainnet at the time this test was written: the per-second
-// rate that compounds to roughly 3.65% APY.
 const SSR_VALUE = 1_000_000_001_136_785_036_595_443_334n;
-const EXPECTED_APY = (Number(SSR_VALUE) / 1e27) ** SECONDS_PER_YEAR - 1;
-
+const EXPECTED_APY = Math.expm1(SECONDS_PER_YEAR * Math.log1p(Number(SSR_VALUE - RAY) / 1e27));
 const MAINNET_SUSDS = '0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD';
 const BASE_SSR_ORACLE = '0x65d946e533748A998B1f0E430803e39A6388f7a1';
 
 describe('SSR / APY helpers', () => {
-  it('reads ssr() directly on mainnet and converts to APY', async () => {
-    const client = OseroClient.create();
-    const mock = installMockPublicClient(client, 1, ({ address, functionName }) => {
-      expect(address).toBe(MAINNET_SUSDS);
-      expect(functionName).toBe('ssr');
-      return SSR_VALUE;
+  it.each([
+    [1, MAINNET_SUSDS, 'ssr'],
+    [8453, BASE_SSR_ORACLE, 'getSSR'],
+  ] as const)(
+    'reads the configured SSR source on chain %s',
+    async (chainId, address, functionName) => {
+      const readContract = mockFn(async (request: { address: string; functionName: string }) => {
+        expect(request.address).toBe(address);
+        expect(request.functionName).toBe(functionName);
+        return SSR_VALUE;
+      });
+      const { client } = createMockClient(chainId, { readContract });
+
+      const result = await getSUsdsApy(client, { chainId });
+
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) {
+        expect(result.value).toBeCloseTo(EXPECTED_APY, 12);
+        expect(result.value).toBeCloseTo(0.0365, 3);
+      }
+      expect(readContract).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('exposes the raw RAY-scaled SSR', async () => {
+    const { client } = createMockClient(1, {
+      readContract: mockFn(async () => SSR_VALUE),
     });
-
-    const result = await getSUsdsApy(client, { chainId: 1 });
-
-    expect(mock.readContract).toHaveBeenCalledOnce();
-    expect(result.isOk()).toBe(true);
-    if (result.isOk()) {
-      expect(result.value).toBe(EXPECTED_APY);
-      expect(result.value).toBeCloseTo(0.0365, 3);
-    }
-  });
-
-  it('reads getSSR() from the SSRAuthOracle on Base and converts to APY', async () => {
-    const client = OseroClient.create();
-    const mock = installMockPublicClient(client, 8453, ({ address, functionName }) => {
-      expect(address).toBe(BASE_SSR_ORACLE);
-      expect(functionName).toBe('getSSR');
-      return SSR_VALUE;
-    });
-
-    const result = await getSUsdsApy(client, { chainId: 8453 });
-
-    expect(mock.readContract).toHaveBeenCalledOnce();
-    expect(result.isOk()).toBe(true);
-    if (result.isOk()) {
-      expect(result.value).toBe(EXPECTED_APY);
-      expect(result.value).toBeCloseTo(0.0365, 3);
-    }
-  });
-
-  it('exposes the raw RAY-scaled rate via getSsr', async () => {
-    const client = OseroClient.create();
-    installMockPublicClient(client, 1, () => SSR_VALUE);
 
     const result = await getSsr(client, { chainId: 1 });
 
     expect(result.isOk()).toBe(true);
-    if (result.isOk()) {
-      expect(result.value).toBe(SSR_VALUE);
-    }
+    if (result.isOk()) expect(result.value).toBe(SSR_VALUE);
   });
 
-  it('returns 0 APY when the rate is exactly RAY (no growth)', () => {
-    expect(ssrToApy(1_000_000_000_000_000_000_000_000_000n)).toBe(0);
+  it('returns exact zero at RAY and stable log-domain compounding above RAY', () => {
+    const zero = ssrToApy(RAY);
+    const compounded = ssrToApy(SSR_VALUE);
+
+    expect(zero.isOk()).toBe(true);
+    if (zero.isOk()) expect(zero.value).toBe(0);
+    expect(compounded.isOk()).toBe(true);
+    if (compounded.isOk()) expect(compounded.value).toBeCloseTo(EXPECTED_APY, 12);
   });
 
-  it('rejects unsupported chains', async () => {
-    const client = OseroClient.create();
-    const result = await getSUsdsApy(client, { chainId: 137 });
+  it('rejects invalid and out-of-range SSR values as typed validation errors', () => {
+    const belowRay = ssrToApy(RAY - 1n);
+    const overflow = ssrToApy(RAY + 10n ** 400n);
 
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnsupportedChainError);
-    }
+    expect(belowRay.isErr()).toBe(true);
+    if (belowRay.isErr()) expect(belowRay.error).toBeInstanceOf(ValidationError);
+    expect(overflow.isErr()).toBe(true);
+    if (overflow.isErr()) expect(overflow.error).toBeInstanceOf(ValidationError);
   });
 
-  it('wraps RPC failures in UnexpectedError', async () => {
-    const client = OseroClient.create();
-    installMockPublicClient(client, 42161, () => {
-      throw new Error('rpc timeout');
+  it('returns typed unsupported-chain and RPC failures', async () => {
+    const unsupported = await getSUsdsApy(OseroClient.create(), { chainId: 137 });
+    const { client } = createMockClient(42161, {
+      readContract: mockFn(async () => {
+        throw new Error('rpc timeout');
+      }),
     });
+    const rpc = await getSUsdsApy(client, { chainId: 42161 });
 
-    const result = await getSUsdsApy(client, { chainId: 42161 });
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-    }
+    expect(unsupported.isErr()).toBe(true);
+    if (unsupported.isErr()) expect(unsupported.error).toBeInstanceOf(UnsupportedChainError);
+    expect(rpc.isErr()).toBe(true);
+    if (rpc.isErr()) expect(rpc.error).toBeInstanceOf(RpcError);
   });
 });

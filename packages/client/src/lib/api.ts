@@ -1,13 +1,57 @@
-import { getAddress, isAddress, isHex, type Address, type Hex } from 'viem';
+import {
+  decodeFunctionData,
+  getAddress,
+  isAddress,
+  isAddressEqual,
+  isHex,
+  type Address,
+  type DecodeFunctionDataReturnType,
+  type Hex,
+  type PublicClient,
+} from 'viem';
 
-import { ApiRequestError, UnexpectedError, ValidationError } from './errors.js';
-import { makeApprovalRequiredPlan, makeTransactionRequest } from './plan.js';
-import { err, errAsync, ok, okAsync, ResultAsync, type Result } from './result.js';
-import type { Erc20ApprovalRequired, OperationType, TransactionRequest } from './types.js';
+import { erc20Abi } from './abis/erc20.js';
+import { prepareAllowanceWithPublicClient } from './allowance.js';
+import {
+  type ApprovalPolicy,
+  type Referral,
+  parseSlippage,
+  referral as createReferral,
+  type Slippage,
+  UINT256_MAX,
+} from './domain.js';
+import {
+  ApiRequestError,
+  ApiResponseError,
+  ApiTransportError,
+  CancelError,
+  ConfigurationError,
+  InsufficientAllowanceError,
+  RpcError,
+  TimeoutError,
+  UnexpectedError,
+  ValidationError,
+} from './errors.js';
+import { createExecutionPlan, createTransactionRequest } from './plan.js';
+import { referralCodeForApi } from './referrals.js';
+import { err, errAsync, ok, ResultAsync, type Result } from './result.js';
+import type { ExecutionPlan } from './types.js';
 
 export const DEFAULT_OSERO_API_BASE_URL = 'https://api.osero.org/v1/';
 
-export { OSERO_API_ERROR_CODES, type OseroApiErrorCode } from './errors.js';
+export {
+  ApiRequestError,
+  ApiResponseError,
+  ApiTransportError,
+  CancelError,
+  ConfigurationError,
+  InsufficientAllowanceError,
+  OSERO_API_ERROR_CODES,
+  RpcError,
+  TimeoutError,
+  ValidationError,
+  type OseroApiErrorCode,
+} from './errors.js';
 
 /**
  * Chains known to this SDK release, as an advisory snapshot.
@@ -144,10 +188,20 @@ export const OSERO_API_KEY_PREFIX = 'osero_';
 export const OSERO_API_KEY_MAX_LENGTH = 256;
 export const OSERO_API_REFERRAL_CODE_MIN = 3000;
 export const OSERO_API_REFERRAL_CODE_MAX = 3999;
-const UINT256_MAX = 2n ** 256n - 1n;
-
 export type OseroApiIntegerString = `${bigint}`;
-export type OseroApiReferralCode = number;
+
+export type OseroApiInputAmount = {
+  readonly raw: bigint;
+};
+
+export function oseroApiAmount(raw: bigint): Result<OseroApiInputAmount, ValidationError> {
+  if (typeof raw !== 'bigint' || raw <= 0n || raw > UINT256_MAX) {
+    return err(
+      ValidationError.forField('raw', 'hosted API amount must be a positive uint256 bigint'),
+    );
+  }
+  return ok(Object.freeze({ raw }));
+}
 
 /**
  * A chain-scoped ERC-20 reference for tokens without a known Osero asset
@@ -174,9 +228,10 @@ export type OseroApiSwapQuoteRequest = {
   readonly fromAddress: Address;
   readonly fromAssetId: OseroApiAssetRef;
   readonly toAssetId: OseroApiAssetRef;
-  readonly amount: bigint | OseroApiIntegerString;
-  readonly slippage?: string;
-  readonly referralCode?: OseroApiReferralCode;
+  readonly amount: OseroApiInputAmount;
+  readonly slippage?: Slippage;
+  readonly referral?: Referral;
+  readonly approvalPolicy?: ApprovalPolicy;
 };
 
 export type OseroApiSwapStatusRequest = {
@@ -194,36 +249,33 @@ export type OseroApiRequestOptions = {
   readonly signal?: AbortSignal;
 };
 
+export type OseroApiKeyProvider = () => string | Promise<string>;
+export type OseroApiPublicClient = Pick<PublicClient, 'chain' | 'getBlockNumber' | 'readContract'>;
+export type OseroApiPublicClientProvider = (
+  chainId: OseroApiChainId,
+) => OseroApiPublicClient | Promise<OseroApiPublicClient>;
+
+export type OseroApiFetch = typeof globalThis.fetch;
+
 export type OseroApiClientConfig = {
-  readonly apiKey: string;
+  readonly apiKey?: string;
+  readonly apiKeyProvider?: OseroApiKeyProvider;
+  readonly publicClientProvider?: OseroApiPublicClientProvider;
   readonly baseUrl?: string | URL;
   readonly fetch?: OseroApiFetch;
 };
 
-export type ResolvedOseroApiClientConfig = {
-  readonly baseUrl: string;
-};
-
-export type OseroApiFetchInit = {
-  readonly method: 'GET' | 'POST';
-  readonly headers: Readonly<Record<string, string>>;
-  readonly body?: string;
-  readonly signal?: AbortSignal;
-};
-
-export type OseroApiFetchResponse = {
-  readonly ok: boolean;
-  readonly status: number;
-  readonly statusText: string;
-  text(): Promise<string>;
-};
-
-export type OseroApiFetch = (
-  url: string,
-  init: OseroApiFetchInit,
-) => Promise<OseroApiFetchResponse>;
-
-export type OseroApiClientError = ValidationError | ApiRequestError | UnexpectedError;
+export type OseroApiClientError =
+  | ValidationError
+  | ConfigurationError
+  | ApiRequestError
+  | ApiTransportError
+  | ApiResponseError
+  | InsufficientAllowanceError
+  | RpcError
+  | CancelError
+  | TimeoutError
+  | UnexpectedError;
 
 export type OseroApiSwapAsset = {
   readonly assetId: OseroApiAssetId;
@@ -383,11 +435,7 @@ export type OseroApiSwapQuoteResponse = {
 };
 
 export type OseroApiSwapQuote = OseroApiSwapQuoteResponse & {
-  /**
-   * Existing `@osero/client/viem` and `@osero/client/ethers` adapters can
-   * execute this plan directly.
-   */
-  readonly executionPlan: Erc20ApprovalRequired;
+  readonly executionPlan: ExecutionPlan;
 };
 
 export type OseroApiSwapStatusBridge = {
@@ -405,13 +453,27 @@ export type OseroApiSwapStatusResponse = {
   readonly bridge: OseroApiSwapStatusBridge;
 };
 
+export type OseroApiSwapCompletion = {
+  readonly state: OseroApiBridgeState;
+  readonly providerStatus: OseroApiBridgeProviderStatus;
+  readonly sourceTxHash: Hex;
+  readonly destinationTxHash: Hex | null;
+  readonly status: OseroApiSwapStatusResponse;
+};
+
+export type WaitForSwapCompletionOptions = OseroApiRequestOptions & {
+  readonly pollingIntervalMs?: number;
+  readonly timeoutMs?: number;
+  readonly onStatus?: (status: OseroApiSwapStatusResponse) => void | Promise<void>;
+};
+
 type OseroApiSwapQuoteBody = {
   readonly fromAddress: Address;
   readonly fromAssetId: string;
   readonly toAssetId: string;
   readonly amount: OseroApiIntegerString;
   readonly slippage?: string;
-  readonly referralCode?: OseroApiReferralCode;
+  readonly referralCode?: number;
 };
 
 type RequestJsonArgs<T> = {
@@ -437,22 +499,45 @@ type RequestJsonArgs<T> = {
  * decode normally.
  */
 export class OseroApiClient {
-  readonly config: ResolvedOseroApiClientConfig;
+  readonly baseUrl: string;
 
-  readonly #apiKey: string;
+  readonly #apiKey?: string;
+  readonly #apiKeyProvider?: OseroApiKeyProvider;
+  readonly #publicClientProvider?: OseroApiPublicClientProvider;
   readonly #baseUrl: URL;
   readonly #fetch: OseroApiFetch;
 
-  constructor(config: OseroApiClientConfig) {
-    this.#apiKey = config.apiKey;
+  constructor(config: OseroApiClientConfig = {}) {
+    if (typeof config !== 'object' || config === null) {
+      throw new ConfigurationError('API client configuration must be an object');
+    }
+    if (config.apiKey !== undefined) {
+      const apiKey = resolveApiKey(config.apiKey);
+      if (apiKey.isErr()) {
+        throw new ConfigurationError(apiKey.error.message, 'apiKey', { cause: apiKey.error });
+      }
+      this.#apiKey = apiKey.value;
+    }
+    if (config.apiKeyProvider !== undefined && typeof config.apiKeyProvider !== 'function') {
+      throw new ConfigurationError('apiKeyProvider must be a function', 'apiKeyProvider');
+    }
+    if (
+      config.publicClientProvider !== undefined &&
+      typeof config.publicClientProvider !== 'function'
+    ) {
+      throw new ConfigurationError(
+        'publicClientProvider must be a function',
+        'publicClientProvider',
+      );
+    }
+    this.#apiKeyProvider = config.apiKeyProvider;
+    this.#publicClientProvider = config.publicClientProvider;
     this.#baseUrl = normalizeBaseUrl(config.baseUrl ?? DEFAULT_OSERO_API_BASE_URL);
     this.#fetch = resolveFetch(config.fetch);
-    this.config = {
-      baseUrl: this.#baseUrl.toString(),
-    };
+    this.baseUrl = this.#baseUrl.toString();
   }
 
-  static create(config: OseroApiClientConfig): OseroApiClient {
+  static create(config: OseroApiClientConfig = {}): OseroApiClient {
     return new OseroApiClient(config);
   }
 
@@ -472,8 +557,14 @@ export class OseroApiClient {
     options?: OseroApiRequestOptions,
   ): ResultAsync<OseroApiSwapQuote, OseroApiClientError> {
     const body = encodeSwapQuoteRequest(request);
-    if (body.isErr()) {
-      return errAsync(body.error);
+    if (body.isErr()) return errAsync(body.error);
+    if (this.#publicClientProvider === undefined) {
+      return errAsync(
+        new ConfigurationError(
+          'getSwapQuote requires publicClientProvider for allowance-aware preparation',
+          'publicClientProvider',
+        ),
+      );
     }
 
     return this.requestJson({
@@ -481,8 +572,12 @@ export class OseroApiClient {
       path: 'swap/quote',
       body: body.value,
       options,
-      decoder: decodeSwapQuoteResponse,
-    }).map(withExecutionPlan);
+      decoder: (value) =>
+        decodeSwapQuoteResponse(value, {
+          fromAddress: body.value.fromAddress,
+          amount: body.value.amount,
+        }),
+    }).andThen((response) => this.prepareHostedPlan(response, request.approvalPolicy ?? 'exact'));
   }
 
   getSwapStatus(
@@ -490,10 +585,7 @@ export class OseroApiClient {
     options?: OseroApiRequestOptions,
   ): ResultAsync<OseroApiSwapStatusResponse, OseroApiClientError> {
     const query = encodeSwapStatusRequest(request);
-    if (query.isErr()) {
-      return errAsync(query.error);
-    }
-
+    if (query.isErr()) return errAsync(query.error);
     return this.requestJson({
       method: 'GET',
       path: query.value,
@@ -502,15 +594,6 @@ export class OseroApiClient {
     });
   }
 
-  /**
-   * Convenience wrapper around {@link OseroApiClient.getSwapStatus} that
-   * pulls `sourceChainId` and `bridgeProtocol` out of a cross-chain
-   * quote's `bridge.statusRequest`, so callers only need to supply the
-   * source-chain tx hash returned by their wallet.
-   *
-   * Returns a {@link ValidationError} when the quote is same-chain
-   * (`bridge.required === false`) since there is no bridge to track.
-   */
   getSwapStatusForQuote(
     quote: OseroApiSwapQuoteResponse,
     txHash: Hex,
@@ -520,11 +603,10 @@ export class OseroApiClient {
       return errAsync(
         ValidationError.forField(
           'quote',
-          'Quote is same-chain — getSwapStatusForQuote requires a cross-chain bridge.',
+          'quote is same-chain; no bridge completion status exists',
         ),
       );
     }
-
     return this.getSwapStatus(
       {
         txHash,
@@ -535,6 +617,211 @@ export class OseroApiClient {
     );
   }
 
+  waitForSwapCompletion(
+    quote: OseroApiSwapQuoteResponse,
+    txHash: Hex,
+    options: WaitForSwapCompletionOptions = {},
+  ): ResultAsync<OseroApiSwapCompletion, OseroApiClientError> {
+    if (!quote.bridge.required) {
+      return errAsync(
+        ValidationError.forField('quote', 'waitForSwapCompletion requires a cross-chain quote'),
+      );
+    }
+    const statusRequest = quote.bridge.statusRequest;
+    if (!isTransactionHash(txHash)) {
+      return errAsync(ValidationError.forField('txHash', 'txHash must be a 32-byte hex string'));
+    }
+    const pollingIntervalMs = options.pollingIntervalMs ?? 5_000;
+    const timeoutMs = options.timeoutMs ?? 30 * 60 * 1_000;
+    if (!Number.isSafeInteger(pollingIntervalMs) || pollingIntervalMs <= 0) {
+      return errAsync(
+        ValidationError.forField(
+          'pollingIntervalMs',
+          'pollingIntervalMs must be a positive safe integer',
+        ),
+      );
+    }
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+      return errAsync(
+        ValidationError.forField('timeoutMs', 'timeoutMs must be a positive safe integer'),
+      );
+    }
+    if (options.onStatus !== undefined && typeof options.onStatus !== 'function') {
+      return errAsync(ValidationError.forField('onStatus', 'onStatus must be a function'));
+    }
+
+    const wait = async (): Promise<Result<OseroApiSwapCompletion, OseroApiClientError>> => {
+      const startedAt = Date.now();
+      let previousStatus: string | undefined;
+      // oxlint-disable no-await-in-loop -- Polls and callbacks are intentionally serialized.
+      while (true) {
+        if (options.signal?.aborted) {
+          return err(CancelError.from(options.signal.reason));
+        }
+        const elapsed = Date.now() - startedAt;
+        const remaining = timeoutMs - elapsed;
+        if (remaining <= 0) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+
+        const controller = new AbortController();
+        let requestTimedOut = false;
+        const timeout = setTimeout(() => {
+          requestTimedOut = true;
+          controller.abort(new TimeoutError('waitForSwapCompletion', timeoutMs));
+        }, remaining);
+        const abort = () => controller.abort(options.signal?.reason);
+        options.signal?.addEventListener('abort', abort, { once: true });
+        const status = await this.getSwapStatus(
+          {
+            txHash,
+            sourceChainId: statusRequest.sourceChainId,
+            bridgeProtocol: statusRequest.bridgeProtocol,
+          },
+          {
+            ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+            signal: controller.signal,
+          },
+        );
+        clearTimeout(timeout);
+        options.signal?.removeEventListener('abort', abort);
+        if (status.isErr()) {
+          if (requestTimedOut) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+          return err(status.error);
+        }
+
+        const fingerprint = JSON.stringify(status.value);
+        if (fingerprint !== previousStatus) {
+          previousStatus = fingerprint;
+          if (options.onStatus !== undefined) {
+            try {
+              await options.onStatus(status.value);
+            } catch (cause) {
+              return err(new ConfigurationError('onStatus callback failed', 'onStatus', { cause }));
+            }
+          }
+        }
+
+        if (status.value.bridge.state === 'completed' || status.value.bridge.state === 'failed') {
+          return ok({
+            state: status.value.bridge.state,
+            providerStatus: status.value.bridge.providerStatus,
+            sourceTxHash: status.value.bridge.sourceTxHash,
+            destinationTxHash: status.value.bridge.destinationTxHash,
+            status: status.value,
+          });
+        }
+
+        const remainingBeforeSleep = timeoutMs - (Date.now() - startedAt);
+        if (remainingBeforeSleep <= 0) {
+          return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+        }
+        const delay = Math.min(pollingIntervalMs, remainingBeforeSleep);
+        const slept = await sleep(delay, options.signal);
+        if (slept.isErr()) return err(slept.error);
+      }
+      // oxlint-enable no-await-in-loop
+    };
+    return new ResultAsync(wait());
+  }
+
+  private prepareHostedPlan(
+    response: OseroApiSwapQuoteResponse,
+    approvalPolicy: ApprovalPolicy,
+  ): ResultAsync<OseroApiSwapQuote, OseroApiClientError> {
+    if (approvalPolicy !== 'exact' && approvalPolicy !== 'max' && approvalPolicy !== 'none') {
+      return errAsync(
+        ValidationError.forField('approvalPolicy', 'approvalPolicy must be exact, max, or none'),
+      );
+    }
+    const provider = this.#publicClientProvider;
+    if (provider === undefined) {
+      return errAsync(
+        new ConfigurationError('publicClientProvider is not configured', 'publicClientProvider'),
+      );
+    }
+
+    const preparation = async (): Promise<Result<OseroApiSwapQuote, OseroApiClientError>> => {
+      const publicClient = await ResultAsync.fromPromise(
+        Promise.resolve().then(() => provider(response.execution.sourceChainId)),
+        (cause) =>
+          new ConfigurationError(
+            `publicClientProvider failed for chain ${response.execution.sourceChainId}`,
+            'publicClientProvider',
+            { cause },
+          ),
+      );
+      if (publicClient.isErr()) return err(publicClient.error);
+      if (publicClient.value.chain?.id !== response.execution.sourceChainId) {
+        return err(
+          new ConfigurationError(
+            'publicClientProvider returned a client for the wrong source chain',
+            'publicClientProvider',
+          ),
+        );
+      }
+      const block = await ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
+        RpcError.from({
+          cause,
+          operation: 'getBlockNumber',
+          chainId: response.execution.sourceChainId,
+        }),
+      );
+      if (block.isErr()) return err(block.error);
+
+      const approvalGas =
+        response.approval.gas === null
+          ? undefined
+          : {
+              gas: BigInt(response.approval.gas),
+              source: 'hosted-api' as const,
+            };
+      const allowance = await prepareAllowanceWithPublicClient(publicClient.value, {
+        stepId: 'approve-input-token',
+        chainId: response.execution.sourceChainId,
+        token: response.approval.token.address,
+        owner: response.execution.transaction.from,
+        spender: response.approval.spender,
+        requiredAmount: BigInt(response.approval.amount.raw),
+        policy: approvalPolicy,
+        blockNumber: block.value,
+        ...(approvalGas === undefined || approvalGas.gas === 0n
+          ? {}
+          : { estimatedGas: approvalGas }),
+      });
+      if (allowance.isErr()) return err(allowance.error);
+
+      const execution = createTransactionRequest({
+        id: 'execute-swap',
+        chainId: response.execution.sourceChainId,
+        from: response.execution.transaction.from,
+        to: response.execution.transaction.to,
+        data: response.execution.transaction.data,
+        value: BigInt(response.execution.transaction.value),
+        operation: 'SWAP_EXACT_IN',
+        ...(response.quote.gas === null || BigInt(response.quote.gas) === 0n
+          ? {}
+          : {
+              estimatedGas: {
+                gas: BigInt(response.quote.gas),
+                source: 'hosted-api',
+              },
+            }),
+      });
+      if (execution.isErr()) return err(execution.error);
+      const plan = createExecutionPlan({
+        steps: allowance.value.approval
+          ? [allowance.value.approval, execution.value]
+          : [execution.value],
+        metadata: {
+          source: 'hosted-api',
+          allowanceSnapshots: [allowance.value.snapshot],
+        },
+      });
+      if (plan.isErr()) return err(plan.error);
+      return ok({ ...response, executionPlan: plan.value });
+    };
+    return new ResultAsync(preparation());
+  }
+
   private requestJson<T>({
     method,
     path,
@@ -542,103 +829,145 @@ export class OseroApiClient {
     options,
     decoder,
   }: RequestJsonArgs<T>): ResultAsync<T, OseroApiClientError> {
-    const apiKey = resolveApiKey(options?.apiKey ?? this.#apiKey);
-    if (apiKey.isErr()) {
-      return errAsync(apiKey.error);
-    }
+    const request = async (): Promise<Result<T, OseroApiClientError>> => {
+      if (options?.signal?.aborted) return err(CancelError.from(options.signal.reason));
+      let apiKeyValue: string | undefined = options?.apiKey;
+      if (apiKeyValue === undefined && this.#apiKeyProvider !== undefined) {
+        const provided = await ResultAsync.fromPromise(
+          Promise.resolve().then(() => this.#apiKeyProvider!()),
+          (cause) => new ConfigurationError('apiKeyProvider failed', 'apiKeyProvider', { cause }),
+        );
+        if (provided.isErr()) return err(provided.error);
+        apiKeyValue = provided.value;
+      }
+      apiKeyValue ??= this.#apiKey;
+      if (apiKeyValue === undefined) {
+        return err(
+          ValidationError.forField(
+            'apiKey',
+            'provide an API key per request, as a default, or through apiKeyProvider',
+          ),
+        );
+      }
+      const apiKey = resolveApiKey(apiKeyValue);
+      if (apiKey.isErr()) return err(apiKey.error);
 
-    const url = new URL(path, this.#baseUrl);
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-api-key': apiKey.value,
-    };
-    if (body !== undefined) {
-      headers['content-type'] = 'application/json';
-    }
-
-    const init: OseroApiFetchInit = {
-      method,
-      headers,
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      ...(options?.signal !== undefined ? { signal: options.signal } : {}),
-    };
-
-    return ResultAsync.fromPromise(this.#fetch(url.toString(), init), (error) =>
-      UnexpectedError.from(error),
-    ).andThen((response) =>
-      ResultAsync.fromPromise(response.text(), (error) => UnexpectedError.from(error)).andThen(
-        (text) => {
-          const bodyResult = parseJsonBody(text);
-          const responseBody = bodyResult.isOk() ? bodyResult.value : text;
-
-          if (!response.ok) {
-            return errAsync(
-              ApiRequestError.from({
-                statusCode: response.status,
-                statusText: response.statusText,
-                body: responseBody,
-                cause: bodyResult.isErr() ? bodyResult.error : undefined,
-              }),
-            );
-          }
-
-          if (bodyResult.isErr()) {
-            return errAsync(bodyResult.error);
-          }
-
-          const decoded = decoder(bodyResult.value);
-          if (decoded.isErr()) {
-            return errAsync(decoded.error);
-          }
-
-          return okAsync(decoded.value);
+      const url = new URL(path, this.#baseUrl);
+      const init: RequestInit = {
+        method,
+        headers: {
+          accept: 'application/json',
+          'x-api-key': apiKey.value,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
-      ),
-    );
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+      };
+
+      const response = await ResultAsync.fromPromise(this.#fetch(url, init), (cause) =>
+        isAbortFailure(cause, options?.signal)
+          ? CancelError.from(cause)
+          : ApiTransportError.from(cause, url.toString(), method),
+      );
+      if (response.isErr()) return err(response.error);
+      const text = await ResultAsync.fromPromise(response.value.text(), (cause) =>
+        isAbortFailure(cause, options?.signal)
+          ? CancelError.from(cause)
+          : ApiTransportError.from(cause, url.toString(), method),
+      );
+      if (text.isErr()) return err(text.error);
+
+      const parsed = parseJsonBody(text.value);
+      const responseBody = parsed.isOk() ? parsed.value : text.value;
+      const headers = Object.fromEntries(response.value.headers.entries());
+      if (!response.value.ok) {
+        const metadata = extractApiResponseMetadata(responseBody, headers);
+        return err(
+          new ApiRequestError({
+            url: url.toString(),
+            method,
+            statusCode: response.value.status,
+            statusText: response.value.statusText,
+            body: responseBody,
+            headers,
+            ...metadata,
+            ...(parsed.isErr() ? { cause: parsed.error } : {}),
+          }),
+        );
+      }
+      if (parsed.isErr()) {
+        return err(ApiResponseError.from(parsed.error, url.toString(), method));
+      }
+      const decoded = decoder(parsed.value);
+      if (decoded.isErr()) {
+        return err(ApiResponseError.from(decoded.error, url.toString(), method));
+      }
+      return ok(decoded.value);
+    };
+    return new ResultAsync(request());
   }
 }
 
-function withExecutionPlan(response: OseroApiSwapQuoteResponse): OseroApiSwapQuote {
-  return Object.assign({}, response, {
-    executionPlan: swapQuoteToExecutionPlan(response),
-  });
+function isAbortFailure(cause: unknown, signal: AbortSignal | undefined): boolean {
+  return (
+    signal?.aborted === true ||
+    (cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'TimeoutError'))
+  );
 }
 
-export function swapQuoteToExecutionPlan(quote: OseroApiSwapQuoteResponse): Erc20ApprovalRequired {
-  const approvalTransaction = apiTransactionToTransactionRequest(
-    quote.approval.transaction,
-    quote.execution.sourceChainId,
-    'APPROVE_ERC20',
-  );
-  const executionTransaction = apiTransactionToTransactionRequest(
-    quote.execution.transaction,
-    quote.execution.sourceChainId,
-    'SWAP',
-  );
-
-  return makeApprovalRequiredPlan(executionTransaction, [
-    {
-      token: quote.approval.token.address,
-      spender: quote.approval.spender,
-      amount: BigInt(quote.approval.amount.raw),
-      byTransaction: approvalTransaction,
-    },
-  ]);
+function sleep(
+  milliseconds: number,
+  signal: AbortSignal | undefined,
+): Promise<Result<void, CancelError>> {
+  if (signal?.aborted) return Promise.resolve(err(CancelError.from(signal.reason)));
+  const { promise, resolve } = Promise.withResolvers<Result<void, CancelError>>();
+  const complete = () => {
+    signal?.removeEventListener('abort', abort);
+    resolve(ok(undefined));
+  };
+  const timer = setTimeout(complete, milliseconds);
+  const abort = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+    resolve(err(CancelError.from(signal?.reason)));
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  return promise;
 }
 
-function apiTransactionToTransactionRequest(
-  transaction: OseroApiSwapTransaction,
-  chainId: number,
-  operation: OperationType,
-): TransactionRequest {
-  return makeTransactionRequest({
-    chainId,
-    from: transaction.from,
-    to: transaction.to,
-    data: transaction.data,
-    value: BigInt(transaction.value),
-    operation,
-  });
+type ApiResponseMetadata = {
+  readonly apiCode?: string;
+  readonly correlationId?: string;
+  readonly retryAfterMs?: number;
+};
+
+function extractApiResponseMetadata(
+  body: unknown,
+  headers: Readonly<Record<string, string>>,
+): ApiResponseMetadata {
+  const bodyRecord =
+    typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : undefined;
+  const apiCode = typeof bodyRecord?.code === 'string' ? bodyRecord.code : undefined;
+  const correlationId =
+    headers['x-correlation-id'] ??
+    headers['x-request-id'] ??
+    (typeof bodyRecord?.correlationId === 'string' ? bodyRecord.correlationId : undefined);
+  const retryAfter = headers['retry-after'];
+  let retryAfterMs: number | undefined;
+  if (retryAfter !== undefined) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      retryAfterMs = seconds * 1_000;
+    } else {
+      const timestamp = Date.parse(retryAfter);
+      if (Number.isFinite(timestamp)) retryAfterMs = Math.max(0, timestamp - Date.now());
+    }
+  }
+  return {
+    ...(apiCode === undefined ? {} : { apiCode }),
+    ...(correlationId === undefined ? {} : { correlationId }),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+  };
 }
 
 function normalizeBaseUrl(baseUrl: string | URL): URL {
@@ -649,27 +978,24 @@ function normalizeBaseUrl(baseUrl: string | URL): URL {
     }
     return url;
   } catch (cause) {
-    throw new ValidationError(
-      'baseUrl must be a valid absolute URL',
-      { field: 'baseUrl' },
-      { cause },
-    );
+    throw new ConfigurationError('baseUrl must be a valid absolute URL', 'baseUrl', { cause });
   }
 }
 
 function resolveFetch(fetchOverride: OseroApiFetch | undefined): OseroApiFetch {
-  if (fetchOverride) {
+  if (fetchOverride !== undefined) {
+    if (typeof fetchOverride !== 'function') {
+      throw new ConfigurationError('fetch must be a standard fetch-compatible function', 'fetch');
+    }
     return fetchOverride;
   }
-
-  const globalFetch = globalThis.fetch;
-  if (typeof globalFetch !== 'function') {
-    throw new UnexpectedError(
-      'No fetch implementation is available. Pass `fetch` to OseroApiClient.create().',
+  if (typeof globalThis.fetch !== 'function') {
+    throw new ConfigurationError(
+      'No fetch implementation is available; pass fetch to OseroApiClient.create()',
+      'fetch',
     );
   }
-
-  return (url, init) => globalFetch(url, init);
+  return globalThis.fetch;
 }
 
 /**
@@ -689,36 +1015,73 @@ function resolveApiKey(apiKey: string): Result<string, ValidationError> {
 function encodeSwapQuoteRequest(
   request: OseroApiSwapQuoteRequest,
 ): Result<OseroApiSwapQuoteBody, ValidationError> {
+  if (typeof request !== 'object' || request === null) {
+    return err(ValidationError.forField('request', 'quote request must be an object'));
+  }
   if (!isAddress(request.fromAddress)) {
     return err(ValidationError.forField('fromAddress', 'fromAddress must be an EVM address'));
   }
-
   const fromAssetId = encodeAssetRef(request.fromAssetId, 'fromAssetId');
-  if (fromAssetId.isErr()) {
-    return err(fromAssetId.error);
-  }
+  if (fromAssetId.isErr()) return err(fromAssetId.error);
   const toAssetId = encodeAssetRef(request.toAssetId, 'toAssetId');
-  if (toAssetId.isErr()) {
-    return err(toAssetId.error);
+  if (toAssetId.isErr()) return err(toAssetId.error);
+  if (
+    typeof request.amount !== 'object' ||
+    request.amount === null ||
+    typeof request.amount.raw !== 'bigint' ||
+    request.amount.raw <= 0n ||
+    request.amount.raw > UINT256_MAX
+  ) {
+    return err(
+      ValidationError.forField(
+        'amount',
+        'amount must be created with oseroApiAmount and fit within uint256',
+      ),
+    );
   }
 
-  const amount = encodePositiveInteger(request.amount, 'amount');
-  if (amount.isErr()) {
-    return err(amount.error);
+  let slippage: Slippage | undefined;
+  if (request.slippage !== undefined) {
+    if (typeof request.slippage !== 'object' || request.slippage === null) {
+      return err(
+        ValidationError.forField('slippage', 'slippage must be created with parseSlippage'),
+      );
+    }
+    const validated = parseSlippage(request.slippage.bps);
+    if (validated.isErr()) return err(validated.error);
+    slippage = validated.value;
   }
 
-  const referralCode = encodeReferralCode(request.referralCode);
-  if (referralCode.isErr()) {
-    return err(referralCode.error);
+  const configuredReferral = request.referral ?? false;
+  if (configuredReferral !== false) {
+    if (typeof configuredReferral !== 'object' || configuredReferral === null) {
+      return err(
+        ValidationError.forField('referral', 'referral must be false or created with referral()'),
+      );
+    }
+    const validated = createReferral(configuredReferral.code);
+    if (validated.isErr()) return err(validated.error);
+  }
+  const referralCode = referralCodeForApi(configuredReferral);
+  if (referralCode.isErr()) return err(referralCode.error);
+  if (
+    request.approvalPolicy !== undefined &&
+    request.approvalPolicy !== 'exact' &&
+    request.approvalPolicy !== 'max' &&
+    request.approvalPolicy !== 'none'
+  ) {
+    return err(
+      ValidationError.forField('approvalPolicy', 'approvalPolicy must be exact, max, or none'),
+    );
   }
 
   return ok({
     fromAddress: getAddress(request.fromAddress),
     fromAssetId: fromAssetId.value,
     toAssetId: toAssetId.value,
-    amount: amount.value,
-    ...(request.slippage !== undefined ? { slippage: request.slippage } : {}),
-    ...(referralCode.value !== undefined ? { referralCode: referralCode.value } : {}),
+    amount: request.amount.raw.toString() as OseroApiIntegerString,
+    ...(slippage === undefined ? {} : { slippage: slippage.bps }),
+    ...(referralCode.value === undefined ? {} : { referralCode: referralCode.value }),
   });
 }
 
@@ -758,6 +1121,9 @@ function encodeAssetRef(ref: OseroApiAssetRef, field: string): Result<string, Va
 function encodeSwapStatusRequest(
   request: OseroApiSwapStatusRequest,
 ): Result<string, ValidationError> {
+  if (typeof request !== 'object' || request === null) {
+    return err(ValidationError.forField('request', 'status request must be an object'));
+  }
   if (!isTransactionHash(request.txHash)) {
     return err(ValidationError.forField('txHash', 'txHash must be a 32-byte hex string'));
   }
@@ -771,44 +1137,11 @@ function encodeSwapStatusRequest(
       ValidationError.forField('bridgeProtocol', 'bridgeProtocol must be a non-empty string'),
     );
   }
-
   const search = new URLSearchParams({
     sourceChainId: String(request.sourceChainId),
     bridgeProtocol: request.bridgeProtocol,
   });
   return ok(`swap/status/${request.txHash}?${search.toString()}`);
-}
-
-function encodePositiveInteger(
-  value: bigint | string,
-  field: string,
-): Result<OseroApiIntegerString, ValidationError> {
-  if (typeof value === 'string' && !/^[1-9][0-9]*$/.test(value)) {
-    return err(
-      ValidationError.forField(field, `${field} must be a positive base-10 integer string`),
-    );
-  }
-
-  const amount = typeof value === 'bigint' ? value : BigInt(value);
-  if (amount <= 0n) {
-    return err(ValidationError.forField(field, `${field} must be greater than 0`));
-  }
-  if (amount > UINT256_MAX) {
-    return err(ValidationError.forField(field, `${field} must fit within uint256`));
-  }
-  return ok(amount.toString() as OseroApiIntegerString);
-}
-
-function encodeReferralCode(
-  value: OseroApiReferralCode | undefined,
-): Result<OseroApiReferralCode | undefined, ValidationError> {
-  if (value === undefined) {
-    return ok(undefined);
-  }
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return err(ValidationError.forField('referralCode', 'referralCode must be a finite number'));
-  }
-  return ok(value);
 }
 
 function parseJsonBody(text: string): Result<unknown, UnexpectedError> {
@@ -840,6 +1173,10 @@ function decodeSupportedAssetsResponse(
 
 function decodeSwapQuoteResponse(
   value: unknown,
+  expected: {
+    readonly fromAddress: Address;
+    readonly amount: OseroApiIntegerString;
+  },
 ): Result<OseroApiSwapQuoteResponse, UnexpectedError> {
   return decode(value, (root) => {
     const response = {
@@ -852,7 +1189,7 @@ function decodeSwapQuoteResponse(
       ),
       bridge: decodeSwapBridge(requiredField(root, 'bridge', '$.bridge'), '$.bridge'),
     };
-    assertSwapQuoteInvariants(response);
+    assertSwapQuoteInvariants(response, expected);
     return response;
   });
 }
@@ -865,24 +1202,15 @@ function decodeSwapStatusResponse(
   }));
 }
 
-/**
- * Execution-safety invariants only. These hold for any asset, chain, or
- * routing topology the API may adopt, so they can never reject a response
- * merely because it is newer than this SDK:
- *
- * - an ERC-20 approval is a nonpayable call on the token contract itself;
- * - approval and execution use the same signer and source chain;
- * - bridge polling targets the chain where the source transaction executes.
- *
- * Everything correlating the display `pair` with approval/execution
- * content is deliberately NOT checked — the plan builder consumes
- * `approval.*` and `execution.*` self-consistently and the API is the
- * authority on routing shape.
- */
-function assertSwapQuoteInvariants(response: OseroApiSwapQuoteResponse): void {
-  const { approval, bridge, execution } = response;
-
-  if (approval.transaction.to !== approval.token.address) {
+function assertSwapQuoteInvariants(
+  response: OseroApiSwapQuoteResponse,
+  expected: {
+    readonly fromAddress: Address;
+    readonly amount: OseroApiIntegerString;
+  },
+): void {
+  const { approval, bridge, execution, quote } = response;
+  if (!isAddressEqual(approval.transaction.to, approval.token.address)) {
     throw new DecodeError('$.approval.transaction.to must match $.approval.token.address');
   }
   if (approval.transaction.value !== '0') {
@@ -891,12 +1219,40 @@ function assertSwapQuoteInvariants(response: OseroApiSwapQuoteResponse): void {
   if (approval.token.chainId !== execution.sourceChainId) {
     throw new DecodeError('$.approval.token.chainId must match $.execution.sourceChainId');
   }
-  if (approval.transaction.from !== execution.transaction.from) {
-    throw new DecodeError('$.approval.transaction.from must match $.execution.transaction.from');
+  if (
+    !isAddressEqual(approval.transaction.from, expected.fromAddress) ||
+    !isAddressEqual(execution.transaction.from, expected.fromAddress)
+  ) {
+    throw new DecodeError('approval and execution senders must match the requested fromAddress');
+  }
+  if (quote.amountIn.raw !== expected.amount) {
+    throw new DecodeError('$.quote.amountIn.raw must match the requested amount');
   }
   if (bridge.required && bridge.statusRequest.sourceChainId !== execution.sourceChainId) {
     throw new DecodeError(
       '$.bridge.statusRequest.sourceChainId must match $.execution.sourceChainId',
+    );
+  }
+
+  let decoded: DecodeFunctionDataReturnType<typeof erc20Abi>;
+  try {
+    decoded = decodeFunctionData({ abi: erc20Abi, data: approval.transaction.data });
+  } catch (cause) {
+    throw new DecodeError(
+      `$.approval.transaction.data must encode ERC-20 approve: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+  }
+  if (
+    decoded.functionName !== 'approve' ||
+    decoded.args[0] === undefined ||
+    decoded.args[1] === undefined ||
+    !isAddressEqual(decoded.args[0], approval.spender) ||
+    decoded.args[1] !== BigInt(approval.amount.raw)
+  ) {
+    throw new DecodeError(
+      '$.approval.transaction.data must match approve($.approval.spender, $.approval.amount.raw)',
     );
   }
 }

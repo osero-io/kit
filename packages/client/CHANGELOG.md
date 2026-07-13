@@ -1,5 +1,43 @@
 # @osero/client
 
+## Unreleased
+
+### Major Changes
+
+- Replace pair-specific preview/action helpers with one typed `prepareSwap` API covering the
+  verified exact-input and exact-output route matrix. Preparation now returns a rich quote bound to
+  a versioned flat `ExecutionPlan`.
+- Make amounts, slippage, referrals, approval policy, account, and chain binding explicit.
+  Referral attribution and public RPC fallback now default to disabled; exact allowance-aware
+  approval is the default authorization policy.
+- Replace nested plan variants with deterministic step IDs, plan identity, canonical
+  serialization, confirmed-prefix recovery, progress callbacks, and executor capability
+  requirements.
+- Replace broad/generic failures with stable literal error codes and contextual, JSON-safe error
+  fields. Operational APIs return `Result`/`ResultAsync`; executor preflight validates the complete
+  plan before any broadcast.
+- Split the intentional public surface across root, `/actions`, `/api`, `/contracts`, `/viem`,
+  `/ethers`, and `/privy`. Legacy action functions and internal flattening/type-guard helpers are
+  no longer exported.
+
+### Security and Reliability
+
+- Verify hosted quote sender, amount, source-chain relationships, approval target/value, and decoded
+  ERC-20 `approve(spender, amount)` calldata before exposing executable plans.
+- Recheck live allowance at a recorded block and rebuild approval transactions locally. Hosted gas
+  values remain advisory metadata and never bypass fresh executor estimation.
+- Add account/chain/checksum binding, all-step preflight, fresh buffered gas estimation, truthful
+  signing/broadcast/confirmation/revert stages, ethers replacement tracking, and standard-hash
+  enforcement for Privy.
+- Add cancellable bounded bridge completion polling, independent-step plan simulation with live fee
+  and balance provenance, explicit balance multicall policy, and stable log-domain APY conversion.
+
+### Release Gates
+
+- Add a clean-build tarball allowlist, MIT license packaging, declaration API report, packed ESM and
+  TypeScript consumers, optional-peer isolation, Node 20/24 compatibility, all-source coverage
+  thresholds, shared adapter contracts, and pinned-block fork gates for every supported chain.
+
 ## 0.8.0
 
 ### Minor Changes

@@ -6,7 +6,12 @@
   "scripts": {
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "ci:publish": "pnpm nx run-many -t build --projects='packages/*' && pnpm -r --filter './packages/*' publish --access public --no-git-checks",
+    "clean:client": "node scripts/clean-client-output.mjs",
+    "api:report:check": "node scripts/check-client-api.mjs",
+    "api:report:write": "node scripts/check-client-api.mjs --write",
+    "package:validate": "node scripts/validate-client-package.mjs",
+    "release:verify": "pnpm nx run-many -t format:check lint build typecheck test && pnpm --filter @osero/client test:coverage && pnpm package:validate",
+    "ci:publish": "pnpm release:verify && pnpm -r --filter './packages/*' publish --access public --no-git-checks",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",

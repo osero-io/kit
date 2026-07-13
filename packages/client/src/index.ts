@@ -1,103 +1,12 @@
-// ABIs -----------------------------------------------------------------
 export {
-  erc20Abi,
-  erc4626Abi,
-  litePsmAbi,
-  psm3Abi,
-  ssrAbi,
-  usdsPsmWrapperAbi,
-} from './lib/abis/index.js';
-
-// Adapters (shared helpers) --------------------------------------------
-export {
-  flattenExecutionPlan,
-  isErc20ApprovalRequired,
-  isMultiStepExecution,
-  isTransactionRequest,
-} from './lib/adapters.js';
-
-// Addresses -------------------------------------------------------------
-export { PSM_ADDRESSES, type PsmAddresses } from './lib/addresses.js';
-
-// APY / SSR -------------------------------------------------------------
-export {
-  type GetSsrError,
-  type GetSsrRequest,
   getSsr,
   getSUsdsApy,
   RAY,
   SECONDS_PER_YEAR,
   ssrToApy,
+  type GetSsrError,
+  type GetSsrRequest,
 } from './lib/apy.js';
-
-// API client ------------------------------------------------------------
-export {
-  DEFAULT_OSERO_API_BASE_URL,
-  matchOseroApiAsset,
-  OseroApiClient,
-  OSERO_API_ERROR_CODES,
-  OSERO_API_KEY_MAX_LENGTH,
-  OSERO_API_KEY_PREFIX,
-  OSERO_API_KNOWN_ASSET_IDS,
-  OSERO_API_KNOWN_ASSETS,
-  OSERO_API_KNOWN_BRIDGE_PROTOCOLS,
-  OSERO_API_KNOWN_CHAIN_IDS,
-  OSERO_API_KNOWN_CHAINS,
-  OSERO_API_REFERRAL_CODE_MAX,
-  OSERO_API_REFERRAL_CODE_MIN,
-  OSERO_API_SUSDS_ASSET_ID,
-  OSERO_API_USDS_ASSET_ID,
-  swapQuoteToExecutionPlan,
-  type OseroApiAssetId,
-  type OseroApiAssetKind,
-  type OseroApiAssetLocator,
-  type OseroApiAssetRef,
-  type OseroApiBridgeProtocol,
-  type OseroApiBridgeProviderStatus,
-  type OseroApiBridgeState,
-  type OseroApiChainId,
-  type OseroApiChainKey,
-  type OseroApiClientConfig,
-  type OseroApiClientError,
-  type OseroApiErrorCode,
-  type OseroApiFetch,
-  type OseroApiFetchInit,
-  type OseroApiFetchResponse,
-  type OseroApiIntegerString,
-  type OseroApiKnownAsset,
-  type OseroApiKnownAssetId,
-  type OseroApiKnownBridgeProtocol,
-  type OseroApiKnownChain,
-  type OseroApiKnownChainId,
-  type OseroApiKnownChainKey,
-  type OseroApiReferralCode,
-  type OseroApiRequestOptions,
-  type OseroApiSupportedAsset,
-  type OseroApiSupportedAssetsResponse,
-  type OseroApiSusdsAssetId,
-  type OseroApiUsdsAssetId,
-  type OseroApiSwapAmount,
-  type OseroApiSwapApproval,
-  type OseroApiSwapAsset,
-  type OseroApiSwapBridge,
-  type OseroApiSwapBridgeStatusRequest,
-  type OseroApiSwapDirection,
-  type OseroApiSwapExecution,
-  type OseroApiSwapExecutionKind,
-  type OseroApiSwapPair,
-  type OseroApiSwapQuote,
-  type OseroApiSwapQuoteInfo,
-  type OseroApiSwapQuoteRequest,
-  type OseroApiSwapQuoteResponse,
-  type OseroApiSwapRouteHop,
-  type OseroApiSwapStatusBridge,
-  type OseroApiSwapStatusRequest,
-  type OseroApiSwapStatusResponse,
-  type OseroApiSwapTransaction,
-  type ResolvedOseroApiClientConfig,
-} from './lib/api.js';
-
-// Balances --------------------------------------------------------------
 export {
   getSUsdsBalance,
   getTokenBalance,
@@ -109,91 +18,94 @@ export {
   type GetTokenBalanceRequest,
   type TokenBalances,
 } from './lib/balances.js';
-
-// Chain registry --------------------------------------------------------
 export {
   CHAINS,
-  type ChainMetadata,
   getChain,
   isSupportedChainId,
   listChains,
-  type OseroChainId,
   SUPPORTED_CHAIN_IDS,
+  type ChainMetadata,
+  type OseroChainId,
 } from './lib/chains.js';
-
-// Client config ---------------------------------------------------------
-export type { ClientConfig, ResolvedClientConfig } from './lib/config.js';
-
-// Errors ----------------------------------------------------------------
+export type { ClientConfig } from './lib/config.js';
 export {
-  ApiRequestError,
+  DEFAULT_SLIPPAGE,
+  parseSlippage,
+  referral,
+  tokenAmount,
+  type AdvisoryGasEstimate,
+  type AllowanceSnapshot,
+  type ApprovalPolicy,
+  type Referral,
+  type Slippage,
+  type TokenAmount,
+} from './lib/domain.js';
+export {
+  AccountMismatchError,
+  BroadcastError,
   CancelError,
-  InsufficientBalanceError,
+  ChainMismatchError,
+  ConfigurationError,
+  ConfirmationError,
+  InsufficientAllowanceError,
   OseroError,
+  ProgressCallbackError,
+  RpcError,
   SigningError,
+  SimulationError,
+  TimeoutError,
   TransactionError,
   UnexpectedError,
+  UnsupportedCapabilityError,
   UnsupportedChainError,
   ValidationError,
+  type CompletedExecutionStep,
+  type ExecutionFailureContext,
+  type ExecutionStage,
+  type OseroErrorCode,
 } from './lib/errors.js';
-
-// Math helpers ----------------------------------------------------------
 export {
-  applySlippage,
-  BPS,
-  usdcFromUsdsViaBuyGem,
-  usdsFromUsdcViaSellGem,
-  USDC_TO_USDS_SCALE,
-  usdsNeededForUsdcViaBuyGem,
-  WAD,
-} from './lib/math.js';
-
-// Client class ----------------------------------------------------------
-export { OseroClient, type OseroPublicClient } from './lib/OseroClient.js';
-
-// Plan construction helpers --------------------------------------------
+  OseroClient,
+  type GetPublicClientError,
+  type OseroPublicClient,
+} from './lib/OseroClient.js';
 export {
-  makeApprovalRequiredPlan,
-  makeApprovalTransaction,
-  makeMultiStepPlan,
-  makeSingleApprovalPlan,
-  makeTransactionRequest,
+  createApprovalTransaction,
+  createExecutionPlan,
+  createTransactionRequest,
+  deserializeExecutionPlan,
+  resumeExecutionPlan,
+  serializeExecutionPlan,
+  type TransactionRequestInput,
 } from './lib/plan.js';
-
-// Referrals ------------------------------------------------------------
+export type { Result, ResultAsync } from './lib/result.js';
 export {
-  DEFAULT_REFERRAL_CODE,
-  resolveReferralCode,
-  validateReferralCode,
-} from './lib/referrals.js';
-
-// Result type re-exports ------------------------------------------------
-export {
-  err,
-  errAsync,
-  fromAsyncThrowable,
-  fromPromise,
-  fromThrowable,
-  ok,
-  okAsync,
-  Result,
-  ResultAsync,
-} from './lib/result.js';
-
-// Tokens ----------------------------------------------------------------
-export { getToken, listTokens, type Token, type TokenSymbol } from './lib/tokens.js';
-
-// Core types ------------------------------------------------------------
+  getToken,
+  isTokenSymbol,
+  listTokens,
+  TOKEN_SYMBOLS,
+  type Token,
+  type TokenSymbol,
+} from './lib/tokens.js';
 export type {
-  ActionError,
-  Erc20Approval,
-  Erc20ApprovalRequired,
+  ApprovalAuthorization,
+  ConfirmationOptions,
+  ConfirmedTransaction,
   ExecutionPlan,
   ExecutionPlanHandler,
-  ExecutionStep,
-  MultiStepExecution,
+  ExecutionPlanMetadata,
+  ExecutionProgress,
+  ExecutionResumeState,
+  ExecutorCapabilities,
+  ExecutorRequirements,
   OperationType,
+  PreparedExactInSwapQuote,
+  PreparedExactOutSwapQuote,
+  PreparedSwapQuote,
+  PreparedSwapRoute,
+  ProgressHandler,
   SendWithError,
+  TransactionConfirmation,
   TransactionRequest,
   TransactionResult,
 } from './lib/types.js';

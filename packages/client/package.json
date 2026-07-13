@@ -1,7 +1,7 @@
 {
   "name": "@osero/client",
   "version": "0.8.0",
-  "description": "The official TypeScript SDK for minting and swapping USDS and sUSDS across supported chains",
+  "description": "Production TypeScript SDK for preparing and executing USDC, USDS, and sUSDS swaps",
   "keywords": [
     "defi",
     "ethers",
@@ -27,6 +27,9 @@
     "directory": "packages/client"
   },
   "files": [
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
     "dist",
     "src",
     "!**/*.tsbuildinfo",
@@ -59,6 +62,12 @@
       "import": "./dist/api.js",
       "default": "./dist/api.js"
     },
+    "./contracts": {
+      "osero-sdk": "./src/contracts.ts",
+      "types": "./dist/contracts.d.ts",
+      "import": "./dist/contracts.js",
+      "default": "./dist/contracts.js"
+    },
     "./viem": {
       "osero-sdk": "./src/viem.ts",
       "types": "./dist/viem.d.ts",
@@ -85,7 +94,9 @@
     "lint": "oxlint src",
     "lint:fix": "oxlint --fix src",
     "format": "oxfmt src",
-    "format:check": "oxfmt --check src"
+    "format:check": "oxfmt --check src",
+    "test:coverage": "vitest --run --coverage",
+    "test:fork": "vitest --config vitest.fork.config.mts --run"
   },
   "dependencies": {
     "neverthrow": "^8.2.0",
@@ -94,7 +105,7 @@
   "peerDependencies": {
     "@privy-io/node": "^0.19.0",
     "ethers": "^6.14.0",
-    "viem": "^2.21.0"
+    "viem": ">=2.21.22 <3"
   },
   "peerDependenciesMeta": {
     "@privy-io/node": {
@@ -103,6 +114,9 @@
     "ethers": {
       "optional": true
     }
+  },
+  "engines": {
+    "node": ">=20"
   },
   "nx": {
     "includedScripts": [

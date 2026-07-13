@@ -1,41 +1,61 @@
-import { UnsupportedChainError } from './errors.js';
+import { parseSlippage, referral } from './domain.js';
+import { ConfigurationError, UnsupportedChainError } from './errors.js';
 import { OseroClient } from './OseroClient.js';
 
+function configuredDefaults() {
+  const slippage = parseSlippage('25');
+  const referralValue = referral(3001n);
+  if (slippage.isErr() || referralValue.isErr()) throw new Error('test input failed');
+  return { slippage: slippage.value, referral: referralValue.value };
+}
+
 describe('OseroClient', () => {
-  it('can be created with no arguments and applies defaults', () => {
+  it('exposes explicit safe defaults without silently enabling public RPCs', () => {
     const client = OseroClient.create();
-    expect(client.config.defaultSlippageBps).toBe(5);
-    expect(client.config.confirmations).toBe(1);
-    expect(client.config.transports).toEqual({});
+
+    expect(client.defaults.slippage.bps).toBe('5');
+    expect(client.defaults.referral).toBe(false);
+    const publicClient = client.getPublicClient(8453);
+    expect(publicClient.isErr()).toBe(true);
+    if (publicClient.isErr()) expect(publicClient.error).toBeInstanceOf(ConfigurationError);
   });
 
-  it('honours caller overrides', () => {
+  it('honors branded slippage and referral overrides', () => {
+    const defaults = configuredDefaults();
     const client = OseroClient.create({
-      defaultSlippageBps: 25,
-      confirmations: 3,
+      defaultSlippage: defaults.slippage,
+      referral: defaults.referral,
     });
-    expect(client.config.defaultSlippageBps).toBe(25);
-    expect(client.config.confirmations).toBe(3);
+
+    expect(client.defaults).toEqual(defaults);
   });
 
-  it('throws UnsupportedChainError when asked for an unknown chain', () => {
-    const client = OseroClient.create();
-    expect(() => client.getPublicClient(999_999_999)).toThrow(UnsupportedChainError);
+  it('returns UnsupportedChainError instead of throwing for unknown chains', () => {
+    const result = OseroClient.create().getPublicClient(999_999_999);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(UnsupportedChainError);
   });
 
-  it('caches public clients so repeat calls return the same instance', () => {
-    const client = OseroClient.create();
+  it('allows public RPC fallback only after explicit opt-in and caches each chain', () => {
+    const client = OseroClient.create({ allowPublicRpc: true });
     const first = client.getPublicClient(8453);
     const second = client.getPublicClient(8453);
-    expect(second).toBe(first);
+    const arbitrum = client.getPublicClient(42161);
+    if (first.isErr() || second.isErr() || arbitrum.isErr()) {
+      throw new Error('public client creation failed');
+    }
+
+    expect(second.value).toBe(first.value);
+    expect(first.value.chain?.id).toBe(8453);
+    expect(arbitrum.value.chain?.id).toBe(42161);
+    expect(arbitrum.value).not.toBe(first.value);
   });
 
-  it('builds distinct public clients per chain', () => {
-    const client = OseroClient.create();
-    const base = client.getPublicClient(8453);
-    const arb = client.getPublicClient(42161);
-    expect(base).not.toBe(arb);
-    expect(base.chain?.id).toBe(8453);
-    expect(arb.chain?.id).toBe(42161);
+  it('rejects malformed configuration at construction', () => {
+    expect(() => OseroClient.create(null as never)).toThrow(ConfigurationError);
+    expect(() => OseroClient.create({ allowPublicRpc: 'yes' as never })).toThrow(
+      ConfigurationError,
+    );
   });
 });

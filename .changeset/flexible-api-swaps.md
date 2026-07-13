@@ -2,6 +2,22 @@
 '@osero/client': major
 ---
 
+Replace the 0.x pair-specific preview/action surface with a single typed `prepareSwap` API. It
+returns a rich exact-input or exact-output quote tied to a flat, versioned, account/chain-bound
+`ExecutionPlan`. Amounts, slippage, referrals, approval policy, and unprotected-route consent are
+explicit domain inputs. Referral attribution and public RPC fallback default to disabled, while
+allowance-aware exact approvals are the default.
+
+Wallet adapters now preflight the complete plan before broadcasting, estimate fresh buffered gas,
+report truthful signing/broadcast/confirmation/revert stages, preserve submitted and replacement
+hashes, emit progress, and support receipt-verified confirmed-prefix recovery. Every SDK error has
+stable literal discriminants and contextual JSON output; operational calls keep failures in
+`Result`/`ResultAsync`.
+
+The public surface is intentionally split across the root, `/actions`, `/api`, `/contracts`,
+`/viem`, `/ethers`, and `/privy` entrypoints. Legacy local action functions, nested plan variants,
+and internal flattening/type-guard helpers are removed.
+
 Refactor the hosted Osero API client around API-authoritative asset refs. The SDK no longer ships a gating registry, so a deployed build keeps working as the hosted API adds and removes assets, chains, and bridge protocols.
 
 `getSwapQuote` accepts any asset ref — a canonical id (`'ethereum:usdc'`), an arbitrary string id, or a `{ chainId, address }` locator encoded on the wire as `'<chainId>:<0xaddress>'`. Known ids still autocomplete, but nothing is rejected locally on membership: the hosted API is the sole authority and answers unsupported refs with HTTP 400 and a stable `code` (for example `SWAP_ASSET_NOT_SUPPORTED`), surfaced as `ApiRequestError.code`. Responses decode structurally, so assets, chains, protocols, kinds, directions, and states unknown to this SDK release decode normally.

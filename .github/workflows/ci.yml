@@ -11,8 +11,13 @@ permissions:
   contents: read
 
 jobs:
-  main:
+  quality:
+    name: Quality (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 24]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -23,13 +28,91 @@ jobs:
         with:
           run_install: false
 
-      # Cache pnpm store
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build, typecheck, and test all projects
+        run: pnpm nx run-many -t build typecheck test
+
+      - name: Lint and format
+        if: matrix.node == 24
+        run: pnpm nx run-many -t format:check lint
+
+      - name: Enforce full-source coverage
+        if: matrix.node == 24
+        run: pnpm --filter @osero/client test:coverage
+
+      - name: Validate clean tarball and packed consumers
+        if: matrix.node == 24
+        run: pnpm package:validate
+
+  forks:
+    name: Fork ${{ matrix.chain_id }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chain_id: 1
+            block: 25525000
+          - chain_id: 10
+            block: 154184000
+          - chain_id: 130
+            block: 53219000
+          - chain_id: 8453
+            block: 48589000
+          - chain_id: 42161
+            block: 483508000
+    env:
+      SOURCE_RPC_URL: ${{ matrix.chain_id == 1 && secrets.ETHEREUM_RPC_URL || matrix.chain_id == 10 && secrets.OPTIMISM_RPC_URL || matrix.chain_id == 130 && secrets.UNICHAIN_RPC_URL || matrix.chain_id == 8453 && secrets.BASE_RPC_URL || secrets.ARBITRUM_RPC_URL }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: 'pnpm'
           cache-dependency-path: pnpm-lock.yaml
 
+      - uses: foundry-rs/foundry-toolchain@v1
+
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm nx run-many -t format:check lint build typecheck test
+      - name: Start deterministic fork and run contract gate
+        shell: bash
+        run: |
+          test -n "$SOURCE_RPC_URL"
+          anvil \
+            --host 127.0.0.1 \
+            --port 8545 \
+            --fork-url "$SOURCE_RPC_URL" \
+            --fork-block-number "${{ matrix.block }}" \
+            > /tmp/anvil.log 2>&1 &
+          ANVIL_PID=$!
+          trap 'kill "$ANVIL_PID"' EXIT
+          for attempt in $(seq 1 30); do
+            if cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$ANVIL_PID" 2>/dev/null; then
+              cat /tmp/anvil.log
+              exit 1
+            fi
+            sleep 1
+          done
+          RUN_FORK_TESTS=1 \
+          OSERO_FORK_CHAIN_ID="${{ matrix.chain_id }}" \
+          OSERO_FORK_RPC_URL=http://127.0.0.1:8545 \
+          pnpm --filter @osero/client test:fork

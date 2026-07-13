@@ -1,157 +1,114 @@
-# @osero/examples
+# @osero/client examples
 
-Runnable examples for `@osero/client`. Each file is a self-contained
-script that previews a flow, builds an `ExecutionPlan`, and either
-inspects it or broadcasts it through a wallet adapter.
+Runnable v1 examples for local swap preparation, hosted quotes, and viem/ethers/Privy execution.
 
-## Layout
+Examples use explicit transports and the plan-first API:
 
-```
-src/
-├── shared/            Helpers reused by every example
-│   ├── env.ts         Loads PRIVATE_KEY + RPC URLs from process.env
-│   └── format.ts      Pretty-printing + small logging helpers
-├── api/
-│   ├── quote-swap.ts         Request a hosted API swap quote without sending it.
-│   └── execute-quote-viem.ts Request a hosted API quote and send it with viem.
-├── dry-run/
-│   ├── inspect-plan.ts        Build a plan without sending it. No funds needed.
-│   └── susds-apy.ts           Read the live sUSDS APY on every supported chain.
-├── viem/
-│   ├── mint-usds.ts           USDC → USDS on Base (single approve + swap)
-│   ├── mint-susds-mainnet.ts  USDC → sUSDS on Ethereum mainnet (MultiStepExecution)
-│   ├── redeem-susds.ts        sUSDS → USDC on Base
-│   └── roundtrip-usdc-susds.ts  USDC → sUSDS → USDC, full round-trip on Base
-├── ethers/
-│   ├── mint-usds.ts           Same as viem/mint-usds.ts but through an ethers v6 Wallet
-│   └── roundtrip-usdc-susds.ts  Full round-trip on Base through ethers
-└── privy/
-    └── mint-usds.ts           Same as viem/mint-usds.ts but through a Privy server wallet
-```
+1. construct `TokenAmount`, `Slippage`, and optional `Referral` values;
+2. call `prepareSwap` once;
+3. inspect the rich quote and flat `ExecutionPlan.steps`;
+4. pass the plan to one executor adapter.
 
-## Running
+## Setup
 
 ```bash
-# From the repo root
 pnpm install
 cp examples/.env.example examples/.env
-# Edit examples/.env — at minimum set PRIVATE_KEY
+```
 
-# Dry-run (no funds, no tx): prints the ExecutionPlan the SDK would produce.
+Configure the RPC URL for every chain you use. Public fallback endpoints are not an appropriate production policy.
+
+Wallet examples require a disposable private key or Privy server wallet. They can broadcast real transactions and incur gas. Use small balances.
+
+## Read-only examples
+
+```bash
 pnpm --filter @osero/examples dry-run:inspect-plan
-
-# Dry-run (no funds, no tx): prints the live sUSDS APY on every supported chain.
 pnpm --filter @osero/examples dry-run:susds-apy
+OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-swap
+```
 
-# Osero API quote example (no private key, no tx): requires OSERO_API_KEY.
-pnpm --filter @osero/examples api:quote-swap
+### `dry-run:inspect-plan`
 
-# Osero API quote execution: requires OSERO_API_KEY + PRIVATE_KEY.
-pnpm --filter @osero/examples api:execute-quote-viem
+Prepares and prints:
 
-# viem examples
+- Base USDC → USDS exact input;
+- Base USDS → sUSDS direct vault route;
+- Base USDC → USDS exact output with an upward-rounded maximum input;
+- mainnet USDC → sUSDS multi-step execution.
+
+It does not create a wallet or broadcast.
+
+### `dry-run:susds-apy`
+
+Reads the configured SSR source on all supported chains and converts the RAY per-second value with stable log-domain compounding.
+
+### `api:quote-swap`
+
+Loads live hosted assets, requests a quote, verifies the hosted transaction/approval response, performs the allowance read through `publicClientProvider`, and prints the attached execution plan without sending it.
+
+## viem
+
+```bash
 pnpm --filter @osero/examples viem:mint-usds
 pnpm --filter @osero/examples viem:mint-susds-mainnet
 pnpm --filter @osero/examples viem:redeem-susds
 pnpm --filter @osero/examples viem:roundtrip
+```
 
-# ethers examples
+- `viem:mint-usds`: Base USDC → USDS.
+- `viem:mint-susds-mainnet`: mainnet USDC → sUSDS with explicit acknowledgement that the deployed route cannot enforce its quoted minimum in calldata.
+- `viem:redeem-susds`: prepare, inspect, and execute Base sUSDS → USDC.
+- `viem:roundtrip`: Base USDC → sUSDS → USDC, using the observed share balance for leg two.
+
+## ethers
+
+```bash
 pnpm --filter @osero/examples ethers:mint-usds
 pnpm --filter @osero/examples ethers:roundtrip
+```
 
-# Privy server-wallet example: requires the PRIVY_* env vars.
+The signer must already be attached to the plan chain. The adapter never hot-switches networks.
+
+## Privy
+
+```bash
 pnpm --filter @osero/examples privy:mint-usds
 ```
 
-> **The examples broadcast real transactions** against whichever RPC
-> you configure. Use a disposable wallet funded with small amounts,
-> and double-check the chain ID and amounts printed at the top of
-> each script before confirming.
+Required environment:
 
-The `api:quote-swap` example is read-only from your wallet's
-perspective. It calls the hosted Osero API for an example swap quote and prints
-transactions, but does not require `PRIVATE_KEY` and does not broadcast.
-The `api:execute-quote-viem` example uses the same hosted quote shape,
-then passes `quote.value.executionPlan` to `sendWith(wallet)` and
-broadcasts real transactions from `PRIVATE_KEY`.
+- `PRIVY_APP_ID`
+- `PRIVY_APP_SECRET`
+- `PRIVY_WALLET_ID`
+- `PRIVY_WALLET_ADDRESS`
+- optional `PRIVY_AUTHORIZATION_PRIVATE_KEY`
 
-## The mental model in ~40 lines
+The example passes explicit `chainId` and receipt transport. Idempotency keys are keyed by stable execution step ID and derived from the deterministic plan ID; persist equivalent keys in a real retry workflow.
 
-The SDK splits "what to do" from "how to sign":
+## Hosted execution
 
-1. **Action functions** (`mintUsds`, `mintSUsds`, `redeemUsds`,
-   `redeemSUsds`) live under `@osero/client/actions`. Matching
-   preview helpers (`previewMintUsds`, `previewMintSUsds`,
-   `previewRedeemUsds`, `previewRedeemSUsds`) return the quoted output
-   amount for the same exact-in amount on a chain. The action
-   functions themselves take an `OseroClient` + a request object and
-   return a `ResultAsync<ExecutionPlan, ActionError>`.
-2. **`ExecutionPlan`** is a wallet-agnostic description of the work.
-   It is a discriminated union of:
-   - `TransactionRequest` — a single ready-to-send tx
-   - `Erc20ApprovalRequired` — approvals then a main tx
-   - `MultiStepExecution` — multiple phases, each depending on the
-     previous one landing on-chain
-3. **Adapters** (`@osero/client/viem`, `@osero/client/ethers`,
-   `@osero/client/privy`) expose a `sendWith(...)` that walks the
-   plan, broadcasts every tx in order, and returns a
-   `TransactionResult` or a typed error.
-
-The roundtrip examples also show the read side of the SDK: they use
-preview helpers to print expected output amounts up front, then use
-`getTokenBalances` and `getSUsdsBalance` from `@osero/client` to track
-the balance delta across the mint and redeem legs without hand-writing
-ERC-20 `balanceOf` calls.
-
-The API example shows the hosted route-building side of the SDK:
-`OseroApiClient` lists supported API assets, requests an Ethereum USDT →
-Ethereum USDS quote, and prints the `ExecutionPlan` attached to the API
-response. That plan uses the same adapter-compatible structure as the
-local action builders.
-
-The API execution example takes that one step further:
-
-```ts
-const quote = await api.getSwapQuote(request);
-if (quote.isErr()) throw quote.error;
-
-const result = await sendWith(wallet, quote.value.executionPlan);
+```bash
+pnpm --filter @osero/examples api:execute-quote-viem
 ```
 
-If you prefer a single `ResultAsync` pipeline, map the API response to
-its plan before handing it to the wallet adapter:
+This requests a Base → Ethereum quote, prepares allowance-aware authorization, executes the source-chain plan, and shows how to hand the source hash to `waitForSwapCompletion`. It broadcasts real transactions.
+
+## Error handling
+
+Every operational call resolves to a typed result:
 
 ```ts
-const result = await api
-  .getSwapQuote(request)
-  .map((quote) => quote.executionPlan)
-  .andThen(sendWith(wallet));
-```
-
-That dichotomy is the whole SDK — everything else is routing per
-chain. On L2s the plans are `Erc20ApprovalRequired` (PSM3 swap). On
-Ethereum mainnet, minting or redeeming sUSDS becomes a
-`MultiStepExecution` because USDC has to go through two contracts
-(Sky's `UsdsPsmWrapper` and then the ERC-4626 sUSDS vault).
-
-## Why `.andThen(sendWith(wallet))`?
-
-Every action returns a `ResultAsync` from
-[neverthrow](https://github.com/supermacro/neverthrow). The curried
-form of `sendWith` is itself a function
-`(plan) => ResultAsync<TransactionResult, SendWithError>`, which
-means you can pipe it directly:
-
-```ts
-const result = await mintUsds(client, request).andThen(sendWith(wallet));
-
-if (result.isErr()) {
-  console.error(result.error); // typed union: ValidationError | SigningError | …
+const prepared = await prepareSwap(client, request);
+if (prepared.isErr()) {
+  console.error(prepared.error.code, prepared.error.toJSON());
   return;
 }
-console.log(result.value.txHash); // final tx hash
-console.log(result.value.operations); // e.g. ['APPROVE_ERC20', 'MINT_USDS']
+
+const executed = await sendWith(wallet, prepared.value.plan);
+if (executed.isErr()) {
+  console.error(executed.error.code, executed.error.execution);
+}
 ```
 
-If you prefer to inspect the plan before sending, call the adapter
-directly with the unwrapped plan (see `dry-run/inspect-plan.ts`).
+`error.code` is a stable literal discriminant. Confirmation failures include submitted hashes and the ordered confirmed prefix so a process can persist recovery state before retrying.
