@@ -920,19 +920,21 @@ function sleep(
   signal: AbortSignal | undefined,
 ): Promise<Result<void, CancelError>> {
   if (signal?.aborted) return Promise.resolve(err(CancelError.from(signal.reason)));
-  const { promise, resolve } = Promise.withResolvers<Result<void, CancelError>>();
-  const complete = () => {
-    signal?.removeEventListener('abort', abort);
-    resolve(ok(undefined));
-  };
-  const timer = setTimeout(complete, milliseconds);
-  const abort = () => {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', abort);
-    resolve(err(CancelError.from(signal?.reason)));
-  };
-  signal?.addEventListener('abort', abort, { once: true });
-  return promise;
+  return new Promise<Result<void, CancelError>>((resolve) => {
+    let settled = false;
+    const settle = (result: Result<void, CancelError>) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      resolve(result);
+    };
+    const timer = setTimeout(() => settle(ok(undefined)), milliseconds);
+    const abort = () => {
+      clearTimeout(timer);
+      settle(err(CancelError.from(signal?.reason)));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }
 
 type ApiResponseMetadata = {
