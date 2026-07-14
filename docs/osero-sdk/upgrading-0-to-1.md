@@ -326,7 +326,7 @@ The client verifies response sender, raw amount, source chain, transaction chain
 | `OSERO_API_INPUT_*`, `OSERO_API_OUTPUT_*`                               | `OseroApiAssetRef` plus live `getSupportedAssets()` |
 | `OSERO_API_SOURCE_CHAIN_IDS`                                            | positive `OseroApiChainId` decoded from the API     |
 | `OseroApiToSusdsQuoteRequest`, `OseroApiFromSusdsQuoteRequest`          | `OseroApiSwapQuoteRequest`                          |
-| direction-derived hosted mint/redeem operation                          | generic `SWAP`; label from `quote.pair`             |
+| direction-derived hosted mint/redeem operation                          | `SWAP_EXACT_IN`; label from `quote.pair`            |
 
 Responses decode unknown future asset, chain, protocol, direction, kind, and status vocabulary. Fields required for safe execution remain strict.
 
