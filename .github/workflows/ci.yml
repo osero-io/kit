@@ -36,6 +36,20 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Require an SDK changeset for release-branch pull requests
+        if: >-
+          matrix.node == 24 &&
+          startsWith(github.base_ref, 'release/') &&
+          !startsWith(github.head_ref, 'changeset-release/')
+        env:
+          CHANGESET_BASE_REF: ${{ github.base_ref }}
+        run: |
+          status_file="$RUNNER_TEMP/release-changeset-status.json"
+          pnpm changeset status \
+            --since="origin/${CHANGESET_BASE_REF}" \
+            --output="$status_file"
+          node scripts/check-release-changeset.mjs "$status_file"
+
       - name: Build, typecheck, and test all projects
         run: pnpm nx run-many -t build typecheck test
 
