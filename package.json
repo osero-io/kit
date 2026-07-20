@@ -5,8 +5,8 @@
   "license": "MIT",
   "scripts": {
     "changeset": "changeset",
-    "version-packages": "changeset version",
-    "version-packages:stable": "changeset pre exit && changeset version",
+    "version-packages": "changeset version && oxfmt .changeset packages",
+    "version-packages:stable": "changeset pre exit && changeset version && oxfmt .changeset packages",
     "release:prepare": "node scripts/prepare-changesets-release.mjs",
     "clean:client": "node scripts/clean-client-output.mjs",
     "api:report:check": "node scripts/check-client-api.mjs",
