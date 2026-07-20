@@ -1,5 +1,6 @@
-import { appendFile, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, readFile, readdir, writeFile } from 'node:fs/promises';
 
+const changesetDirectoryUrl = new URL('../.changeset/', import.meta.url);
 const preStateUrl = new URL('../.changeset/pre.json', import.meta.url);
 const promotionChangesetUrl = new URL(
   '../.changeset/promote-prerelease-to-stable.md',
@@ -60,6 +61,10 @@ if (!branch) {
 }
 
 const preState = await readPreState();
+const changesetFiles = await readdir(changesetDirectoryUrl);
+const hasPendingChangesets = changesetFiles.some(
+  (file) => file.endsWith('.md') && file !== 'README.md',
+);
 let releaseKind = 'stable';
 let versionScript = 'pnpm version-packages';
 
@@ -83,6 +88,9 @@ if (branch.startsWith('release/')) {
   throw new Error(`Unsupported release branch: ${branch}`);
 }
 
+const publishing = branch === 'main' ? !preState && !hasPendingChangesets : !hasPendingChangesets;
+
 await writeOutput('release_kind', releaseKind);
 await writeOutput('version_script', versionScript);
+await writeOutput('publishing', String(publishing));
 console.log(`Prepared ${releaseKind} release on ${branch}`);

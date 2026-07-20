@@ -18,6 +18,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-state:
+    name: Inspect release state
+    runs-on: ubuntu-latest
+    outputs:
+      publishing: ${{ steps.release-mode.outputs.publishing }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Inspect Changesets release mode
+        id: release-mode
+        run: node scripts/prepare-changesets-release.mjs
+
   quality:
     name: Release quality gates
     runs-on: ubuntu-latest
@@ -62,7 +74,10 @@ jobs:
 
   forks:
     name: Release fork ${{ matrix.chain_id }}
-    if: github.ref == 'refs/heads/main'
+    needs: release-state
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      needs.release-state.outputs.publishing == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -128,12 +143,17 @@ jobs:
 
   release:
     name: Version or publish
-    needs: [quality, compatibility, forks]
+    needs: [release-state, quality, compatibility, forks]
     if: >-
       always() &&
+      needs.release-state.result == 'success' &&
       needs.quality.result == 'success' &&
       needs.compatibility.result == 'success' &&
-      (github.ref != 'refs/heads/main' || needs.forks.result == 'success')
+      (
+        github.ref != 'refs/heads/main' ||
+        needs.release-state.outputs.publishing != 'true' ||
+        needs.forks.result == 'success'
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
