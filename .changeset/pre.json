@@ -5,5 +5,5 @@
     "@osero/examples": "0.0.0",
     "@osero/client": "0.8.0"
   },
-  "changesets": []
+  "changesets": ["flexible-api-swaps"]
 }
