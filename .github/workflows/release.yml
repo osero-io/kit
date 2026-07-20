@@ -61,6 +61,7 @@ jobs:
 
   forks:
     name: Release fork ${{ matrix.chain_id }}
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -127,6 +128,11 @@ jobs:
   release:
     name: Version or publish
     needs: [quality, compatibility, forks]
+    if: >-
+      always() &&
+      needs.quality.result == 'success' &&
+      needs.compatibility.result == 'success' &&
+      (github.ref != 'refs/heads/main' || needs.forks.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
