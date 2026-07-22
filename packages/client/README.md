@@ -273,7 +273,9 @@ Simulation reports the pinned block, native balance, relevant token balances/all
 
 ## Hosted API
 
-The hosted client requires both an API key and a public-client provider so it can make the API-provided authorization allowance-aware.
+The hosted client requests a provider-neutral quote. The API selects the Quote Provider; callers do not request Enso, LI.FI, or another provider directly. `quote.provider` identifies that selection, while Provider Details retain provider-specific attribution and diagnostics. Narrow known Provider Details with `isOseroApiEnsoProviderDetails` or `isOseroApiLifiProviderDetails`; preserve unknown providers and their opaque details.
+
+The client requires an API key and a public-client provider when an Approval Step may need an allowance read.
 
 ```ts
 import { parseSlippage } from '@osero/client';
@@ -305,9 +307,31 @@ const quote = await api.getSwapQuote({
 });
 ```
 
-Hosted decoding accepts future asset, protocol, and provider vocabulary, but executable fields and normalized Transfer Status states are strict. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
+Hosted decoding accepts future asset, protocol, and Quote Provider vocabulary, but executable fields and normalized Transfer Status states are strict. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
 
-Use `executeSwap(request, handler)` for the bounded automatic Hosted Swap Workflow. It submits at most one approval-only Wallet Execution Plan at a time, refreshes after confirmation or expiry, and then submits the final execution-only plan. The defaults allow three approval transactions and five total Quote Refreshes; `approvalTransactionLimit` and `quoteRefreshLimit` accept deliberate positive-integer overrides. `getSwapQuote` and `refreshSwapQuote` remain available when a frontend needs to prompt, persist, pause, or resume manually.
+Every normalized quote includes an API Execution Plan for inspection and diagnostics. Do not pass `workflow.quote.executionPlan` to a wallet adapter: its later actions become stale after any Approval Step. The discriminated Hosted Swap Workflow exposes only the currently safe Wallet Execution Plan:
+
+```ts
+const workflow = await api.getSwapQuote(request);
+if (workflow.isErr()) throw workflow.error;
+
+if (workflow.value.state === 'approval-required') {
+  const approval = await sendWith(walletClient)(workflow.value.walletExecutionPlan);
+  if (approval.isErr()) throw approval.error;
+
+  // Confirmation invalidates every remaining action in the API Execution Plan.
+  const refreshed = await api.refreshSwapQuote(workflow.value.quote.refreshContext);
+  if (refreshed.isErr()) throw refreshed.error;
+  // Inspect refreshed.value.state and repeat, or persist/pause here.
+} else {
+  const executed = await sendWith(walletClient)(workflow.value.walletExecutionPlan);
+  if (executed.isErr()) throw executed.error;
+}
+```
+
+This manual path is appropriate for frontends that need explicit prompts, persistence, pausing, or resume control. Quote Refresh is provider-locked: it returns a replacement from the selected Quote Provider rather than selecting a provider again. A Wallet Execution Plan is bound to `quote.expiresAt`; adapters reject it at or after expiry. Refresh an expired quote before submission.
+
+Use `executeSwap(request, handler)` for bounded high-level execution. It submits at most one approval-only Wallet Execution Plan at a time, performs Quote Refresh after confirmation or expiry, and then submits the fresh execution-only plan. The defaults allow three approval transactions and five total Quote Refreshes; `approvalTransactionLimit` and `quoteRefreshLimit` accept deliberate positive-integer overrides.
 
 ```ts
 const execution = await api.executeSwap(request, sendWith(walletClient), {
@@ -320,18 +344,24 @@ console.log(execution.value.approvalResults);
 console.log(execution.value.executionResult.txHash);
 ```
 
-Cross-chain completion polling is cancellable and bounded:
+High-level execution ends when the source-chain execution is confirmed. For a cross-chain quote, destination delivery is a separate Transfer Status lifecycle. Start it with the final quote, not an earlier invalidated quote:
 
 ```ts
-const completion = await api.waitForSwapCompletion(quote.value.quote, sourceTransactionHash, {
-  signal: abortController.signal,
-  pollingIntervalMs: 5_000,
-  timeoutMs: 30 * 60_000,
-  onStatus: (status) => console.log(status.state, status.providerDetails),
-});
+const completion = await api.waitForSwapCompletion(
+  execution.value.finalQuote,
+  execution.value.executionResult.txHash,
+  {
+    signal: abortController.signal,
+    pollingIntervalMs: 5_000,
+    timeoutMs: 30 * 60_000,
+    onStatus: (status) => console.log(status.state, status.providerDetails),
+  },
+);
 ```
 
-The quote helper sends the source transaction hash with the quote's complete Status Context. A normalized terminal `failed` state is a successful Transfer Status observation whose payload preserves the nullable error and Provider Details. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors.
+The helper sends the source transaction hash with the quote's complete Status Context: Quote Provider, source chain, destination chain, and bridge. It polls normalized `pending` and `unknown` states and stops on `completed` or `failed`. A terminal `failed` state is a successful Transfer Status observation whose payload preserves the nullable error and Provider Details. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors. Same-chain quotes have no Status Context and reject Transfer Status polling before an HTTP request.
+
+The v1 hosted response is an intentional breaking replacement. The client does not decode or promise compatibility with the removed legacy Enso-shaped quote or bridge-status response.
 
 ## Balances and APY
 

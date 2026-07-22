@@ -45,7 +45,7 @@ Reads the configured SSR source on all supported chains and converts the RAY per
 
 ### `api:quote-swap`
 
-Loads live hosted assets, requests a quote, verifies the hosted transaction/approval response, performs the allowance read through `publicClientProvider`, and prints the attached execution plan without sending it.
+Loads live hosted assets, requests a quote, verifies the hosted transaction/approval response, performs the allowance read through `publicClientProvider`, and prints the current Wallet Execution Plan without sending it. It demonstrates the manual Hosted Swap Workflow boundary: submit only an approval-only Wallet Execution Plan, wait for confirmation, discard the API Execution Plan, and perform Quote Refresh before preparing another wallet action.
 
 ## viem
 
@@ -92,7 +92,9 @@ The example passes explicit `chainId` and receipt transport. Idempotency keys ar
 pnpm --filter @osero/examples api:execute-quote-viem
 ```
 
-This requests a Base → Ethereum quote, prepares allowance-aware authorization, executes the source-chain plan, and shows how to hand the source hash to `waitForSwapCompletion` for normalized Transfer Status polling. It broadcasts real transactions.
+This uses the bounded high-level executor for a Base → Ethereum Hosted Swap Workflow. It submits one approval-only Wallet Execution Plan at a time, performs Quote Refresh, and finishes when the source-chain execution is confirmed. It then starts the separate normalized Transfer Status lifecycle with the source hash and final quote's Status Context. It broadcasts real transactions.
+
+Neither hosted example submits `quote.executionPlan`, the API Execution Plan, to a wallet adapter. The deterministic HTTP contract uses a fake wallet handler to exercise the same high-level workflow without broadcasting.
 
 ## Error handling
 

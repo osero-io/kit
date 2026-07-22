@@ -7,6 +7,7 @@ import { base } from 'viem/chains';
 
 import {
   isOseroApiEnsoProviderDetails,
+  isOseroApiLifiProviderDetails,
   oseroApiAmount,
   OseroApiClient,
   type OseroApiExecutionPlan,
@@ -104,6 +105,62 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
 
   it('keeps the API Execution Plan distinct from a Wallet Execution Plan', () => {
     expectTypeOf<OseroApiExecutionPlan>().not.toMatchTypeOf<ExecutionPlan>();
+  });
+
+  it('preserves an unknown Quote Provider and opaque Provider Details', async () => {
+    if (contractRoot === undefined) throw new Error('OSERO_API_CONTRACT_ROOT is required');
+    const fixture = JSON.parse(
+      readFileSync(
+        join(contractRoot, 'docs/client-migration/examples/enso-same-chain-quote.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const unknownProviderFixture = structuredClone(fixture);
+    unknownProviderFixture.provider = 'future-provider';
+    unknownProviderFixture.refreshContext = {
+      ...(unknownProviderFixture.refreshContext as Record<string, unknown>),
+      provider: 'future-provider',
+    };
+    unknownProviderFixture.providerDetails = {
+      provider: 'future-provider',
+      diagnostic: { route: 42 },
+    };
+    const fetch: OseroApiFetch = async () =>
+      new Response(JSON.stringify(unknownProviderFixture), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const amount = oseroApiAmount(1_000_000_000_000_000_000n);
+    const slippage = parseSlippage('5');
+    const attribution = referral(3001n);
+    if (amount.isErr() || slippage.isErr() || attribution.isErr()) {
+      throw new Error('contract request fixture is invalid');
+    }
+    const client = OseroApiClient.create({
+      apiKey: 'osero_contract-key',
+      baseUrl: 'https://contract.test/v1/',
+      fetch,
+    });
+
+    const result = await client.getSwapQuote({
+      fromAddress: '0x0000000000000000000000000000000000000001',
+      fromAssetId: 'ethereum:usds',
+      toAssetId: 'ethereum:susds',
+      amount: amount.value,
+      slippage: slippage.value,
+      referral: attribution.value,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isErr()) throw result.error;
+    expect(result.value.quote.provider).toBe('future-provider');
+    expect(result.value.quote.providerDetails).toEqual({
+      provider: 'future-provider',
+      diagnostic: { route: 42 },
+    });
+    expect(isOseroApiEnsoProviderDetails(result.value.quote.providerDetails)).toBe(false);
+    expect(isOseroApiLifiProviderDetails(result.value.quote.providerDetails)).toBe(false);
+    expect(result.value.state).toBe('ready-to-execute');
   });
 
   it('drives the authoritative LI.FI approval through provider-locked Quote Refresh', async () => {

@@ -64,12 +64,19 @@ async function main() {
   console.log(`  bridge: ${finalQuote.routeSummary.bridge ?? 'none'}`);
   console.log(`  approvals: ${approvalResults.length}`);
 
-  banner('Confirmed');
+  banner('Source-chain execution confirmed');
   console.log(describeResult(executionResult, chain.explorerUrl));
   if (finalQuote.statusContext !== null) {
-    console.log(
-      'Track completion with api.waitForSwapCompletion(finalQuote, executionResult.txHash).',
-    );
+    banner('Separate Transfer Status lifecycle');
+    const transfer = await api.waitForSwapCompletion(finalQuote, executionResult.txHash, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 30 * 60_000,
+      onStatus: (status) => console.log(`  ${status.state}`),
+    });
+    if (transfer.isErr()) throw transfer.error;
+    console.log(`  final state: ${transfer.value.state}`);
+    if (transfer.value.state === 'failed') console.log(`  error: ${transfer.value.error}`);
+    console.log(`  destination: ${transfer.value.destinationTransactionHash ?? 'not reported'}`);
   }
 }
 
