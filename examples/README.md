@@ -92,7 +92,7 @@ The example passes explicit `chainId` and receipt transport. Idempotency keys ar
 pnpm --filter @osero/examples api:execute-quote-viem
 ```
 
-This requests a Base → Ethereum quote, prepares allowance-aware authorization, executes the source-chain plan, and shows how to hand the source hash to `waitForSwapCompletion`. It broadcasts real transactions.
+This requests a Base → Ethereum quote, prepares allowance-aware authorization, executes the source-chain plan, and shows how to hand the source hash to `waitForSwapCompletion` for normalized Transfer Status polling. It broadcasts real transactions.
 
 ## Error handling
 

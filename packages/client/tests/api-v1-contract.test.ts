@@ -119,7 +119,26 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
       transaction: { calldata: string };
     };
     replacementExecution.transaction.calldata = '0x5678';
-    const responses = [fixture, replacement];
+    const sourceTransactionHash =
+      '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+    const destinationTransactionHash =
+      '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const;
+    const terminalStatus = {
+      provider: 'lifi',
+      state: 'completed',
+      sourceChainId: 8453,
+      destinationChainId: 1,
+      bridge: 'stargate',
+      sourceTransactionHash,
+      destinationTransactionHash,
+      error: null,
+      providerDetails: {
+        provider: 'lifi',
+        status: 'DONE',
+        substatus: 'COMPLETED',
+      },
+    };
+    const responses = [fixture, replacement, terminalStatus];
     const requests: { readonly url: string; readonly init?: RequestInit }[] = [];
     let responseIndex = 0;
     const fetch: OseroApiFetch = async (input, init) => {
@@ -207,6 +226,24 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
           'x-api-key': 'osero_contract-key',
         },
         body: JSON.stringify(initial.value.quote.refreshContext),
+      },
+    });
+
+    const status = await client.getSwapStatusForQuote(refreshed.value.quote, sourceTransactionHash);
+
+    expect(status.isOk()).toBe(true);
+    if (status.isErr()) throw status.error;
+    expect(status.value).toEqual(terminalStatus);
+    expect(requests[2]).toEqual({
+      url:
+        `https://contract.test/v1/swap/status/${sourceTransactionHash}` +
+        '?provider=lifi&sourceChainId=8453&destinationChainId=1&bridge=stargate',
+      init: {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          'x-api-key': 'osero_contract-key',
+        },
       },
     });
   });

@@ -161,7 +161,8 @@ OseroApiAssetId, OseroApiAssetLocator, OseroApiAssetRef, OseroApiClientError,
 OseroApiErrorCode, OseroApiKnownAsset, OseroApiKnownAssetId,
 OseroApiKnownBridgeProtocol, OseroApiKnownChain, OseroApiKnownChainId,
 OseroApiKnownChainKey, OseroApiSupportedAsset, OseroApiSwapQuoteRequest,
-OseroApiSwapQuoteResponse, OseroApiSwapStatusRequest
+OseroApiSwapQuoteResponse, OseroApiTransferStatus,
+OseroApiTransferStatusRequest
 
 // Errors
 ApiRequestError, CancelError, InsufficientBalanceError, OseroError,
@@ -353,7 +354,7 @@ Advisory snapshot rules:
   `matchOseroApiAsset(assets, ref)` to pre-flight a ref against live data.
 - Adding hosted assets is an API-repo change; the SDK optionally refreshes
   the `KNOWN_*` rows afterwards so autocomplete stays current.
-- Widened unions (`OseroApiAssetId`, `OseroApiBridgeState`,
+- Widened unions (`OseroApiAssetId`, `OseroApiQuoteProvider`,
   `OseroApiErrorCode`, …) admit values beyond the known literals — never
   `switch` on them without a `default` arm.
 - API quote execution transactions use operation `SWAP`; derive user-facing

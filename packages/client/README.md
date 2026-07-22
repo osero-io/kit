@@ -305,20 +305,20 @@ const quote = await api.getSwapQuote({
 });
 ```
 
-Hosted decoding accepts future asset/protocol/status vocabulary, but executable fields are strict. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing `executionPlan`.
+Hosted decoding accepts future asset, protocol, and provider vocabulary, but executable fields and normalized Transfer Status states are strict. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
 
 Cross-chain completion polling is cancellable and bounded:
 
 ```ts
-const completion = await api.waitForSwapCompletion(quote.value, sourceTransactionHash, {
+const completion = await api.waitForSwapCompletion(quote.value.quote, sourceTransactionHash, {
   signal: abortController.signal,
   pollingIntervalMs: 5_000,
   timeoutMs: 30 * 60_000,
-  onStatus: (status) => console.log(status.bridge.state),
+  onStatus: (status) => console.log(status.state, status.providerDetails),
 });
 ```
 
-A bridge-reported terminal `failed` state is a successful status observation whose payload contains the provider error. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors.
+The quote helper sends the source transaction hash with the quote's complete Status Context. A normalized terminal `failed` state is a successful Transfer Status observation whose payload preserves the nullable error and Provider Details. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors.
 
 ## Balances and APY
 

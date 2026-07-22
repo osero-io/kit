@@ -1,11 +1,19 @@
-import { encodeFunctionData, formatUnits, type Address, type Hex, type PublicClient } from 'viem';
+import { encodeFunctionData, formatUnits, type Address, type PublicClient } from 'viem';
 import { base } from 'viem/chains';
 import type { Mock } from 'vitest';
 
-import { mockFn } from './_testing.js';
+import {
+  ensoTransferStatusFixture,
+  lifiTransferStatusFixture,
+  mockFn,
+  TEST_DESTINATION_TRANSACTION_HASH as DESTINATION_HASH,
+  TEST_SOURCE_TRANSACTION_HASH as SOURCE_HASH,
+} from './_testing.js';
 import { erc20Abi } from './abis/erc20.js';
 import {
+  isOseroApiEnsoTransferStatusProviderDetails,
   isOseroApiLifiProviderDetails,
+  isOseroApiLifiTransferStatusProviderDetails,
   matchOseroApiAsset,
   oseroApiAmount,
   OseroApiClient,
@@ -13,7 +21,6 @@ import {
   type OseroApiInputAmount,
   type OseroApiSwapQuoteRequest,
   type OseroApiSwapQuoteResponse,
-  type OseroApiSwapStatusResponse,
 } from './api.js';
 import { parseSlippage, referral, UINT256_MAX } from './domain.js';
 import { ApiRequestError, ApiResponseError, ConfigurationError, TimeoutError } from './errors.js';
@@ -23,8 +30,6 @@ const OTHER_WALLET: Address = '0x9999999999999999999999999999999999999999';
 const OUTPUT_TOKEN: Address = '0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD';
 const SPENDER: Address = '0x2222222222222222222222222222222222222222';
 const OTHER_SPENDER: Address = '0x7777777777777777777777777777777777777777';
-const SOURCE_HASH: Hex = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const DESTINATION_HASH: Hex = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const API_KEY = 'osero_test-key';
 
 const ENSO_SAME_CHAIN_QUOTE = {
@@ -230,21 +235,6 @@ function changedQuote(path: readonly string[], value: unknown): unknown {
   if (field === undefined) throw new Error('test path must not be empty');
   record[field] = value;
   return quote;
-}
-
-function statusFixture(state: string, providerStatus = state): OseroApiSwapStatusResponse {
-  return {
-    bridge: {
-      protocol: 'future-bridge',
-      state,
-      providerStatus,
-      sourceChainId: 8453,
-      destinationChainId: state === 'completed' ? 1 : null,
-      sourceTxHash: SOURCE_HASH,
-      destinationTxHash: state === 'completed' ? DESTINATION_HASH : null,
-      error: state === 'failed' ? 'bridge failed' : null,
-    },
-  };
 }
 
 type FetchResponse = {
@@ -1035,11 +1025,38 @@ describe('hosted quote verification and preparation', () => {
   });
 });
 
-describe('bridge completion polling', () => {
-  it('polls unknown intermediate vocabulary, de-duplicates callbacks, and returns completion', async () => {
-    const pending = statusFixture('future-inflight', 'future-provider-state');
-    const completed = statusFixture('completed', 'delivered');
-    const transport = fetchSequence({ body: pending }, { body: pending }, { body: completed });
+describe('Transfer Status polling', () => {
+  it('serializes the complete Status Context and decodes normalized Transfer Status', async () => {
+    const fixture = lifiTransferStatusFixture();
+    const transport = fetchSequence({ body: fixture });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      baseUrl: 'https://contract.test/v1/',
+      fetch: transport.fetch,
+    });
+
+    const result = await client.getSwapStatus({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: { ...crossChainQuoteFixture().statusContext!, provider: 'lifi' },
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value).toEqual(fixture);
+    expect(transport.calls[0]?.url).toBe(
+      `https://contract.test/v1/swap/status/${SOURCE_HASH}?provider=lifi&sourceChainId=8453&destinationChainId=1&bridge=future-bridge`,
+    );
+  });
+
+  it('polls pending and unknown states, de-duplicates callbacks, and returns completion', async () => {
+    const initial = ensoTransferStatusFixture('pending', 'PENDING');
+    const pending = ensoTransferStatusFixture('unknown', 'future-provider-state');
+    const completed = ensoTransferStatusFixture('completed', 'delivered');
+    const transport = fetchSequence(
+      { body: initial },
+      { body: initial },
+      { body: pending },
+      { body: completed },
+    );
     const onStatus = mockFn();
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
 
@@ -1052,14 +1069,131 @@ describe('bridge completion polling', () => {
     expect(result.isOk()).toBe(true);
     if (result.isOk()) {
       expect(result.value.state).toBe('completed');
-      expect(result.value.destinationTxHash).toBe(DESTINATION_HASH);
+      expect(result.value.destinationTransactionHash).toBe(DESTINATION_HASH);
+      if (isOseroApiEnsoTransferStatusProviderDetails(result.value.providerDetails)) {
+        expect(result.value.providerDetails.status).toBe('delivered');
+      }
     }
-    expect(onStatus).toHaveBeenCalledTimes(2);
-    expect(transport.calls).toHaveLength(3);
+    expect(onStatus).toHaveBeenCalledTimes(3);
+    expect(transport.calls).toHaveLength(4);
   });
 
-  it('returns terminal bridge failure as a completed observation, not an SDK exception', async () => {
-    const transport = fetchSequence({ body: statusFixture('failed') });
+  it('preserves opaque Provider Details for an unknown Quote Provider', async () => {
+    const fixture = {
+      ...lifiTransferStatusFixture('unknown'),
+      provider: 'future-provider',
+      providerDetails: {
+        provider: 'future-provider',
+        lifecycle: { phase: 42 },
+      },
+    } as const;
+    const transport = fetchSequence({ body: fixture });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapStatus({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: {
+        provider: 'future-provider' as never,
+        sourceChainId: 8453,
+        destinationChainId: 1,
+        bridge: 'future-bridge',
+      },
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.providerDetails).toEqual(fixture.providerDetails);
+  });
+
+  it('narrows LI.FI Transfer Status Provider Details', async () => {
+    const transport = fetchSequence({ body: lifiTransferStatusFixture() });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapStatus({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: { ...crossChainQuoteFixture().statusContext!, provider: 'lifi' },
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (
+      result.isOk() &&
+      isOseroApiLifiTransferStatusProviderDetails(result.value.providerDetails)
+    ) {
+      expect(result.value.providerDetails.status).toBe('DONE');
+      expect(result.value.providerDetails.substatus).toBe('COMPLETED');
+    }
+  });
+
+  it.each([
+    ['provider', { provider: 'enso' }],
+    ['source chain', { sourceChainId: 10 }],
+    ['destination chain', { destinationChainId: 10 }],
+    ['bridge', { bridge: 'another-bridge' }],
+    ['source transaction hash', { sourceTransactionHash: DESTINATION_HASH }],
+    ['destination transaction hash', { destinationTransactionHash: '0x12' }],
+    ['normalized state', { state: 'future-state' }],
+    ['error', { error: '' }],
+    ['Provider Details provider', { providerDetails: { provider: 'enso', status: 'DONE' } }],
+    ['LI.FI Provider Details', { providerDetails: { provider: 'lifi', status: 'DONE' } }],
+  ])('rejects Transfer Status with inconsistent or malformed %s', async (_name, override) => {
+    const transport = fetchSequence({ body: { ...lifiTransferStatusFixture(), ...override } });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapStatus({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: { ...crossChainQuoteFixture().statusContext!, provider: 'lifi' },
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
+  });
+
+  it('rejects same-chain Status Context and same-chain quotes before HTTP', async () => {
+    const transport = fetchSequence({ body: lifiTransferStatusFixture() });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const sameChainContext = await client.getSwapStatus({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: {
+        provider: 'lifi',
+        sourceChainId: 8453,
+        destinationChainId: 8453,
+        bridge: 'future-bridge',
+      },
+    });
+    const oneShot = await client.getSwapStatusForQuote(ENSO_SAME_CHAIN_QUOTE, SOURCE_HASH);
+    const wait = await client.waitForSwapCompletion(ENSO_SAME_CHAIN_QUOTE, SOURCE_HASH);
+
+    expect(sameChainContext.isErr()).toBe(true);
+    expect(oneShot.isErr()).toBe(true);
+    expect(wait.isErr()).toBe(true);
+    expect(transport.calls).toHaveLength(0);
+  });
+
+  it('keeps status request failures and polling option failures typed', async () => {
+    const transport = fetchSequence({ body: { code: 'UPSTREAM_UNAVAILABLE' }, status: 503 });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const requestFailed = await client.getSwapStatusForQuote(crossChainQuoteFixture(), SOURCE_HASH);
+    const invalidInterval = await client.waitForSwapCompletion(
+      crossChainQuoteFixture(),
+      SOURCE_HASH,
+      { pollingIntervalMs: 0 },
+    );
+    const invalidTimeout = await client.waitForSwapCompletion(
+      crossChainQuoteFixture(),
+      SOURCE_HASH,
+      { timeoutMs: Number.POSITIVE_INFINITY },
+    );
+
+    expect(requestFailed.isErr()).toBe(true);
+    if (requestFailed.isErr()) expect(requestFailed.error).toBeInstanceOf(ApiRequestError);
+    expect(invalidInterval.isErr()).toBe(true);
+    expect(invalidTimeout.isErr()).toBe(true);
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  it('returns terminal transfer failure with diagnostics, not an SDK exception', async () => {
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('failed') });
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
 
     const result = await client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
@@ -1070,13 +1204,15 @@ describe('bridge completion polling', () => {
     expect(result.isOk()).toBe(true);
     if (result.isOk()) {
       expect(result.value.state).toBe('failed');
-      expect(result.value.status.bridge.error).toBe('bridge failed');
+      expect(result.value.error).toBe('bridge failed');
+      expect(result.value.sourceTransactionHash).toBe(SOURCE_HASH);
+      expect(result.value.providerDetails).toEqual({ provider: 'enso', status: 'failed' });
     }
   });
 
   it('supports cancellation during polling and bounded timeout', async () => {
     const controller = new AbortController();
-    const cancelTransport = fetchSequence({ body: statusFixture('pending') });
+    const cancelTransport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
     const cancelClient = OseroApiClient.create({ apiKey: API_KEY, fetch: cancelTransport.fetch });
     const onStatus = mockFn(() => controller.abort('stop'));
     const cancelled = await cancelClient.waitForSwapCompletion(
@@ -1090,7 +1226,7 @@ describe('bridge completion polling', () => {
       },
     );
 
-    const timeoutTransport = fetchSequence({ body: statusFixture('pending') });
+    const timeoutTransport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
     const timeoutClient = OseroApiClient.create({ apiKey: API_KEY, fetch: timeoutTransport.fetch });
     const timedOut = await timeoutClient.waitForSwapCompletion(
       crossChainQuoteFixture(),
@@ -1107,8 +1243,94 @@ describe('bridge completion polling', () => {
     if (timedOut.isErr()) expect(timedOut.error).toBeInstanceOf(TimeoutError);
   });
 
+  it('bounds and cancels a pending async status callback', async () => {
+    const controller = new AbortController();
+    let markCallbackStarted!: () => void;
+    const callbackStarted = new Promise<void>((resolve) => {
+      markCallbackStarted = resolve;
+    });
+    const cancelClient = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: fetchSequence({ body: ensoTransferStatusFixture('pending') }).fetch,
+    });
+    const pendingCancellation = cancelClient.waitForSwapCompletion(
+      crossChainQuoteFixture(),
+      SOURCE_HASH,
+      {
+        signal: controller.signal,
+        timeoutMs: 1_000,
+        onStatus: () => {
+          markCallbackStarted();
+          return new Promise<void>(() => {});
+        },
+      },
+    );
+    await callbackStarted;
+    controller.abort('stop callback');
+
+    const cancelled = await Promise.race([
+      pendingCancellation,
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 100)),
+    ]);
+    const timeoutClient = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: fetchSequence({ body: ensoTransferStatusFixture('pending') }).fetch,
+    });
+    const timedOut = await Promise.race([
+      timeoutClient.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+        timeoutMs: 5,
+        onStatus: () => new Promise<void>(() => {}),
+      }),
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 100)),
+    ]);
+
+    expect(cancelled).not.toBe('hung');
+    if (cancelled !== 'hung') {
+      expect(cancelled.isErr()).toBe(true);
+      if (cancelled.isErr()) expect(cancelled.error.code).toBe('CANCELLED');
+    }
+    expect(timedOut).not.toBe('hung');
+    if (timedOut !== 'hung') {
+      expect(timedOut.isErr()).toBe(true);
+      if (timedOut.isErr()) expect(timedOut.error).toBeInstanceOf(TimeoutError);
+    }
+  });
+
+  it('cancels status requests while an async API-key provider is pending', async () => {
+    const controller = new AbortController();
+    let markProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      markProviderStarted = resolve;
+    });
+    const transport = fetchSequence({ body: lifiTransferStatusFixture() });
+    const client = OseroApiClient.create({
+      apiKeyProvider: () => {
+        markProviderStarted();
+        return new Promise<string>(() => {});
+      },
+      fetch: transport.fetch,
+    });
+    const pending = client.getSwapStatusForQuote(crossChainQuoteFixture(), SOURCE_HASH, {
+      signal: controller.signal,
+    });
+    await providerStarted;
+    controller.abort('stop key lookup');
+
+    const result = await Promise.race([
+      pending,
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 100)),
+    ]);
+
+    expect(result).not.toBe('hung');
+    if (result !== 'hung') {
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) expect(result.error.code).toBe('CANCELLED');
+    }
+    expect(transport.calls).toHaveLength(0);
+  });
+
   it('returns callback failures and same-chain polling misuse as typed errors', async () => {
-    const transport = fetchSequence({ body: statusFixture('pending') });
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
     const callback = await client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
       pollingIntervalMs: 1,

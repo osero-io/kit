@@ -166,14 +166,7 @@ export type OseroApiChainId = OseroApiKnownChainId | (number & {});
 export type OseroApiChainKey = OseroApiKnownChainKey | (string & {});
 export type OseroApiBridgeProtocol = OseroApiKnownBridgeProtocol | (string & {});
 export type OseroApiAssetKind = 'counter' | 'vault' | (string & {});
-export type OseroApiBridgeState = 'pending' | 'completed' | 'failed' | 'unknown' | (string & {});
-export type OseroApiBridgeProviderStatus =
-  | 'pending'
-  | 'inflight'
-  | 'delivered'
-  | 'failed'
-  | 'unknown'
-  | (string & {});
+export type OseroApiTransferState = 'pending' | 'completed' | 'failed' | 'unknown';
 
 export type OseroApiUsdsAssetId = 'ethereum:usds';
 export type OseroApiSusdsAssetId = 'ethereum:susds';
@@ -236,10 +229,9 @@ export type OseroApiSwapQuoteRequest = {
   readonly referral?: Referral;
 };
 
-export type OseroApiSwapStatusRequest = {
-  readonly txHash: Hex;
-  readonly sourceChainId: OseroApiChainId;
-  readonly bridgeProtocol: OseroApiBridgeProtocol;
+export type OseroApiTransferStatusRequest = {
+  readonly sourceTransactionHash: Hex;
+  readonly statusContext: OseroApiStatusContext;
 };
 
 export type OseroApiRequestOptions = {
@@ -546,33 +538,54 @@ export type OseroApiApprovalRequired = {
 
 export type OseroApiHostedSwapWorkflow = OseroApiApprovalRequired | OseroApiReadyToExecute;
 
-export type OseroApiSwapStatusBridge = {
-  readonly protocol: OseroApiBridgeProtocol;
-  readonly state: OseroApiBridgeState;
-  readonly providerStatus: OseroApiBridgeProviderStatus;
+export type OseroApiEnsoTransferStatusProviderDetails = {
+  readonly provider: 'enso';
+  readonly status: string;
+};
+
+export type OseroApiLifiTransferStatusProviderDetails = {
+  readonly provider: 'lifi';
+  readonly status: string;
+  readonly substatus: string | null;
+};
+
+export type OseroApiUnknownTransferStatusProviderDetails = Readonly<Record<string, unknown>> & {
+  readonly provider: OseroApiUnknownQuoteProvider;
+};
+
+export type OseroApiTransferStatusProviderDetails =
+  | OseroApiEnsoTransferStatusProviderDetails
+  | OseroApiLifiTransferStatusProviderDetails
+  | OseroApiUnknownTransferStatusProviderDetails;
+
+export function isOseroApiEnsoTransferStatusProviderDetails(
+  details: OseroApiTransferStatusProviderDetails,
+): details is OseroApiEnsoTransferStatusProviderDetails {
+  return details.provider === 'enso';
+}
+
+export function isOseroApiLifiTransferStatusProviderDetails(
+  details: OseroApiTransferStatusProviderDetails,
+): details is OseroApiLifiTransferStatusProviderDetails {
+  return details.provider === 'lifi';
+}
+
+export type OseroApiTransferStatus = {
+  readonly provider: OseroApiQuoteProvider;
+  readonly state: OseroApiTransferState;
   readonly sourceChainId: OseroApiChainId;
-  readonly destinationChainId: OseroApiChainId | null;
-  readonly sourceTxHash: Hex;
-  readonly destinationTxHash: Hex | null;
+  readonly destinationChainId: OseroApiChainId;
+  readonly bridge: OseroApiBridgeProtocol;
+  readonly sourceTransactionHash: Hex;
+  readonly destinationTransactionHash: Hex | null;
   readonly error: string | null;
-};
-
-export type OseroApiSwapStatusResponse = {
-  readonly bridge: OseroApiSwapStatusBridge;
-};
-
-export type OseroApiSwapCompletion = {
-  readonly state: OseroApiBridgeState;
-  readonly providerStatus: OseroApiBridgeProviderStatus;
-  readonly sourceTxHash: Hex;
-  readonly destinationTxHash: Hex | null;
-  readonly status: OseroApiSwapStatusResponse;
+  readonly providerDetails: OseroApiTransferStatusProviderDetails;
 };
 
 export type WaitForSwapCompletionOptions = OseroApiRequestOptions & {
   readonly pollingIntervalMs?: number;
   readonly timeoutMs?: number;
-  readonly onStatus?: (status: OseroApiSwapStatusResponse) => void | Promise<void>;
+  readonly onStatus?: (status: OseroApiTransferStatus) => void | Promise<void>;
 };
 
 type OseroApiSwapQuoteBody = {
@@ -707,16 +720,16 @@ export class OseroApiClient {
   }
 
   getSwapStatus(
-    request: OseroApiSwapStatusRequest,
+    request: OseroApiTransferStatusRequest,
     options?: OseroApiRequestOptions,
-  ): ResultAsync<OseroApiSwapStatusResponse, OseroApiClientError> {
+  ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
     const query = encodeSwapStatusRequest(request);
     if (query.isErr()) return errAsync(query.error);
     return this.requestJson({
       method: 'GET',
       path: query.value,
       options,
-      decoder: decodeSwapStatusResponse,
+      decoder: (value) => decodeTransferStatus(value, request),
     });
   }
 
@@ -724,7 +737,7 @@ export class OseroApiClient {
     quote: OseroApiSwapQuoteResponse,
     txHash: Hex,
     options?: OseroApiRequestOptions,
-  ): ResultAsync<OseroApiSwapStatusResponse, OseroApiClientError> {
+  ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
     if (quote.statusContext === null) {
       return errAsync(
         ValidationError.forField(
@@ -735,9 +748,8 @@ export class OseroApiClient {
     }
     return this.getSwapStatus(
       {
-        txHash,
-        sourceChainId: quote.statusContext.sourceChainId,
-        bridgeProtocol: quote.statusContext.bridge,
+        sourceTransactionHash: txHash,
+        statusContext: quote.statusContext,
       },
       options,
     );
@@ -747,7 +759,7 @@ export class OseroApiClient {
     quote: OseroApiSwapQuoteResponse,
     txHash: Hex,
     options: WaitForSwapCompletionOptions = {},
-  ): ResultAsync<OseroApiSwapCompletion, OseroApiClientError> {
+  ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
     if (quote.statusContext === null) {
       return errAsync(
         ValidationError.forField('quote', 'waitForSwapCompletion requires a cross-chain quote'),
@@ -776,7 +788,7 @@ export class OseroApiClient {
       return errAsync(ValidationError.forField('onStatus', 'onStatus must be a function'));
     }
 
-    const wait = async (): Promise<Result<OseroApiSwapCompletion, OseroApiClientError>> => {
+    const wait = async (): Promise<Result<OseroApiTransferStatus, OseroApiClientError>> => {
       const startedAt = Date.now();
       let previousStatus: string | undefined;
       // oxlint-disable no-await-in-loop -- Polls and callbacks are intentionally serialized.
@@ -788,52 +800,49 @@ export class OseroApiClient {
         const remaining = timeoutMs - elapsed;
         if (remaining <= 0) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
 
-        const controller = new AbortController();
-        let requestTimedOut = false;
-        const timeout = setTimeout(() => {
-          requestTimedOut = true;
-          controller.abort(new TimeoutError('waitForSwapCompletion', timeoutMs));
-        }, remaining);
-        const abort = () => controller.abort(options.signal?.reason);
-        options.signal?.addEventListener('abort', abort, { once: true });
-        const status = await this.getSwapStatus(
-          {
-            txHash,
-            sourceChainId: statusRequest.sourceChainId,
-            bridgeProtocol: statusRequest.bridge,
-          },
-          {
-            ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
-            signal: controller.signal,
-          },
+        const status = await awaitPollingOperation(
+          (signal) =>
+            this.getSwapStatus(
+              {
+                sourceTransactionHash: txHash,
+                statusContext: statusRequest,
+              },
+              {
+                ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+                signal,
+              },
+            ),
+          remaining,
+          timeoutMs,
+          options.signal,
         );
-        clearTimeout(timeout);
-        options.signal?.removeEventListener('abort', abort);
-        if (status.isErr()) {
-          if (requestTimedOut) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
-          return err(status.error);
-        }
+        if (status.isErr()) return err(status.error);
 
         const fingerprint = JSON.stringify(status.value);
         if (fingerprint !== previousStatus) {
           previousStatus = fingerprint;
           if (options.onStatus !== undefined) {
-            try {
-              await options.onStatus(status.value);
-            } catch (cause) {
-              return err(new ConfigurationError('onStatus callback failed', 'onStatus', { cause }));
+            const callbackRemaining = timeoutMs - (Date.now() - startedAt);
+            if (callbackRemaining <= 0) {
+              return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
             }
+            const callback = await awaitPollingOperation(
+              () =>
+                ResultAsync.fromPromise(
+                  Promise.resolve().then(() => options.onStatus!(status.value)),
+                  (cause) =>
+                    new ConfigurationError('onStatus callback failed', 'onStatus', { cause }),
+                ),
+              callbackRemaining,
+              timeoutMs,
+              options.signal,
+            );
+            if (callback.isErr()) return err(callback.error);
           }
         }
 
-        if (status.value.bridge.state === 'completed' || status.value.bridge.state === 'failed') {
-          return ok({
-            state: status.value.bridge.state,
-            providerStatus: status.value.bridge.providerStatus,
-            sourceTxHash: status.value.bridge.sourceTxHash,
-            destinationTxHash: status.value.bridge.destinationTxHash,
-            status: status.value,
-          });
+        if (status.value.state === 'completed' || status.value.state === 'failed') {
+          return ok(status.value);
         }
 
         const remainingBeforeSleep = timeoutMs - (Date.now() - startedAt);
@@ -1019,9 +1028,12 @@ export class OseroApiClient {
       if (options?.signal?.aborted) return err(CancelError.from(options.signal.reason));
       let apiKeyValue: string | undefined = options?.apiKey;
       if (apiKeyValue === undefined && this.#apiKeyProvider !== undefined) {
-        const provided = await ResultAsync.fromPromise(
-          Promise.resolve().then(() => this.#apiKeyProvider!()),
-          (cause) => new ConfigurationError('apiKeyProvider failed', 'apiKeyProvider', { cause }),
+        const provided = await awaitResultWithCancellation(
+          ResultAsync.fromPromise(
+            Promise.resolve().then(() => this.#apiKeyProvider!()),
+            (cause) => new ConfigurationError('apiKeyProvider failed', 'apiKeyProvider', { cause }),
+          ),
+          options?.signal,
         );
         if (provided.isErr()) return err(provided.error);
         apiKeyValue = provided.value;
@@ -1120,6 +1132,30 @@ function awaitResultWithCancellation<Value, ErrorType>(
     signal.addEventListener('abort', abort, { once: true });
     Promise.resolve(result).then(settle);
   });
+}
+
+async function awaitPollingOperation<Value, ErrorType>(
+  operation: (signal: AbortSignal) => PromiseLike<Result<Value, ErrorType>>,
+  remainingMs: number,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<Result<Value, ErrorType | CancelError | TimeoutError>> {
+  if (signal?.aborted) return err(CancelError.from(signal.reason));
+  if (remainingMs <= 0) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new TimeoutError('waitForSwapCompletion', timeoutMs));
+  }, remainingMs);
+  const abort = () => controller.abort(signal?.reason);
+  signal?.addEventListener('abort', abort, { once: true });
+  const result = await awaitResultWithCancellation(operation(controller.signal), controller.signal);
+  clearTimeout(timeout);
+  signal?.removeEventListener('abort', abort);
+
+  return timedOut ? err(new TimeoutError('waitForSwapCompletion', timeoutMs)) : result;
 }
 
 function sleep(
@@ -1317,29 +1353,62 @@ function encodeAssetRef(ref: OseroApiAssetRef, field: string): Result<string, Va
 }
 
 function encodeSwapStatusRequest(
-  request: OseroApiSwapStatusRequest,
+  request: OseroApiTransferStatusRequest,
 ): Result<string, ValidationError> {
   if (typeof request !== 'object' || request === null) {
     return err(ValidationError.forField('request', 'status request must be an object'));
   }
-  if (!isTransactionHash(request.txHash)) {
-    return err(ValidationError.forField('txHash', 'txHash must be a 32-byte hex string'));
-  }
-  if (!Number.isSafeInteger(request.sourceChainId) || request.sourceChainId <= 0) {
+  if (!isTransactionHash(request.sourceTransactionHash)) {
     return err(
-      ValidationError.forField('sourceChainId', 'sourceChainId must be a positive integer'),
+      ValidationError.forField(
+        'sourceTransactionHash',
+        'sourceTransactionHash must be a 32-byte hex string',
+      ),
     );
   }
-  if (typeof request.bridgeProtocol !== 'string' || request.bridgeProtocol.trim().length === 0) {
+  if (typeof request.statusContext !== 'object' || request.statusContext === null) {
     return err(
-      ValidationError.forField('bridgeProtocol', 'bridgeProtocol must be a non-empty string'),
+      ValidationError.forField('statusContext', 'statusContext must be a complete Status Context'),
     );
+  }
+  const { bridge, destinationChainId, provider, sourceChainId } = request.statusContext;
+  if (typeof provider !== 'string' || provider.trim().length === 0) {
+    return err(ValidationError.forField('statusContext.provider', 'provider must be non-empty'));
+  }
+  if (!Number.isSafeInteger(sourceChainId) || sourceChainId <= 0) {
+    return err(
+      ValidationError.forField(
+        'statusContext.sourceChainId',
+        'sourceChainId must be a positive integer',
+      ),
+    );
+  }
+  if (!Number.isSafeInteger(destinationChainId) || destinationChainId <= 0) {
+    return err(
+      ValidationError.forField(
+        'statusContext.destinationChainId',
+        'destinationChainId must be a positive integer',
+      ),
+    );
+  }
+  if (sourceChainId === destinationChainId) {
+    return err(
+      ValidationError.forField(
+        'statusContext.destinationChainId',
+        'Status Context must describe distinct source and destination chains',
+      ),
+    );
+  }
+  if (typeof bridge !== 'string' || bridge.trim().length === 0) {
+    return err(ValidationError.forField('statusContext.bridge', 'bridge must be non-empty'));
   }
   const search = new URLSearchParams({
-    sourceChainId: String(request.sourceChainId),
-    bridgeProtocol: request.bridgeProtocol,
+    provider,
+    sourceChainId: String(sourceChainId),
+    destinationChainId: String(destinationChainId),
+    bridge,
   });
-  return ok(`swap/status/${request.txHash}?${search.toString()}`);
+  return ok(`swap/status/${request.sourceTransactionHash}?${search.toString()}`);
 }
 
 function parseJsonBody(text: string): Result<unknown, UnexpectedError> {
@@ -1409,12 +1478,33 @@ function decodeSwapQuoteResponse(
   });
 }
 
-function decodeSwapStatusResponse(
+function decodeTransferStatus(
   value: unknown,
-): Result<OseroApiSwapStatusResponse, UnexpectedError> {
-  return decode(value, (root) => ({
-    bridge: decodeSwapStatusBridge(requiredField(root, 'bridge', '$.bridge'), '$.bridge'),
-  }));
+  request: OseroApiTransferStatusRequest,
+): Result<OseroApiTransferStatus, UnexpectedError> {
+  return decode(value, (root) => {
+    const status: OseroApiTransferStatus = {
+      provider: decodeQuoteProvider(requiredField(root, 'provider', '$.provider'), '$.provider'),
+      state: decodeTransferState(requiredField(root, 'state', '$.state'), '$.state'),
+      sourceChainId: positiveChainIdField(root, 'sourceChainId', '$.sourceChainId'),
+      destinationChainId: positiveChainIdField(root, 'destinationChainId', '$.destinationChainId'),
+      bridge: nonEmptyStringField(root, 'bridge', '$.bridge'),
+      sourceTransactionHash: hashField(root, 'sourceTransactionHash', '$.sourceTransactionHash'),
+      destinationTransactionHash: nullableField(
+        root,
+        'destinationTransactionHash',
+        '$.destinationTransactionHash',
+        decodeHash,
+      ),
+      error: nullableField(root, 'error', '$.error', decodeNonEmptyString),
+      providerDetails: decodeTransferStatusProviderDetails(
+        requiredField(root, 'providerDetails', '$.providerDetails'),
+        '$.providerDetails',
+      ),
+    };
+    assertTransferStatusInvariants(status, request);
+    return status;
+  });
 }
 
 function assertSwapQuoteInvariants(
@@ -1991,28 +2081,60 @@ function decodeLifiIncludedStep(value: unknown, path: string): OseroApiLifiInclu
   };
 }
 
-function decodeSwapStatusBridge(value: unknown, path: string): OseroApiSwapStatusBridge {
+function decodeTransferState(value: unknown, path: string): OseroApiTransferState {
+  const state = decodeNonEmptyString(value, path);
+  if (state !== 'pending' && state !== 'completed' && state !== 'failed' && state !== 'unknown') {
+    throw new DecodeError(`${path} must be pending, completed, failed, or unknown`);
+  }
+  return state;
+}
+
+function decodeTransferStatusProviderDetails(
+  value: unknown,
+  path: string,
+): OseroApiTransferStatusProviderDetails {
   const record = asRecord(value, path);
-  return {
-    protocol: nonEmptyStringField(record, 'protocol', `${path}.protocol`),
-    state: nonEmptyStringField(record, 'state', `${path}.state`),
-    providerStatus: nonEmptyStringField(record, 'providerStatus', `${path}.providerStatus`),
-    sourceChainId: positiveChainIdField(record, 'sourceChainId', `${path}.sourceChainId`),
-    destinationChainId: nullableField(
-      record,
-      'destinationChainId',
-      `${path}.destinationChainId`,
-      decodePositiveChainId,
-    ),
-    sourceTxHash: hashField(record, 'sourceTxHash', `${path}.sourceTxHash`),
-    destinationTxHash: nullableField(
-      record,
-      'destinationTxHash',
-      `${path}.destinationTxHash`,
-      decodeHash,
-    ),
-    error: nullableField(record, 'error', `${path}.error`, decodeString),
-  };
+  const provider = nonEmptyStringField(record, 'provider', `${path}.provider`);
+  if (provider === 'enso') {
+    return {
+      provider,
+      status: nonEmptyStringField(record, 'status', `${path}.status`),
+    };
+  }
+  if (provider === 'lifi') {
+    return {
+      provider,
+      status: nonEmptyStringField(record, 'status', `${path}.status`),
+      substatus: nullableField(record, 'substatus', `${path}.substatus`, decodeNonEmptyString),
+    };
+  }
+  return { ...record, provider: provider as OseroApiUnknownQuoteProvider };
+}
+
+function assertTransferStatusInvariants(
+  status: OseroApiTransferStatus,
+  request: OseroApiTransferStatusRequest,
+): void {
+  const context = request.statusContext;
+  if (status.provider !== context.provider) {
+    throw new DecodeError('$.provider must match Status Context');
+  }
+  if (status.providerDetails.provider !== status.provider) {
+    throw new DecodeError('$.providerDetails.provider must match $.provider');
+  }
+  if (
+    status.sourceChainId !== context.sourceChainId ||
+    status.destinationChainId !== context.destinationChainId ||
+    status.bridge !== context.bridge
+  ) {
+    throw new DecodeError('Transfer Status route must match Status Context');
+  }
+  if (status.sourceChainId === status.destinationChainId) {
+    throw new DecodeError('Transfer Status must describe a cross-chain transfer');
+  }
+  if (status.sourceTransactionHash.toLowerCase() !== request.sourceTransactionHash.toLowerCase()) {
+    throw new DecodeError('$.sourceTransactionHash must match the requested source transaction');
+  }
 }
 
 function requiredField(record: Record<string, unknown>, field: string, path: string): unknown {

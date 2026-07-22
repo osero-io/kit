@@ -3,9 +3,11 @@ import type {
   Asset,
   CreateQuoteRequest,
   EnsoProviderDetails,
+  EnsoTransferStatusProviderDetails,
   ExecutionPlan as ApiExecutionPlan,
   ExecutionStep,
   LifiProviderDetails,
+  LifiTransferStatusProviderDetails,
   Pair,
   PreparedTransaction,
   Quote,
@@ -14,14 +16,18 @@ import type {
   RouteSummary,
   StatusContext,
   SwapQuote,
+  TransferStatus,
+  TransferStatusQuery,
 } from 'osero-api-v1-contract';
 
 import type {
   OseroApiApprovalStep,
   OseroApiEnsoProviderDetails,
+  OseroApiEnsoTransferStatusProviderDetails,
   OseroApiExecutionPlan,
   OseroApiExecutionStep,
   OseroApiLifiProviderDetails,
+  OseroApiLifiTransferStatusProviderDetails,
   OseroApiPreparedTransaction,
   OseroApiRefreshContext,
   OseroApiRouteSummary,
@@ -31,6 +37,8 @@ import type {
   OseroApiSwapQuoteEconomics,
   OseroApiSwapQuoteRequest,
   OseroApiSwapQuoteResponse,
+  OseroApiTransferStatus,
+  OseroApiTransferStatusRequest,
 } from '../packages/client/src/api.js';
 import type { ExecutionPlan as WalletExecutionPlan } from '../packages/client/src/index.js';
 
@@ -62,6 +70,15 @@ type KnownQuote<Provider extends 'enso' | 'lifi'> = Omit<
     | (Omit<OseroApiStatusContext, 'provider'> & { readonly provider: Provider })
     | null;
 };
+type KnownTransferStatus<Provider extends 'enso' | 'lifi'> = Omit<
+  OseroApiTransferStatus,
+  'provider' | 'providerDetails'
+> & {
+  readonly provider: Provider;
+  readonly providerDetails: Provider extends 'enso'
+    ? OseroApiEnsoTransferStatusProviderDetails
+    : OseroApiLifiTransferStatusProviderDetails;
+};
 
 export type ApiV1ContractAssertions = [
   Assert<
@@ -87,6 +104,9 @@ export type ApiV1ContractAssertions = [
   Assert<KeysMatch<OseroApiRefreshContext, RefreshContext>>,
   Assert<KeysMatch<OseroApiRefreshContext, RefreshQuoteRequest>>,
   Assert<KeysMatch<OseroApiStatusContext, StatusContext>>,
+  Assert<KeysMatch<OseroApiStatusContext, TransferStatusQuery>>,
+  Assert<Equal<keyof OseroApiTransferStatusRequest, 'sourceTransactionHash' | 'statusContext'>>,
+  Assert<KeysMatch<OseroApiTransferStatus, TransferStatus>>,
   Assert<KeysMatch<OseroApiSwapAsset, Asset>>,
   Assert<OseroApiSwapAsset extends DeepReadonly<Asset> ? true : false>,
   Assert<OseroApiSwapPair extends DeepReadonly<Pair> ? true : false>,
@@ -98,7 +118,19 @@ export type ApiV1ContractAssertions = [
   Assert<OseroApiPreparedTransaction extends DeepReadonly<PreparedTransaction> ? true : false>,
   Assert<OseroApiEnsoProviderDetails extends DeepReadonly<EnsoProviderDetails> ? true : false>,
   Assert<OseroApiLifiProviderDetails extends DeepReadonly<LifiProviderDetails> ? true : false>,
+  Assert<
+    OseroApiEnsoTransferStatusProviderDetails extends DeepReadonly<EnsoTransferStatusProviderDetails>
+      ? true
+      : false
+  >,
+  Assert<
+    OseroApiLifiTransferStatusProviderDetails extends DeepReadonly<LifiTransferStatusProviderDetails>
+      ? true
+      : false
+  >,
   Assert<KnownQuote<'enso'> extends DeepReadonly<SwapQuote> ? true : false>,
   Assert<KnownQuote<'lifi'> extends DeepReadonly<SwapQuote> ? true : false>,
+  Assert<KnownTransferStatus<'enso'> extends DeepReadonly<TransferStatus> ? true : false>,
+  Assert<KnownTransferStatus<'lifi'> extends DeepReadonly<TransferStatus> ? true : false>,
   Assert<OseroApiExecutionPlan extends WalletExecutionPlan ? false : true>,
 ];

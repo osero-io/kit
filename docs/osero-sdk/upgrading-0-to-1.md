@@ -328,11 +328,11 @@ The client verifies response sender, raw amount, source chain, transaction chain
 | `OseroApiToSusdsQuoteRequest`, `OseroApiFromSusdsQuoteRequest`          | `OseroApiSwapQuoteRequest`                          |
 | direction-derived hosted mint/redeem operation                          | `SWAP_EXACT_IN`; label from `quote.pair`            |
 
-Responses decode unknown future asset, chain, protocol, direction, kind, and status vocabulary. Fields required for safe execution remain strict.
+Responses decode unknown future asset, chain, protocol, and Quote Provider vocabulary. Fields required for safe execution and normalized Transfer Status states remain strict.
 
 ### Completion polling
 
-`waitForSwapCompletion` now requires a finite timeout policy, supports `AbortSignal`, and awaits async status callbacks. A provider bridge failure is returned as a terminal status payload, while caller cancellation, timeout, transport failure, callback failure, and malformed responses remain distinct errors.
+Status requests pair the source transaction hash with the quote's complete Status Context and serialize its provider, source chain, destination chain, and bridge unchanged. `waitForSwapCompletion` requires a finite timeout policy, supports `AbortSignal`, and awaits async status callbacks. It polls normalized `pending` and `unknown` states; `completed` and `failed` are returned as successful terminal Transfer Status observations. Caller cancellation, timeout, transport failure, callback failure, and malformed responses remain distinct errors.
 
 ## Reads, simulation, and APY
 

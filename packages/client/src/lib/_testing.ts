@@ -2,6 +2,7 @@ import { getAddress } from 'viem';
 import type { Mock } from 'vitest';
 import { vi } from 'vitest';
 
+import type { OseroApiTransferState, OseroApiTransferStatus } from './api.js';
 import { CHAINS, type OseroChainId } from './chains.js';
 import { OseroClient, type OseroPublicClient } from './OseroClient.js';
 import { createExecutionPlan, createTransactionRequest } from './plan.js';
@@ -26,6 +27,51 @@ export function mockFn<T extends TestProcedure>(implementation: T): Mock<T>;
 export function mockFn<T extends TestProcedure>(implementation?: T): Mock | Mock<T> {
   if (implementation === undefined) return vi.fn<() => void>();
   return vi.fn<T>(implementation);
+}
+
+export const TEST_SOURCE_TRANSACTION_HASH =
+  '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+export const TEST_DESTINATION_TRANSACTION_HASH =
+  '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const;
+
+function transferStatusFixtureBase(state: OseroApiTransferState) {
+  return {
+    state,
+    sourceChainId: 8453,
+    destinationChainId: 1,
+    bridge: 'future-bridge',
+    sourceTransactionHash: TEST_SOURCE_TRANSACTION_HASH,
+    destinationTransactionHash: state === 'completed' ? TEST_DESTINATION_TRANSACTION_HASH : null,
+    error: state === 'failed' ? 'bridge failed' : null,
+  } as const;
+}
+
+export function ensoTransferStatusFixture(
+  state: OseroApiTransferState,
+  providerStatus: string = state,
+): OseroApiTransferStatus {
+  return {
+    ...transferStatusFixtureBase(state),
+    provider: 'enso',
+    providerDetails: {
+      provider: 'enso',
+      status: providerStatus,
+    },
+  };
+}
+
+export function lifiTransferStatusFixture(
+  state: OseroApiTransferState = 'completed',
+): OseroApiTransferStatus {
+  return {
+    ...transferStatusFixtureBase(state),
+    provider: 'lifi',
+    providerDetails: {
+      provider: 'lifi',
+      status: state === 'completed' ? 'DONE' : 'PENDING',
+      substatus: state === 'completed' ? 'COMPLETED' : null,
+    },
+  };
 }
 
 export function createMockClient(
