@@ -6,8 +6,13 @@ import type { OseroApiTransferState, OseroApiTransferStatus } from './api.js';
 import { CHAINS, type OseroChainId } from './chains.js';
 import { OseroClient, type OseroPublicClient } from './OseroClient.js';
 import { createExecutionPlan, createTransactionRequest } from './plan.js';
-import type { Result } from './result.js';
-import type { ExecutionPlan, SendWithError, TransactionResult } from './types.js';
+import { okAsync, type Result } from './result.js';
+import type {
+  ExecutionPlan,
+  ExecutionPlanHandler,
+  SendWithError,
+  TransactionResult,
+} from './types.js';
 
 export type MockPublicClient = {
   readonly chain: (typeof CHAINS)[OseroChainId]['viemChain'];
@@ -33,6 +38,49 @@ export const TEST_SOURCE_TRANSACTION_HASH =
   '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
 export const TEST_DESTINATION_TRANSACTION_HASH =
   '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const;
+
+export function singleTransactionResultForPlan(
+  plan: ExecutionPlan,
+  hash: `0x${string}`,
+): TransactionResult {
+  const step = plan.steps[0]!;
+  return {
+    planId: plan.id,
+    transactions: [
+      {
+        planId: plan.id,
+        stepId: step.id,
+        stepIndex: 0,
+        operation: step.operation,
+        submittedHash: hash,
+        hash,
+        confirmation: {
+          status: 'success',
+          transactionHash: hash,
+          confirmations: 1,
+        },
+      },
+    ],
+    txHash: hash,
+  };
+}
+
+export function createExecutionHandlerFake(): {
+  readonly handler: ExecutionPlanHandler;
+  readonly calls: ExecutionPlan[];
+  readonly results: TransactionResult[];
+} {
+  const calls: ExecutionPlan[] = [];
+  const results: TransactionResult[] = [];
+  const handler: ExecutionPlanHandler = (plan) => {
+    calls.push(plan);
+    const hash = `0x${calls.length.toString(16).padStart(64, '0')}` as `0x${string}`;
+    const result = singleTransactionResultForPlan(plan, hash);
+    results.push(result);
+    return okAsync(result);
+  };
+  return { handler, calls, results };
+}
 
 function transferStatusFixtureBase(state: OseroApiTransferState) {
   return {

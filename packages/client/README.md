@@ -307,6 +307,19 @@ const quote = await api.getSwapQuote({
 
 Hosted decoding accepts future asset, protocol, and provider vocabulary, but executable fields and normalized Transfer Status states are strict. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
 
+Use `executeSwap(request, handler)` for the bounded automatic Hosted Swap Workflow. It submits at most one approval-only Wallet Execution Plan at a time, refreshes after confirmation or expiry, and then submits the final execution-only plan. The defaults allow three approval transactions and five total Quote Refreshes; `approvalTransactionLimit` and `quoteRefreshLimit` accept deliberate positive-integer overrides. `getSwapQuote` and `refreshSwapQuote` remain available when a frontend needs to prompt, persist, pause, or resume manually.
+
+```ts
+const execution = await api.executeSwap(request, sendWith(walletClient), {
+  signal: abortController.signal,
+  onProgress: (event) => console.log(event.type),
+});
+if (execution.isErr()) throw execution.error;
+
+console.log(execution.value.approvalResults);
+console.log(execution.value.executionResult.txHash);
+```
+
 Cross-chain completion polling is cancellable and bounded:
 
 ```ts

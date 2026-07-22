@@ -42,6 +42,7 @@ export {
 } from './lib/domain.js';
 export {
   AccountMismatchError,
+  ApprovalLimitError,
   BroadcastError,
   CancelError,
   ChainMismatchError,
@@ -51,6 +52,7 @@ export {
   OseroError,
   ProgressCallbackError,
   QuoteExpiredError,
+  QuoteRefreshLimitError,
   RpcError,
   SigningError,
   SimulationError,
@@ -63,8 +65,10 @@ export {
   type CompletedExecutionStep,
   type ExecutionFailureContext,
   type ExecutionStage,
+  type HostedSwapFailureContext,
   type OseroErrorCode,
 } from './lib/errors.js';
+export type { HostedSwapProgressType } from './lib/hostedSwap.js';
 export {
   OseroClient,
   type GetPublicClientError,

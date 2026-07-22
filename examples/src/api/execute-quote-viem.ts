@@ -6,7 +6,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
 
 import { loadPrivateKey, optionalEnv, optionalRpcUrl, requireEnv } from '../shared/env.js';
-import { banner, describePlan, describeResult } from '../shared/format.js';
+import { banner, describeResult } from '../shared/format.js';
 
 const SOURCE_CHAIN_ID = 8453 as const;
 const AMOUNT_USDC = parseUnits('1', 6);
@@ -43,29 +43,33 @@ async function main() {
   const attribution = optionalReferral();
 
   banner(`API quote execution — ${chain.name}`);
-  const workflow = await api.getSwapQuote({
-    fromAddress: account.address,
-    fromAssetId: 'base:usdc',
-    toAssetId: 'ethereum:susds',
-    amount: amount.value,
-    slippage: slippage.value,
-    ...(attribution === undefined ? {} : { referral: attribution }),
-  });
-  if (workflow.isErr()) throw workflow.error;
-  const { quote, walletExecutionPlan } = workflow.value;
+  const execution = await api.executeSwap(
+    {
+      fromAddress: account.address,
+      fromAssetId: 'base:usdc',
+      toAssetId: 'ethereum:susds',
+      amount: amount.value,
+      slippage: slippage.value,
+      ...(attribution === undefined ? {} : { referral: attribution }),
+    },
+    sendWith(wallet),
+    {
+      onProgress: (event) => console.log(`  ${event.type}`),
+    },
+  );
+  if (execution.isErr()) throw execution.error;
+  const { approvalResults, executionResult, finalQuote } = execution.value;
 
-  console.log(`  amount out: ${quote.quote.expectedOutput.formatted}`);
-  console.log(`  bridge: ${quote.routeSummary.bridge ?? 'none'}`);
-  console.log(`  tx count: ${walletExecutionPlan.steps.length}`);
-  console.log(describePlan(walletExecutionPlan));
+  console.log(`  amount out: ${finalQuote.quote.expectedOutput.formatted}`);
+  console.log(`  bridge: ${finalQuote.routeSummary.bridge ?? 'none'}`);
+  console.log(`  approvals: ${approvalResults.length}`);
 
-  const result = await sendWith(wallet, walletExecutionPlan);
-  if (result.isErr()) throw result.error;
-
-  banner('Submitted');
-  console.log(describeResult(result.value, chain.explorerUrl));
-  if (quote.statusContext !== null) {
-    console.log('Track completion with api.waitForSwapCompletion(quote, result.value.txHash).');
+  banner('Confirmed');
+  console.log(describeResult(executionResult, chain.explorerUrl));
+  if (finalQuote.statusContext !== null) {
+    console.log(
+      'Track completion with api.waitForSwapCompletion(finalQuote, executionResult.txHash).',
+    );
   }
 }
 

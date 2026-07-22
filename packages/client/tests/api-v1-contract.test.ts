@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { okAsync } from 'neverthrow';
 import type { PublicClient } from 'viem';
 import { base } from 'viem/chains';
 
@@ -11,8 +12,9 @@ import {
   type OseroApiExecutionPlan,
   type OseroApiFetch,
 } from '../src/api.js';
-import type { ExecutionPlan } from '../src/index.js';
+import type { ExecutionPlan, ExecutionPlanHandler, TransactionResult } from '../src/index.js';
 import { parseSlippage, referral } from '../src/index.js';
+import { singleTransactionResultForPlan } from '../src/lib/_testing.js';
 
 const contractRoot = process.env.OSERO_API_CONTRACT_ROOT;
 
@@ -169,19 +171,58 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
       publicClientProvider: () => publicClient,
     });
 
-    const initial = await client.getSwapQuote({
-      fromAddress: '0x0000000000000000000000000000000000000001',
-      fromAssetId: 'base:usdc',
-      toAssetId: 'ethereum:susds',
-      amount: inputAmount.value,
-      slippage: slippage.value,
-      referral: attribution.value,
-    });
+    const approvalTransactionHash =
+      '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' as const;
+    const walletPlans: ExecutionPlan[] = [];
+    const walletResults: TransactionResult[] = [];
+    const handler: ExecutionPlanHandler = (plan) => {
+      walletPlans.push(plan);
+      const hash = walletPlans.length === 1 ? approvalTransactionHash : sourceTransactionHash;
+      const result = singleTransactionResultForPlan(plan, hash);
+      walletResults.push(result);
+      return okAsync(result);
+    };
+    const progress: string[] = [];
 
-    if (initial.isErr()) throw initial.error;
-    expect(initial.isOk()).toBe(true);
-    expect(initial.value.state).toBe('approval-required');
-    expect(initial.value.walletExecutionPlan.steps).toEqual([
+    const execution = await client.executeSwap(
+      {
+        fromAddress: '0x0000000000000000000000000000000000000001',
+        fromAssetId: 'base:usdc',
+        toAssetId: 'ethereum:susds',
+        amount: inputAmount.value,
+        slippage: slippage.value,
+        referral: attribution.value,
+      },
+      handler,
+      {
+        onProgress: (event) => {
+          progress.push(event.type);
+        },
+      },
+    );
+
+    if (execution.isErr()) throw execution.error;
+    expect(execution.isOk()).toBe(true);
+    expect(requests[0]).toEqual({
+      url: 'https://contract.test/v1/swap/quote',
+      init: {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+          'x-api-key': 'osero_contract-key',
+        },
+        body: JSON.stringify({
+          fromAddress: '0x0000000000000000000000000000000000000001',
+          fromAssetId: 'base:usdc',
+          toAssetId: 'ethereum:susds',
+          amount: '1000000',
+          slippage: '50',
+          referralCode: 3001,
+        }),
+      },
+    });
+    expect(walletPlans[0]?.steps).toEqual([
       expect.objectContaining({
         chainId: 8453,
         from: '0x0000000000000000000000000000000000000001',
@@ -203,19 +244,57 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
         estimatedGas: { gas: 50_000n, source: 'hosted-api' },
       }),
     ]);
-
-    const refreshed = await client.refreshSwapQuote(initial.value.quote.refreshContext);
-
-    expect(refreshed.isOk()).toBe(true);
-    if (refreshed.isErr()) throw refreshed.error;
-    expect(refreshed.value.state).toBe('ready-to-execute');
-    expect(refreshed.value.walletExecutionPlan.steps.map((step) => step.operation)).toEqual([
-      'SWAP_EXACT_IN',
+    const finalTransaction = (
+      replacement.executionPlan as {
+        executionStep: {
+          transaction: {
+            chainId: number;
+            sender: `0x${string}`;
+            recipient: `0x${string}`;
+            calldata: `0x${string}`;
+            value: `${bigint}`;
+            gasLimit: `${bigint}` | null;
+          };
+        };
+      }
+    ).executionStep.transaction;
+    expect(walletPlans[1]?.steps).toEqual([
+      {
+        __typename: 'TransactionRequest',
+        id: 'execute-swap',
+        chainId: finalTransaction.chainId,
+        from: finalTransaction.sender,
+        to: finalTransaction.recipient,
+        data: finalTransaction.calldata,
+        value: BigInt(finalTransaction.value),
+        operation: 'SWAP_EXACT_IN',
+        ...(finalTransaction.gasLimit === null || BigInt(finalTransaction.gasLimit) === 0n
+          ? {}
+          : {
+              estimatedGas: {
+                gas: BigInt(finalTransaction.gasLimit),
+                source: 'hosted-api',
+              },
+            }),
+      },
     ]);
-    expect(refreshed.value.walletExecutionPlan.steps[0]?.data).toBe('0x5678');
-    expect(refreshed.value.walletExecutionPlan.steps[0]?.data).not.toBe(
-      initial.value.quote.executionPlan.executionStep.transaction.calldata,
+    expect(walletPlans[1]?.steps[0]?.data).toBe('0x5678');
+    expect(walletPlans[1]?.steps[0]?.data).not.toBe(
+      (fixture.executionPlan as { executionStep: { transaction: { calldata: string } } })
+        .executionStep.transaction.calldata,
     );
+    expect(execution.value.finalQuote).toEqual(replacement);
+    expect(execution.value.approvalResults).toEqual([walletResults[0]]);
+    expect(execution.value.executionResult).toEqual(walletResults[1]);
+    expect(progress).toEqual([
+      'quote-received',
+      'approval-required',
+      'approval-confirmed',
+      'quote-refresh',
+      'quote-received',
+      'ready-to-execute',
+      'execution-confirmed',
+    ]);
     expect(requests[1]).toEqual({
       url: 'https://contract.test/v1/swap/quote/refresh',
       init: {
@@ -225,11 +304,14 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
           'content-type': 'application/json',
           'x-api-key': 'osero_contract-key',
         },
-        body: JSON.stringify(initial.value.quote.refreshContext),
+        body: JSON.stringify((fixture as { refreshContext: unknown }).refreshContext),
       },
     });
 
-    const status = await client.getSwapStatusForQuote(refreshed.value.quote, sourceTransactionHash);
+    const status = await client.getSwapStatusForQuote(
+      execution.value.finalQuote,
+      sourceTransactionHash,
+    );
 
     expect(status.isOk()).toBe(true);
     if (status.isErr()) throw status.error;

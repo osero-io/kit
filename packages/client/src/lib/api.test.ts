@@ -3,6 +3,7 @@ import { base } from 'viem/chains';
 import type { Mock } from 'vitest';
 
 import {
+  createExecutionHandlerFake as executionHandler,
   ensoTransferStatusFixture,
   lifiTransferStatusFixture,
   mockFn,
@@ -23,7 +24,19 @@ import {
   type OseroApiSwapQuoteResponse,
 } from './api.js';
 import { parseSlippage, referral, UINT256_MAX } from './domain.js';
-import { ApiRequestError, ApiResponseError, ConfigurationError, TimeoutError } from './errors.js';
+import {
+  ApiRequestError,
+  ApiResponseError,
+  ApprovalLimitError,
+  BroadcastError,
+  ConfigurationError,
+  ProgressCallbackError,
+  QuoteExpiredError,
+  QuoteRefreshLimitError,
+  TimeoutError,
+} from './errors.js';
+import { errAsync } from './result.js';
+import type { ExecutionPlanHandler } from './types.js';
 
 const WALLET: Address = '0x1111111111111111111111111111111111111111';
 const OTHER_WALLET: Address = '0x9999999999999999999999999999999999999999';
@@ -1022,6 +1035,497 @@ describe('hosted quote verification and preparation', () => {
     if (unknown.isOk()) {
       expect(unknown.value.quote.providerDetails).toEqual(unknownQuote.providerDetails);
     }
+  });
+});
+
+describe('Hosted Swap Workflow execution', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('executes a ready initial quote and reports the final audit result', async () => {
+    const transport = fetchSequence({ body: ENSO_SAME_CHAIN_QUOTE });
+    const wallet = executionHandler();
+    const progress: string[] = [];
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+      {
+        onProgress: (event) => {
+          progress.push(event.type);
+        },
+      },
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.finalQuote).toEqual(ENSO_SAME_CHAIN_QUOTE);
+      expect(result.value.approvalResults).toEqual([]);
+      expect(result.value.executionResult).toEqual(wallet.results[0]);
+    }
+    expect(wallet.calls).toHaveLength(1);
+    expect(wallet.calls[0]?.steps.map((step) => step.operation)).toEqual(['SWAP_EXACT_IN']);
+    expect(progress).toEqual(['quote-received', 'ready-to-execute', 'execution-confirmed']);
+  });
+
+  it('confirms one approval at a time and refreshes before using replacement actions', async () => {
+    const initial = quoteWithApproval();
+    const repeated = quoteWithApproval({ spender: OTHER_SPENDER });
+    const transport = fetchSequence(
+      { body: initial },
+      { body: repeated },
+      { body: ENSO_SAME_CHAIN_QUOTE },
+    );
+    const rpc = publicClient([0n, 0n], 1);
+    const wallet = executionHandler();
+    const progress: string[] = [];
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+      {
+        onProgress: (event) => {
+          progress.push(event.type);
+        },
+      },
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.finalQuote).toEqual(ENSO_SAME_CHAIN_QUOTE);
+      expect(result.value.approvalResults).toEqual(wallet.results.slice(0, 2));
+      expect(result.value.executionResult).toEqual(wallet.results[2]);
+    }
+    expect(wallet.calls.map((plan) => plan.steps.map((step) => step.operation))).toEqual([
+      ['APPROVE_ERC20'],
+      ['APPROVE_ERC20'],
+      ['SWAP_EXACT_IN'],
+    ]);
+    expect(wallet.calls[0]?.steps[0]?.authorization?.spender).toBe(SPENDER);
+    expect(wallet.calls[1]?.steps[0]?.authorization?.spender).toBe(OTHER_SPENDER);
+    expect(transport.calls.slice(1).map((call) => JSON.parse(String(call.init?.body)))).toEqual([
+      initial.refreshContext,
+      repeated.refreshContext,
+    ]);
+    expect(progress).toEqual([
+      'quote-received',
+      'approval-required',
+      'approval-confirmed',
+      'quote-refresh',
+      'quote-received',
+      'approval-required',
+      'approval-confirmed',
+      'quote-refresh',
+      'quote-received',
+      'ready-to-execute',
+      'execution-confirmed',
+    ]);
+  });
+
+  it('refreshes an expired ready quote before submitting its execution plan', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:01:00.000Z'));
+    const refreshed = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      quote: {
+        ...ENSO_SAME_CHAIN_QUOTE.quote,
+        quotedAt: '2030-01-01T00:01:00.000Z',
+        expiresAt: '2030-01-01T00:02:00.000Z',
+      },
+      executionPlan: {
+        ...ENSO_SAME_CHAIN_QUOTE.executionPlan,
+        executionStep: {
+          transaction: {
+            ...ENSO_SAME_CHAIN_QUOTE.executionPlan.executionStep.transaction,
+            calldata: '0x5678',
+          },
+        },
+      },
+    } as const satisfies OseroApiSwapQuoteResponse;
+    const transport = fetchSequence({ body: ENSO_SAME_CHAIN_QUOTE }, { body: refreshed });
+    const wallet = executionHandler();
+    const progress: string[] = [];
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+      {
+        onProgress: (event) => {
+          progress.push(event.type);
+        },
+      },
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(wallet.calls).toHaveLength(1);
+    expect(wallet.calls[0]?.steps[0]?.data).toBe('0x5678');
+    expect(transport.calls).toHaveLength(2);
+    expect(progress).toEqual([
+      'quote-received',
+      'quote-refresh',
+      'quote-received',
+      'ready-to-execute',
+      'execution-confirmed',
+    ]);
+  });
+
+  it('rechecks expiry after readiness progress before calling the wallet', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:59.999Z'));
+    const refreshed = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      quote: {
+        ...ENSO_SAME_CHAIN_QUOTE.quote,
+        quotedAt: '2030-01-01T00:01:00.000Z',
+        expiresAt: '2030-01-01T00:02:00.000Z',
+      },
+      executionPlan: {
+        ...ENSO_SAME_CHAIN_QUOTE.executionPlan,
+        executionStep: {
+          transaction: {
+            ...ENSO_SAME_CHAIN_QUOTE.executionPlan.executionStep.transaction,
+            calldata: '0x5678',
+          },
+        },
+      },
+    } as const satisfies OseroApiSwapQuoteResponse;
+    const transport = fetchSequence({ body: ENSO_SAME_CHAIN_QUOTE }, { body: refreshed });
+    const wallet = executionHandler();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    let readinessCount = 0;
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+      {
+        onProgress: (event) => {
+          if (event.type === 'ready-to-execute' && readinessCount++ === 0) {
+            vi.setSystemTime(new Date(ENSO_SAME_CHAIN_QUOTE.quote.expiresAt));
+          }
+        },
+      },
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(wallet.calls).toHaveLength(1);
+    expect(wallet.calls[0]?.steps[0]?.data).toBe('0x5678');
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  it('refreshes when the wallet handler detects expiry before broadcast', async () => {
+    const refreshed = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      executionPlan: {
+        ...ENSO_SAME_CHAIN_QUOTE.executionPlan,
+        executionStep: {
+          transaction: {
+            ...ENSO_SAME_CHAIN_QUOTE.executionPlan.executionStep.transaction,
+            calldata: '0x5678',
+          },
+        },
+      },
+    } as const satisfies OseroApiSwapQuoteResponse;
+    const transport = fetchSequence({ body: ENSO_SAME_CHAIN_QUOTE }, { body: refreshed });
+    const wallet = executionHandler();
+    let handlerCalls = 0;
+    const handler: ExecutionPlanHandler = (plan) => {
+      handlerCalls += 1;
+      if (handlerCalls === 1) {
+        return errAsync(new QuoteExpiredError(plan, plan.quoteExpiresAt!));
+      }
+      return wallet.handler(plan);
+    };
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      handler,
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(handlerCalls).toBe(2);
+    expect(wallet.calls[0]?.steps[0]?.data).toBe('0x5678');
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  it('stops before a fourth approval wallet call at the default approval limit', async () => {
+    const approvalQuote = quoteWithApproval();
+    const transport = fetchSequence({ body: approvalQuote });
+    const rpc = publicClient(0n, 1);
+    const wallet = executionHandler();
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ApprovalLimitError);
+      if (result.error instanceof ApprovalLimitError) {
+        expect(result.error.limit).toBe(3);
+        expect(result.error.approvalResults).toEqual(wallet.results);
+      }
+    }
+    expect(wallet.calls).toHaveLength(3);
+    expect(transport.calls).toHaveLength(4);
+  });
+
+  it('allows exactly three approvals at the default approval limit', async () => {
+    const approvalQuote = quoteWithApproval();
+    const transport = fetchSequence(
+      { body: approvalQuote },
+      { body: approvalQuote },
+      { body: approvalQuote },
+      { body: ENSO_SAME_CHAIN_QUOTE },
+    );
+    const rpc = publicClient(0n, 1);
+    const wallet = executionHandler();
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.approvalResults).toHaveLength(3);
+    expect(wallet.calls).toHaveLength(4);
+  });
+
+  it('stops before a sixth Quote Refresh request at the default refresh limit', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(ENSO_SAME_CHAIN_QUOTE.quote.expiresAt));
+    const transport = fetchSequence({ body: ENSO_SAME_CHAIN_QUOTE });
+    const wallet = executionHandler();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(QuoteRefreshLimitError);
+      if (result.error instanceof QuoteRefreshLimitError) expect(result.error.limit).toBe(5);
+    }
+    expect(transport.calls).toHaveLength(6);
+    expect(wallet.calls).toHaveLength(0);
+  });
+
+  it('allows exactly five Quote Refreshes at the default refresh limit', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(ENSO_SAME_CHAIN_QUOTE.quote.expiresAt));
+    const ready = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      quote: {
+        ...ENSO_SAME_CHAIN_QUOTE.quote,
+        quotedAt: '2030-01-01T00:01:00.000Z',
+        expiresAt: '2030-01-01T00:02:00.000Z',
+      },
+    } as const satisfies OseroApiSwapQuoteResponse;
+    const transport = fetchSequence(
+      { body: ENSO_SAME_CHAIN_QUOTE },
+      { body: ENSO_SAME_CHAIN_QUOTE },
+      { body: ENSO_SAME_CHAIN_QUOTE },
+      { body: ENSO_SAME_CHAIN_QUOTE },
+      { body: ENSO_SAME_CHAIN_QUOTE },
+      { body: ready },
+    );
+    const wallet = executionHandler();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(transport.calls).toHaveLength(6);
+    expect(wallet.calls).toHaveLength(1);
+  });
+
+  it('accepts configured positive limits and rejects invalid limits before side effects', async () => {
+    const approvalQuote = quoteWithApproval();
+    const transport = fetchSequence(
+      { body: approvalQuote },
+      { body: approvalQuote },
+      { body: approvalQuote },
+      { body: approvalQuote },
+      { body: ENSO_SAME_CHAIN_QUOTE },
+    );
+    const rpc = publicClient(0n, 1);
+    const wallet = executionHandler();
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+    const request = quoteRequest({
+      fromAssetId: 'ethereum:usds',
+      amount: amount(1_000_000_000_000_000_000n),
+    });
+
+    const invalidApproval = await client.executeSwap(request, wallet.handler, {
+      approvalTransactionLimit: 0,
+    });
+    const invalidRefresh = await client.executeSwap(request, wallet.handler, {
+      quoteRefreshLimit: Number.POSITIVE_INFINITY,
+    });
+    const result = await client.executeSwap(request, wallet.handler, {
+      approvalTransactionLimit: 4,
+    });
+
+    expect(invalidApproval.isErr()).toBe(true);
+    expect(invalidRefresh.isErr()).toBe(true);
+    expect(result.isOk()).toBe(true);
+    expect(wallet.calls).toHaveLength(5);
+    expect(transport.calls).toHaveLength(5);
+  });
+
+  it('returns a typed callback failure with already confirmed approval results', async () => {
+    const initial = quoteWithApproval();
+    const transport = fetchSequence({ body: initial }, { body: ENSO_SAME_CHAIN_QUOTE });
+    const rpc = publicClient(0n, 1);
+    const wallet = executionHandler();
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+      {
+        onProgress: (event) => {
+          if (event.type === 'approval-confirmed') throw new Error('progress failed');
+        },
+      },
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ProgressCallbackError);
+      if (result.error instanceof ProgressCallbackError) {
+        expect(result.error.hostedSwap?.progressType).toBe('approval-confirmed');
+        expect(result.error.hostedSwap?.approvalResults).toEqual(wallet.results);
+      }
+    }
+    expect(wallet.calls).toHaveLength(1);
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  it('honors cancellation between transitions without starting future work', async () => {
+    const controller = new AbortController();
+    const initial = quoteWithApproval();
+    const transport = fetchSequence({ body: initial }, { body: ENSO_SAME_CHAIN_QUOTE });
+    const rpc = publicClient(0n, 1);
+    const wallet = executionHandler();
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+      wallet.handler,
+      {
+        signal: controller.signal,
+        onProgress: (event) => {
+          if (event.type === 'approval-confirmed') controller.abort('stop after confirmation');
+        },
+      },
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('CANCELLED');
+    expect(wallet.calls).toHaveLength(1);
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  it('preserves wallet and post-approval HTTP failures as distinguishable results', async () => {
+    const readyTransport = fetchSequence({ body: ENSO_SAME_CHAIN_QUOTE });
+    const walletFailure = BroadcastError.from(new Error('wallet rejected'));
+    const failedHandler: ExecutionPlanHandler = () => errAsync(walletFailure);
+    const readyClient = OseroApiClient.create({ apiKey: API_KEY, fetch: readyTransport.fetch });
+    const request = quoteRequest({
+      fromAssetId: 'ethereum:usds',
+      amount: amount(1_000_000_000_000_000_000n),
+    });
+
+    const failedWallet = await readyClient.executeSwap(request, failedHandler);
+
+    const approvalTransport = fetchSequence(
+      { body: quoteWithApproval() },
+      { body: { code: 'UPSTREAM_UNAVAILABLE' }, status: 503 },
+    );
+    const rpc = publicClient(0n, 1);
+    const wallet = executionHandler();
+    const approvalClient = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: approvalTransport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const failedRefresh = await approvalClient.executeSwap(request, wallet.handler);
+
+    expect(failedWallet.isErr()).toBe(true);
+    if (failedWallet.isErr()) expect(failedWallet.error).toBe(walletFailure);
+    expect(failedRefresh.isErr()).toBe(true);
+    if (failedRefresh.isErr()) expect(failedRefresh.error).toBeInstanceOf(ApiRequestError);
+    expect(wallet.calls).toHaveLength(1);
+    expect(approvalTransport.calls).toHaveLength(2);
   });
 });
 

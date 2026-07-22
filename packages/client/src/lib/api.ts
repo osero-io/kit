@@ -24,14 +24,18 @@ import {
   ApiRequestError,
   ApiResponseError,
   ApiTransportError,
+  ApprovalLimitError,
   CancelError,
   ConfigurationError,
   InsufficientAllowanceError,
+  ProgressCallbackError,
+  QuoteRefreshLimitError,
   RpcError,
   TimeoutError,
   UnexpectedError,
   ValidationError,
 } from './errors.js';
+import type { HostedSwapProgressType } from './hostedSwap.js';
 import {
   createExecutionPlan,
   createPreparedApprovalTransaction,
@@ -39,24 +43,35 @@ import {
 } from './plan.js';
 import { referralCodeForApi } from './referrals.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './result.js';
-import type { ExecutionPlan } from './types.js';
+import type {
+  ExecutionPlan,
+  ExecutionPlanHandler,
+  SendWithError,
+  TransactionResult,
+} from './types.js';
 import { validateQuoteExpiry } from './validation.js';
 
 export const DEFAULT_OSERO_API_BASE_URL = 'https://api.osero.org/v1/';
+export const DEFAULT_APPROVAL_TRANSACTION_LIMIT = 3;
+export const DEFAULT_QUOTE_REFRESH_LIMIT = 5;
 
 export {
   ApiRequestError,
   ApiResponseError,
   ApiTransportError,
+  ApprovalLimitError,
   CancelError,
   ConfigurationError,
   InsufficientAllowanceError,
   OSERO_API_ERROR_CODES,
+  ProgressCallbackError,
   RpcError,
+  QuoteRefreshLimitError,
   TimeoutError,
   ValidationError,
   type OseroApiErrorCode,
 } from './errors.js';
+export type { HostedSwapProgressType } from './hostedSwap.js';
 
 /**
  * Chains known to this SDK release, as an advisory snapshot.
@@ -588,6 +603,58 @@ export type WaitForSwapCompletionOptions = OseroApiRequestOptions & {
   readonly onStatus?: (status: OseroApiTransferStatus) => void | Promise<void>;
 };
 
+type HostedSwapProgressDetails = {
+  readonly 'quote-received': {
+    readonly quote: OseroApiSwapQuoteResponse;
+    readonly source: 'initial' | 'refresh';
+  };
+  readonly 'approval-required': {
+    readonly quote: OseroApiSwapQuoteResponse;
+    readonly walletExecutionPlan: ExecutionPlan;
+    readonly approvalNumber: number;
+  };
+  readonly 'approval-confirmed': {
+    readonly quote: OseroApiSwapQuoteResponse;
+    readonly result: TransactionResult;
+    readonly approvalNumber: number;
+  };
+  readonly 'quote-refresh': {
+    readonly refreshContext: OseroApiRefreshContext;
+    readonly refreshNumber: number;
+    readonly reason: 'approval-confirmed' | 'quote-expired';
+  };
+  readonly 'ready-to-execute': {
+    readonly quote: OseroApiSwapQuoteResponse;
+    readonly walletExecutionPlan: ExecutionPlan;
+  };
+  readonly 'execution-confirmed': {
+    readonly quote: OseroApiSwapQuoteResponse;
+    readonly result: TransactionResult;
+  };
+};
+
+export type OseroApiHostedSwapProgress = {
+  [Type in HostedSwapProgressType]: { readonly type: Type } & HostedSwapProgressDetails[Type];
+}[HostedSwapProgressType];
+
+export type ExecuteSwapOptions = OseroApiRequestOptions & {
+  readonly approvalTransactionLimit?: number;
+  readonly quoteRefreshLimit?: number;
+  readonly onProgress?: (progress: OseroApiHostedSwapProgress) => void | Promise<void>;
+};
+
+export type OseroApiHostedSwapResult = {
+  readonly finalQuote: OseroApiSwapQuoteResponse;
+  readonly approvalResults: readonly TransactionResult[];
+  readonly executionResult: TransactionResult;
+};
+
+export type ExecuteSwapError =
+  | OseroApiClientError
+  | SendWithError
+  | ApprovalLimitError
+  | QuoteRefreshLimitError;
+
 type OseroApiSwapQuoteBody = {
   readonly fromAddress: Address;
   readonly fromAssetId: string;
@@ -717,6 +784,193 @@ export class OseroApiClient {
           provider: refreshContext.provider,
         }),
     }).andThen((response) => this.prepareHostedWorkflow(response, options?.signal));
+  }
+
+  executeSwap(
+    request: OseroApiSwapQuoteRequest,
+    handler: ExecutionPlanHandler,
+    options: ExecuteSwapOptions = {},
+  ): ResultAsync<OseroApiHostedSwapResult, ExecuteSwapError> {
+    const execute = async (): Promise<Result<OseroApiHostedSwapResult, ExecuteSwapError>> => {
+      if (typeof options !== 'object' || options === null) {
+        return err(ValidationError.forField('options', 'options must be an object'));
+      }
+      const requestOptions: OseroApiRequestOptions = {
+        ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      };
+      const approvalResults: TransactionResult[] = [];
+      const emit = async (
+        progress: OseroApiHostedSwapProgress,
+        executionResult?: TransactionResult,
+      ): Promise<Result<void, ProgressCallbackError | CancelError>> => {
+        if (options.signal?.aborted) return err(CancelError.from(options.signal.reason));
+        if (options.onProgress === undefined) return ok(undefined);
+        return awaitResultWithCancellation(
+          ResultAsync.fromPromise(
+            Promise.resolve().then(() => options.onProgress!(progress)),
+            (cause) =>
+              ProgressCallbackError.fromHostedSwap(cause, {
+                progressType: progress.type,
+                approvalResults: [...approvalResults],
+                ...(executionResult === undefined ? {} : { executionResult }),
+              }),
+          ),
+          options.signal,
+        );
+      };
+
+      if (typeof handler !== 'function') {
+        return err(
+          ValidationError.forField('handler', 'handler must be an Execution Plan handler'),
+        );
+      }
+      if (options.onProgress !== undefined && typeof options.onProgress !== 'function') {
+        return err(ValidationError.forField('onProgress', 'onProgress must be a function'));
+      }
+      const approvalTransactionLimit =
+        options.approvalTransactionLimit ?? DEFAULT_APPROVAL_TRANSACTION_LIMIT;
+      if (!Number.isSafeInteger(approvalTransactionLimit) || approvalTransactionLimit <= 0) {
+        return err(
+          ValidationError.forField(
+            'approvalTransactionLimit',
+            'approvalTransactionLimit must be a positive safe integer',
+          ),
+        );
+      }
+      const quoteRefreshLimit = options.quoteRefreshLimit ?? DEFAULT_QUOTE_REFRESH_LIMIT;
+      if (!Number.isSafeInteger(quoteRefreshLimit) || quoteRefreshLimit <= 0) {
+        return err(
+          ValidationError.forField(
+            'quoteRefreshLimit',
+            'quoteRefreshLimit must be a positive safe integer',
+          ),
+        );
+      }
+
+      const initial = await this.getSwapQuote(request, requestOptions);
+      if (initial.isErr()) return err(initial.error);
+      let workflow = initial.value;
+      let refreshCount = 0;
+      const refreshWorkflow = async (
+        current: OseroApiHostedSwapWorkflow,
+        reason: 'approval-confirmed' | 'quote-expired',
+      ): Promise<Result<OseroApiHostedSwapWorkflow, ExecuteSwapError>> => {
+        if (refreshCount >= quoteRefreshLimit) {
+          return err(new QuoteRefreshLimitError(quoteRefreshLimit, approvalResults));
+        }
+        refreshCount += 1;
+        const refreshing = await emit({
+          type: 'quote-refresh',
+          refreshContext: current.quote.refreshContext,
+          refreshNumber: refreshCount,
+          reason,
+        });
+        if (refreshing.isErr()) return err(refreshing.error);
+        const refreshed = await this.refreshSwapQuote(current.quote.refreshContext, requestOptions);
+        if (refreshed.isErr()) return err(refreshed.error);
+        const refreshReceived = await emit({
+          type: 'quote-received',
+          quote: refreshed.value.quote,
+          source: 'refresh',
+        });
+        return refreshReceived.isErr() ? err(refreshReceived.error) : ok(refreshed.value);
+      };
+      const received = await emit({
+        type: 'quote-received',
+        quote: workflow.quote,
+        source: 'initial',
+      });
+      if (received.isErr()) return err(received.error);
+
+      // oxlint-disable no-await-in-loop -- Wallet and lifecycle transitions must be serialized.
+      while (true) {
+        if (workflow.state === 'approval-required') {
+          const approvalNumber = approvalResults.length + 1;
+          const required = await emit({
+            type: 'approval-required',
+            quote: workflow.quote,
+            walletExecutionPlan: workflow.walletExecutionPlan,
+            approvalNumber,
+          });
+          if (required.isErr()) return err(required.error);
+          if (approvalResults.length >= approvalTransactionLimit) {
+            return err(new ApprovalLimitError(approvalTransactionLimit, approvalResults));
+          }
+
+          let approvalResult: Result<TransactionResult, SendWithError>;
+          try {
+            approvalResult = await handler(workflow.walletExecutionPlan);
+          } catch (cause) {
+            return err(UnexpectedError.from(cause));
+          }
+          if (approvalResult.isErr()) return err(approvalResult.error);
+          approvalResults.push(approvalResult.value);
+          const confirmed = await emit({
+            type: 'approval-confirmed',
+            quote: workflow.quote,
+            result: approvalResult.value,
+            approvalNumber,
+          });
+          if (confirmed.isErr()) return err(confirmed.error);
+
+          const refreshed = await refreshWorkflow(workflow, 'approval-confirmed');
+          if (refreshed.isErr()) return err(refreshed.error);
+          workflow = refreshed.value;
+          continue;
+        }
+
+        if (Date.now() >= Date.parse(workflow.quote.quote.expiresAt)) {
+          const refreshed = await refreshWorkflow(workflow, 'quote-expired');
+          if (refreshed.isErr()) return err(refreshed.error);
+          workflow = refreshed.value;
+          continue;
+        }
+
+        const ready = await emit({
+          type: 'ready-to-execute',
+          quote: workflow.quote,
+          walletExecutionPlan: workflow.walletExecutionPlan,
+        });
+        if (ready.isErr()) return err(ready.error);
+        if (Date.now() >= Date.parse(workflow.quote.quote.expiresAt)) {
+          const refreshed = await refreshWorkflow(workflow, 'quote-expired');
+          if (refreshed.isErr()) return err(refreshed.error);
+          workflow = refreshed.value;
+          continue;
+        }
+
+        let executionResult: Result<TransactionResult, SendWithError>;
+        try {
+          executionResult = await handler(workflow.walletExecutionPlan);
+        } catch (cause) {
+          return err(UnexpectedError.from(cause));
+        }
+        if (executionResult.isErr()) {
+          if (executionResult.error.code !== 'QUOTE_EXPIRED') return err(executionResult.error);
+          const refreshed = await refreshWorkflow(workflow, 'quote-expired');
+          if (refreshed.isErr()) return err(refreshed.error);
+          workflow = refreshed.value;
+          continue;
+        }
+        const confirmed = await emit(
+          {
+            type: 'execution-confirmed',
+            quote: workflow.quote,
+            result: executionResult.value,
+          },
+          executionResult.value,
+        );
+        if (confirmed.isErr()) return err(confirmed.error);
+        return ok({
+          finalQuote: workflow.quote,
+          approvalResults,
+          executionResult: executionResult.value,
+        });
+      }
+      // oxlint-enable no-await-in-loop
+    };
+    return new ResultAsync(execute());
   }
 
   getSwapStatus(

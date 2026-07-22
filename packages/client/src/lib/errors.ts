@@ -1,6 +1,7 @@
 import type { Address, Hex } from 'viem';
 
-import type { ExecutionPlan, QuoteExpiry } from './types.js';
+import type { HostedSwapProgressType } from './hostedSwap.js';
+import type { ExecutionPlan, QuoteExpiry, TransactionResult } from './types.js';
 
 export type ExecutionStage =
   | 'preflight'
@@ -30,6 +31,12 @@ export type ExecutionFailureContext = {
   readonly completed: readonly CompletedExecutionStep[];
 };
 
+export type HostedSwapFailureContext = {
+  readonly progressType: HostedSwapProgressType;
+  readonly approvalResults: readonly TransactionResult[];
+  readonly executionResult?: TransactionResult;
+};
+
 export type OseroErrorCode =
   | 'VALIDATION_ERROR'
   | 'CONFIGURATION_ERROR'
@@ -51,6 +58,8 @@ export type OseroErrorCode =
   | 'API_RESPONSE_INVALID'
   | 'TIMEOUT'
   | 'PROGRESS_CALLBACK_FAILED'
+  | 'APPROVAL_LIMIT_EXCEEDED'
+  | 'QUOTE_REFRESH_LIMIT_EXCEEDED'
   | 'UNEXPECTED_ERROR';
 
 function extractMessage(cause: unknown, fallback: string): string {
@@ -211,6 +220,30 @@ export class QuoteExpiredError extends OseroError<'QUOTE_EXPIRED'> {
   }
 }
 
+export class ApprovalLimitError extends OseroError<'APPROVAL_LIMIT_EXCEEDED'> {
+  override readonly name = 'ApprovalLimitError' as const;
+  readonly code = 'APPROVAL_LIMIT_EXCEEDED' as const;
+
+  constructor(
+    readonly limit: number,
+    readonly approvalResults: readonly TransactionResult[],
+  ) {
+    super(`Hosted Swap Workflow requires more than ${limit} approval transactions`);
+  }
+}
+
+export class QuoteRefreshLimitError extends OseroError<'QUOTE_REFRESH_LIMIT_EXCEEDED'> {
+  override readonly name = 'QuoteRefreshLimitError' as const;
+  readonly code = 'QUOTE_REFRESH_LIMIT_EXCEEDED' as const;
+
+  constructor(
+    readonly limit: number,
+    readonly approvalResults: readonly TransactionResult[],
+  ) {
+    super(`Hosted Swap Workflow requires more than ${limit} Quote Refreshes`);
+  }
+}
+
 abstract class ExecutionError<Code extends OseroErrorCode> extends OseroError<Code> {
   constructor(
     message: string,
@@ -225,11 +258,29 @@ export class ProgressCallbackError extends ExecutionError<'PROGRESS_CALLBACK_FAI
   override readonly name = 'ProgressCallbackError' as const;
   readonly code = 'PROGRESS_CALLBACK_FAILED' as const;
 
+  constructor(
+    message: string,
+    execution?: ExecutionFailureContext,
+    options?: ErrorOptions,
+    readonly hostedSwap?: HostedSwapFailureContext,
+  ) {
+    super(message, execution, options);
+  }
+
   static from(cause: unknown, execution: ExecutionFailureContext): ProgressCallbackError {
     return new ProgressCallbackError(
       extractMessage(cause, 'Execution progress callback failed'),
       execution,
       { cause },
+    );
+  }
+
+  static fromHostedSwap(cause: unknown, context: HostedSwapFailureContext): ProgressCallbackError {
+    return new ProgressCallbackError(
+      extractMessage(cause, 'Hosted Swap Workflow progress callback failed'),
+      undefined,
+      { cause },
+      context,
     );
   }
 }
