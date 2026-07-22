@@ -10,7 +10,7 @@ import {
   resumeExecutionPlan,
   serializeExecutionPlan,
 } from './plan.js';
-import type { ConfirmedTransaction, TransactionRequest } from './types.js';
+import type { ConfirmedTransaction, ExecutionPlan, TransactionRequest } from './types.js';
 
 const ACCOUNT_LOWER = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as const;
 const ACCOUNT = getAddress(ACCOUNT_LOWER);
@@ -161,6 +161,42 @@ describe('flat execution plans', () => {
     });
     expect(result.isOk()).toBe(true);
   });
+
+  it('preserves validation and resume behavior for expiry-free plans with custom identities', () => {
+    const plan = createExecutionPlan({ steps: [transaction('one')] });
+    if (plan.isErr()) throw plan.error;
+    const customIdentity = { ...plan.value, id: 'plan-expiring-custom-id' };
+
+    const result = resumeExecutionPlan(customIdentity);
+
+    expect(result.isOk()).toBe(true);
+  });
+
+  it('validates quote expiry and includes it in plan identity', () => {
+    const steps = [transaction('one')];
+    const first = createExecutionPlan({
+      steps,
+      quoteExpiresAt: '2026-07-22T20:00:00.000Z',
+    });
+    const refreshed = createExecutionPlan({
+      steps,
+      quoteExpiresAt: '2026-07-22T20:01:00.000Z',
+    });
+    const malformed = createExecutionPlan({
+      steps,
+      quoteExpiresAt: 'tomorrow',
+    });
+
+    expect(first.isOk()).toBe(true);
+    expect(refreshed.isOk()).toBe(true);
+    expect(malformed.isErr()).toBe(true);
+    if (first.isOk() && refreshed.isOk()) {
+      expect(first.value.version).toBe(2);
+      expect(first.value.quoteExpiresAt).toBe('2026-07-22T20:00:00.000Z');
+      expect(refreshed.value.id).not.toBe(first.value.id);
+    }
+    if (malformed.isErr()) expect(malformed.error.field).toBe('plan.quoteExpiresAt');
+  });
 });
 
 describe('canonical persistence and recovery', () => {
@@ -177,6 +213,7 @@ describe('canonical persistence and recovery', () => {
     if (approval.isErr()) throw approval.error;
     const plan = createExecutionPlan({
       steps: [approval.value, transaction('swap')],
+      quoteExpiresAt: '2026-07-22T20:00:00Z',
       metadata: {
         source: 'hosted-api',
         allowanceSnapshots: [
@@ -214,6 +251,66 @@ describe('canonical persistence and recovery', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.field).toBe('plan.id');
+  });
+
+  it('rejects malformed or identity-detached serialized quote expiry', () => {
+    const plan = createExecutionPlan({ steps: [transaction('one')] });
+    if (plan.isErr()) throw plan.error;
+    const serialized = serializeExecutionPlan(plan.value);
+    if (serialized.isErr()) throw serialized.error;
+    const parsed = JSON.parse(serialized.value) as Record<string, unknown>;
+
+    const malformed = deserializeExecutionPlan(
+      JSON.stringify({ ...parsed, quoteExpiresAt: '2026-02-30T12:00:00Z' }),
+    );
+    const detached = deserializeExecutionPlan(
+      JSON.stringify({ ...parsed, quoteExpiresAt: '2026-07-22T20:00:00Z' }),
+    );
+
+    expect(malformed.isErr()).toBe(true);
+    if (malformed.isErr()) expect(malformed.error.field).toBe('plan.quoteExpiresAt');
+    expect(detached.isErr()).toBe(true);
+    if (detached.isErr()) expect(detached.error.field).toBe('plan.quoteExpiresAt');
+  });
+
+  it('refuses to serialize quote expiry detached from plan identity', () => {
+    const plan = createExecutionPlan({
+      steps: [transaction('one')],
+      quoteExpiresAt: '2026-07-22T20:00:00Z',
+    });
+    const refreshed = createExecutionPlan({
+      steps: [transaction('one')],
+      quoteExpiresAt: '2026-07-22T20:01:00Z',
+    });
+    if (plan.isErr() || refreshed.isErr()) throw new Error('test plan failed');
+    if (plan.value.version !== 2 || refreshed.value.version !== 2) {
+      throw new Error('test plan is not expiry-constrained');
+    }
+
+    const result = serializeExecutionPlan({
+      ...plan.value,
+      quoteExpiresAt: refreshed.value.quoteExpiresAt,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.field).toBe('plan.id');
+  });
+
+  it('rejects a version 2 plan after its quote expiry is removed', () => {
+    const plan = createExecutionPlan({
+      steps: [transaction('one')],
+      quoteExpiresAt: '2026-07-22T20:00:00Z',
+    });
+    if (plan.isErr()) throw plan.error;
+    const detached = { ...plan.value, quoteExpiresAt: undefined } as unknown as ExecutionPlan;
+
+    const serialized = serializeExecutionPlan(detached);
+    const resumed = resumeExecutionPlan(detached);
+
+    expect(serialized.isErr()).toBe(true);
+    if (serialized.isErr()) expect(serialized.error.field).toBe('plan.quoteExpiresAt');
+    expect(resumed.isErr()).toBe(true);
+    if (resumed.isErr()) expect(resumed.error.field).toBe('plan.quoteExpiresAt');
   });
 
   it('resumes only an ordered prefix proven confirmed', () => {

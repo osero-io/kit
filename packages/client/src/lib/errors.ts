@@ -1,5 +1,7 @@
 import type { Address, Hex } from 'viem';
 
+import type { ExecutionPlan, QuoteExpiry } from './types.js';
+
 export type ExecutionStage =
   | 'preflight'
   | 'simulation'
@@ -36,6 +38,7 @@ export type OseroErrorCode =
   | 'CHAIN_MISMATCH'
   | 'UNSUPPORTED_CAPABILITY'
   | 'INSUFFICIENT_ALLOWANCE'
+  | 'QUOTE_EXPIRED'
   | 'CANCELLED'
   | 'SIMULATION_FAILED'
   | 'SIGNING_FAILED'
@@ -193,6 +196,18 @@ export class InsufficientAllowanceError extends OseroError<'INSUFFICIENT_ALLOWAN
     super(
       `Allowance ${allowance} for ${token} is below required amount ${required} for spender ${spender}`,
     );
+  }
+}
+
+export class QuoteExpiredError extends OseroError<'QUOTE_EXPIRED'> {
+  override readonly name = 'QuoteExpiredError' as const;
+  readonly code = 'QUOTE_EXPIRED' as const;
+
+  constructor(
+    readonly plan: ExecutionPlan,
+    readonly quoteExpiresAt: QuoteExpiry,
+  ) {
+    super(`Execution plan ${plan.id} expired with its hosted quote at ${quoteExpiresAt}`);
   }
 }
 

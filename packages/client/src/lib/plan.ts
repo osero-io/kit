@@ -1,8 +1,8 @@
-import { encodeFunctionData, keccak256, stringToHex, type Address, type Hex } from 'viem';
+import { encodeFunctionData, type Address, type Hex } from 'viem';
 
 import { erc20Abi } from './abis/erc20.js';
 import type { AdvisoryGasEstimate } from './domain.js';
-import { ValidationError } from './errors.js';
+import { QuoteExpiredError, ValidationError } from './errors.js';
 import { err, ok, type Result } from './result.js';
 import type {
   ExecutionPlan,
@@ -10,12 +10,15 @@ import type {
   ExecutorRequirements,
   ExecutionResumeState,
   OperationType,
+  QuoteExpiry,
   TransactionRequest,
 } from './types.js';
 import {
+  computeExecutionPlanId,
   validateAddress,
   validateExecutionPlan,
   validatePositiveUint256,
+  validateQuoteExpiry,
   validateResumeState,
   validateTransactionRequest,
 } from './validation.js';
@@ -107,6 +110,7 @@ export function createApprovalTransaction(input: {
 
 export type CreateExecutionPlanInput = {
   readonly steps: readonly TransactionRequest[];
+  readonly quoteExpiresAt?: string;
   readonly requirements?: ExecutorRequirements;
   readonly metadata?: ExecutionPlanMetadata;
 };
@@ -134,43 +138,23 @@ export function createExecutionPlan(
     sponsored: false,
     chainTransitions: false,
   };
-  const id = computePlanId(steps, requirements);
-  return validateExecutionPlan({
+  let quoteExpiresAt: QuoteExpiry | undefined;
+  if (input.quoteExpiresAt !== undefined) {
+    const expiry = validateQuoteExpiry(input.quoteExpiresAt, 'plan.quoteExpiresAt');
+    if (expiry.isErr()) return err(expiry.error);
+    quoteExpiresAt = expiry.value;
+  }
+  const id = computeExecutionPlanId(steps, requirements, quoteExpiresAt);
+  const common = {
     __typename: 'ExecutionPlan',
-    version: 1,
     id,
     steps,
     requirements,
     metadata: input.metadata ?? { source: 'custom' },
-  });
-}
-
-function computePlanId(
-  steps: readonly TransactionRequest[],
-  requirements: ExecutorRequirements,
-): string {
-  const canonical = JSON.stringify({
-    requirements,
-    steps: steps.map((step) => ({
-      id: step.id,
-      chainId: step.chainId,
-      from: step.from.toLowerCase(),
-      to: step.to.toLowerCase(),
-      data: step.data.toLowerCase(),
-      value: step.value.toString(),
-      operation: step.operation,
-      authorization:
-        step.authorization === undefined
-          ? null
-          : {
-              token: step.authorization.token.toLowerCase(),
-              owner: step.authorization.owner.toLowerCase(),
-              spender: step.authorization.spender.toLowerCase(),
-              amount: step.authorization.amount.toString(),
-            },
-    })),
-  });
-  return `plan-${keccak256(stringToHex(canonical)).slice(2)}`;
+  } as const;
+  return quoteExpiresAt === undefined
+    ? validateExecutionPlan({ ...common, version: 1 })
+    : validateExecutionPlan({ ...common, version: 2, quoteExpiresAt });
 }
 
 export function serializeExecutionPlan(plan: ExecutionPlan): Result<string, ValidationError> {
@@ -231,12 +215,25 @@ export function deserializeExecutionPlan(
 
   const validated = validateExecutionPlan(value as ExecutionPlan);
   if (validated.isErr()) return err(validated.error);
-  if (computePlanId(validated.value.steps, validated.value.requirements) !== validated.value.id) {
+  if (
+    computeExecutionPlanId(
+      validated.value.steps,
+      validated.value.requirements,
+      validated.value.quoteExpiresAt,
+    ) !== validated.value.id
+  ) {
     return err(
       ValidationError.forField('plan.id', 'plan id does not match its transaction contents'),
     );
   }
   return validated;
+}
+
+export function checkExecutionPlanExpiry(plan: ExecutionPlan): Result<void, QuoteExpiredError> {
+  if (plan.quoteExpiresAt === undefined || Date.now() < Date.parse(plan.quoteExpiresAt)) {
+    return ok(undefined);
+  }
+  return err(new QuoteExpiredError(plan, plan.quoteExpiresAt));
 }
 
 export function resumeExecutionPlan(

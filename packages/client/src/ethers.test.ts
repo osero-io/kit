@@ -1,5 +1,5 @@
 import { makeError, type Signer, type TransactionReceipt, type TransactionResponse } from 'ethers';
-import type { Mock } from 'vitest';
+import { type Mock, vi } from 'vitest';
 
 import { sendWith } from './ethers.js';
 import { defineAdapterContract, mockFn, type AdapterContractFactory } from './lib/_testing.js';
@@ -84,7 +84,7 @@ const factory: AdapterContractFactory = (configuration = {}) => {
 
 defineAdapterContract('ethers', factory);
 
-function singlePlan() {
+function singlePlan(quoteExpiresAt?: string) {
   const transaction = createTransactionRequest({
     id: 'swap',
     chainId: 8453,
@@ -95,7 +95,10 @@ function singlePlan() {
     estimatedGas: { gas: 1n, source: 'hosted-api' },
   });
   if (transaction.isErr()) throw transaction.error;
-  const valuePlan = createExecutionPlan({ steps: [transaction.value] });
+  const valuePlan = createExecutionPlan({
+    steps: [transaction.value],
+    ...(quoteExpiresAt === undefined ? {} : { quoteExpiresAt }),
+  });
   if (valuePlan.isErr()) throw valuePlan.error;
   return valuePlan.value;
 }
@@ -111,6 +114,8 @@ function twoStepPlan() {
 }
 
 describe('ethers stage behavior', () => {
+  afterEach(() => vi.useRealTimers());
+
   it('rejects a detached signer before resolving account or sending', async () => {
     const state = makeHarness();
     const detached = { ...state.signer, provider: null } as unknown as Signer;
@@ -161,6 +166,23 @@ describe('ethers stage behavior', () => {
 
     expect(result.isOk()).toBe(true);
     expect(state.sendTransaction).toHaveBeenCalledWith(expect.objectContaining({ gasLimit: 115n }));
+  });
+
+  it('rechecks quote expiry after estimation and immediately before wallet submission', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-22T19:59:59Z'));
+    const state = makeHarness();
+    state.estimateGas.mockImplementation(async () => {
+      vi.setSystemTime(new Date('2026-07-22T20:00:00Z'));
+      return 100n;
+    });
+
+    const result = await sendWith(state.signer, singlePlan('2026-07-22T20:00:00Z'));
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('QUOTE_EXPIRED');
+    expect(state.estimateGas).toHaveBeenCalledOnce();
+    expect(state.sendTransaction).not.toHaveBeenCalled();
   });
 
   it('preserves submitted hash on receipt timeout and maps reverts truthfully', async () => {

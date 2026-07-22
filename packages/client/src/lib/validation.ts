@@ -1,4 +1,12 @@
-import { decodeFunctionData, getAddress, isAddress, type Address, type Hex } from 'viem';
+import {
+  decodeFunctionData,
+  getAddress,
+  isAddress,
+  keccak256,
+  stringToHex,
+  type Address,
+  type Hex,
+} from 'viem';
 
 import { erc20Abi } from './abis/erc20.js';
 import { UINT256_MAX } from './domain.js';
@@ -7,8 +15,10 @@ import { err, ok, type Result } from './result.js';
 import type {
   ConfirmedTransaction,
   ExecutionPlan,
+  ExecutorRequirements,
   ExecutionResumeState,
   OperationType,
+  QuoteExpiry,
   TransactionRequest,
 } from './types.js';
 
@@ -26,6 +36,37 @@ const OPERATIONS: Readonly<Record<OperationType, true>> = {
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const HEX_BYTES_PATTERN = /^0x(?:[0-9a-fA-F]{2})*$/;
 const HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+const UTC_INSTANT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
+
+export function computeExecutionPlanId(
+  steps: readonly TransactionRequest[],
+  requirements: ExecutorRequirements,
+  quoteExpiresAt?: string,
+): string {
+  const canonical = JSON.stringify({
+    requirements,
+    ...(quoteExpiresAt === undefined ? {} : { quoteExpiresAt }),
+    steps: steps.map((step) => ({
+      id: step.id,
+      chainId: step.chainId,
+      from: step.from.toLowerCase(),
+      to: step.to.toLowerCase(),
+      data: step.data.toLowerCase(),
+      value: step.value.toString(),
+      operation: step.operation,
+      authorization:
+        step.authorization === undefined
+          ? null
+          : {
+              token: step.authorization.token.toLowerCase(),
+              owner: step.authorization.owner.toLowerCase(),
+              spender: step.authorization.spender.toLowerCase(),
+              amount: step.authorization.amount.toString(),
+            },
+    })),
+  });
+  return `plan-${keccak256(stringToHex(canonical)).slice(2)}`;
+}
 
 export function validateAddress(value: unknown, field: string): Result<Address, ValidationError> {
   if (typeof value !== 'string' || !isAddress(value)) {
@@ -53,6 +94,40 @@ export function validateConfirmations(value: unknown): Result<number, Validation
     );
   }
   return ok(value);
+}
+
+export function validateQuoteExpiry(
+  value: unknown,
+  field = 'plan.quoteExpiresAt',
+): Result<QuoteExpiry, ValidationError> {
+  if (typeof value !== 'string') {
+    return err(ValidationError.forField(field, `${field} must be a valid UTC instant`));
+  }
+  const match = UTC_INSTANT_PATTERN.exec(value);
+  if (match === null) {
+    return err(ValidationError.forField(field, `${field} must be a valid UTC instant`));
+  }
+  const [, year, month, day, hour, minute, second, fraction = ''] = match;
+  const instant = new Date(0);
+  instant.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  instant.setUTCHours(
+    Number(hour),
+    Number(minute),
+    Number(second),
+    Number(fraction.padEnd(3, '0').slice(0, 3)),
+  );
+  if (
+    !Number.isFinite(instant.getTime()) ||
+    instant.getUTCFullYear() !== Number(year) ||
+    instant.getUTCMonth() !== Number(month) - 1 ||
+    instant.getUTCDate() !== Number(day) ||
+    instant.getUTCHours() !== Number(hour) ||
+    instant.getUTCMinutes() !== Number(minute) ||
+    instant.getUTCSeconds() !== Number(second)
+  ) {
+    return err(ValidationError.forField(field, `${field} must be a valid UTC instant`));
+  }
+  return ok(value as QuoteExpiry);
 }
 
 export function validateTransactionRequest(
@@ -244,12 +319,26 @@ export function validateExecutionPlan(plan: ExecutionPlan): Result<ExecutionPlan
     typeof plan !== 'object' ||
     plan === null ||
     plan.__typename !== 'ExecutionPlan' ||
-    plan.version !== 1
+    (plan.version !== 1 && plan.version !== 2)
   ) {
-    return err(ValidationError.forField('plan', 'plan must be a version 1 ExecutionPlan'));
+    return err(ValidationError.forField('plan', 'plan must be a supported ExecutionPlan'));
   }
   if (typeof plan.id !== 'string' || !IDENTIFIER_PATTERN.test(plan.id)) {
     return err(ValidationError.forField('plan.id', 'plan.id must be a stable ASCII identifier'));
+  }
+  if (plan.version === 1 && plan.quoteExpiresAt !== undefined) {
+    return err(
+      ValidationError.forField('plan.quoteExpiresAt', 'version 1 plans cannot carry quote expiry'),
+    );
+  }
+  if (plan.version === 2 && plan.quoteExpiresAt === undefined) {
+    return err(
+      ValidationError.forField('plan.quoteExpiresAt', 'version 2 plans require quote expiry'),
+    );
+  }
+  if (plan.quoteExpiresAt !== undefined) {
+    const expiry = validateQuoteExpiry(plan.quoteExpiresAt);
+    if (expiry.isErr()) return err(expiry.error);
   }
   if (!Array.isArray(plan.steps) || plan.steps.length === 0) {
     return err(ValidationError.forField('plan.steps', 'plan must contain at least one step'));
@@ -313,6 +402,15 @@ export function validateExecutionPlan(plan: ExecutionPlan): Result<ExecutionPlan
         ),
       );
     }
+  }
+
+  if (
+    plan.version === 2 &&
+    computeExecutionPlanId(steps, plan.requirements, plan.quoteExpiresAt) !== plan.id
+  ) {
+    return err(
+      ValidationError.forField('plan.id', 'plan id does not match its transaction contents'),
+    );
   }
 
   return ok({ ...plan, steps });

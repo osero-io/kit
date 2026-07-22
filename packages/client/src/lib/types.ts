@@ -10,6 +10,7 @@ import type {
   ConfigurationError,
   ConfirmationError,
   ProgressCallbackError,
+  QuoteExpiredError,
   RpcError,
   SimulationError,
   SigningError,
@@ -65,14 +66,31 @@ export type ExecutionPlanMetadata = {
   readonly quoteId?: string;
 };
 
-export type ExecutionPlan = {
+declare const quoteExpiryBrand: unique symbol;
+
+export type QuoteExpiry = string & {
+  readonly [quoteExpiryBrand]: true;
+};
+
+type ExecutionPlanBase = {
   readonly __typename: 'ExecutionPlan';
-  readonly version: 1;
   readonly id: string;
   readonly steps: readonly TransactionRequest[];
   readonly requirements: ExecutorRequirements;
   readonly metadata: ExecutionPlanMetadata;
 };
+
+export type ExecutionPlan = ExecutionPlanBase &
+  (
+    | {
+        readonly version: 1;
+        readonly quoteExpiresAt?: never;
+      }
+    | {
+        readonly version: 2;
+        readonly quoteExpiresAt: QuoteExpiry;
+      }
+  );
 
 export type TransactionConfirmation = {
   readonly status: 'success';
@@ -165,6 +183,7 @@ export type SendWithError =
   | AccountMismatchError
   | ChainMismatchError
   | UnsupportedCapabilityError
+  | QuoteExpiredError
   | CancelError
   | SimulationError
   | SigningError
