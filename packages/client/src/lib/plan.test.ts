@@ -5,6 +5,7 @@ import { ValidationError } from './errors.js';
 import {
   createApprovalTransaction,
   createExecutionPlan,
+  createPreparedApprovalTransaction,
   createTransactionRequest,
   deserializeExecutionPlan,
   resumeExecutionPlan,
@@ -103,6 +104,33 @@ describe('transaction construction', () => {
         amount: 123n,
       });
     }
+  });
+
+  it('validates an authoritative prepared approval without regenerating its calldata', () => {
+    const calldata = createApprovalTransaction({
+      id: 'source',
+      chainId: 8453,
+      owner: ACCOUNT,
+      token: TOKEN,
+      spender: TARGET,
+      amount: 123n,
+    });
+    if (calldata.isErr()) throw calldata.error;
+
+    const result = createPreparedApprovalTransaction({
+      id: 'prepared',
+      chainId: 8453,
+      sender: ACCOUNT,
+      recipient: TOKEN,
+      calldata: calldata.value.data,
+      value: 0n,
+      token: TOKEN,
+      spender: TARGET,
+      requiredAmount: 123n,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.data).toBe(calldata.value.data);
   });
 });
 

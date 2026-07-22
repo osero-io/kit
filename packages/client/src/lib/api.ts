@@ -12,7 +12,7 @@ import {
 } from 'viem';
 
 import { erc20Abi } from './abis/erc20.js';
-import { prepareAllowanceWithPublicClient } from './allowance.js';
+import { checkAllowanceWithPublicClient } from './allowance.js';
 import {
   type Referral,
   parseSlippage,
@@ -32,7 +32,11 @@ import {
   UnexpectedError,
   ValidationError,
 } from './errors.js';
-import { createExecutionPlan, createTransactionRequest } from './plan.js';
+import {
+  createExecutionPlan,
+  createPreparedApprovalTransaction,
+  createTransactionRequest,
+} from './plan.js';
 import { referralCodeForApi } from './referrals.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './result.js';
 import type { ExecutionPlan } from './types.js';
@@ -534,7 +538,13 @@ export type OseroApiReadyToExecute = {
   readonly walletExecutionPlan: ExecutionPlan;
 };
 
-export type OseroApiHostedSwapWorkflow = OseroApiReadyToExecute;
+export type OseroApiApprovalRequired = {
+  readonly state: 'approval-required';
+  readonly quote: OseroApiSwapQuoteResponse;
+  readonly walletExecutionPlan: ExecutionPlan;
+};
+
+export type OseroApiHostedSwapWorkflow = OseroApiApprovalRequired | OseroApiReadyToExecute;
 
 export type OseroApiSwapStatusBridge = {
   readonly protocol: OseroApiBridgeProtocol;
@@ -577,7 +587,7 @@ type OseroApiSwapQuoteBody = {
 type RequestJsonArgs<T> = {
   readonly method: 'GET' | 'POST';
   readonly path: string;
-  readonly body?: OseroApiSwapQuoteBody;
+  readonly body?: OseroApiSwapQuoteBody | OseroApiRefreshContext;
   readonly options?: OseroApiRequestOptions;
   readonly decoder: (value: unknown) => Result<T, UnexpectedError>;
 };
@@ -671,7 +681,29 @@ export class OseroApiClient {
           slippageBps: body.value.slippage ?? '5',
           referralCode: body.value.referralCode ?? null,
         }),
-    }).andThen((response) => this.prepareHostedWorkflow(response));
+    }).andThen((response) => this.prepareHostedWorkflow(response, options?.signal));
+  }
+
+  refreshSwapQuote(
+    refreshContext: OseroApiRefreshContext,
+    options?: OseroApiRequestOptions,
+  ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
+    return this.requestJson({
+      method: 'POST',
+      path: 'swap/quote/refresh',
+      body: refreshContext,
+      options,
+      decoder: (value) =>
+        decodeSwapQuoteResponse(value, {
+          fromAddress: refreshContext.walletAddress,
+          fromAssetId: refreshContext.sourceAssetId,
+          toAssetId: refreshContext.destinationAssetId,
+          amount: refreshContext.amount,
+          slippageBps: refreshContext.slippage.bps,
+          referralCode: refreshContext.referralCode,
+          provider: refreshContext.provider,
+        }),
+    }).andThen((response) => this.prepareHostedWorkflow(response, options?.signal));
   }
 
   getSwapStatus(
@@ -819,10 +851,12 @@ export class OseroApiClient {
 
   private prepareHostedWorkflow(
     response: OseroApiSwapQuoteResponse,
+    signal?: AbortSignal,
   ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
     const preparation = async (): Promise<
       Result<OseroApiHostedSwapWorkflow, OseroApiClientError>
     > => {
+      if (signal?.aborted) return err(CancelError.from(signal.reason));
       const allowanceSnapshots = [];
       const approvalSteps = response.executionPlan.approvalSteps
         .map((approval, index) => [index, approval] as const)
@@ -837,49 +871,106 @@ export class OseroApiClient {
             ),
           );
         }
-        const chainId = response.routeSummary.sourceChainId;
-        const publicClient = await ResultAsync.fromPromise(
-          Promise.resolve().then(() => provider(chainId)),
-          (cause) =>
-            new ConfigurationError(
-              `publicClientProvider failed for chain ${chainId}`,
-              'publicClientProvider',
-              { cause },
-            ),
-        );
-        if (publicClient.isErr()) return err(publicClient.error);
-        if (publicClient.value.chain?.id !== chainId) {
-          return err(
-            new ConfigurationError(
-              'publicClientProvider returned a client for the wrong source chain',
-              'publicClientProvider',
-            ),
-          );
-        }
-        const block = await ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
-          RpcError.from({ cause, operation: 'getBlockNumber', chainId }),
-        );
-        if (block.isErr()) return err(block.error);
+        const clients = new Map<
+          number,
+          { readonly client: OseroApiPublicClient; readonly blockNumber: bigint }
+        >();
 
         // Approval Steps are checked in API order so the first insufficient step fails closed.
         // oxlint-disable no-await-in-loop
         for (const [index, approval] of approvalSteps) {
-          const allowance = await prepareAllowanceWithPublicClient(publicClient.value, {
-            stepId: `approval-${index + 1}`,
-            chainId,
-            token: approval.token.address,
-            owner: approval.transaction.sender,
-            spender: approval.spender,
-            requiredAmount: BigInt(approval.requiredAmount.raw),
-            policy: 'none',
-            blockNumber: block.value,
-          });
+          if (signal?.aborted) return err(CancelError.from(signal.reason));
+          const chainId = approval.transaction.chainId;
+          let chain = clients.get(chainId);
+          if (chain === undefined) {
+            const publicClient = await awaitResultWithCancellation(
+              ResultAsync.fromPromise(
+                Promise.resolve().then(() => provider(chainId)),
+                (cause) =>
+                  new ConfigurationError(
+                    `publicClientProvider failed for chain ${chainId}`,
+                    'publicClientProvider',
+                    { cause },
+                  ),
+              ),
+              signal,
+            );
+            if (signal?.aborted) return err(CancelError.from(signal.reason));
+            if (publicClient.isErr()) return err(publicClient.error);
+            if (publicClient.value.chain?.id !== chainId) {
+              return err(
+                new ConfigurationError(
+                  `publicClientProvider returned a client for the wrong chain ${chainId}`,
+                  'publicClientProvider',
+                ),
+              );
+            }
+            const block = await awaitResultWithCancellation(
+              ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
+                RpcError.from({ cause, operation: 'getBlockNumber', chainId }),
+              ),
+              signal,
+            );
+            if (signal?.aborted) return err(CancelError.from(signal.reason));
+            if (block.isErr()) return err(block.error);
+            chain = { client: publicClient.value, blockNumber: block.value };
+            clients.set(chainId, chain);
+          }
+          const allowance = await awaitResultWithCancellation(
+            checkAllowanceWithPublicClient(chain.client, {
+              stepId: `approval-${index + 1}`,
+              chainId,
+              token: approval.token.address,
+              owner: approval.transaction.sender,
+              spender: approval.spender,
+              requiredAmount: BigInt(approval.requiredAmount.raw),
+              policy: 'none',
+              blockNumber: chain.blockNumber,
+            }),
+            signal,
+          );
+          if (signal?.aborted) return err(CancelError.from(signal.reason));
           if (allowance.isErr()) return err(allowance.error);
           allowanceSnapshots.push(allowance.value.snapshot);
+          if (allowance.value.needsApproval) {
+            const transaction = approval.transaction;
+            const prepared = createPreparedApprovalTransaction({
+              id: `approval-${index + 1}`,
+              chainId: transaction.chainId,
+              sender: transaction.sender,
+              recipient: transaction.recipient,
+              calldata: transaction.calldata,
+              value: BigInt(transaction.value),
+              token: approval.token.address,
+              spender: approval.spender,
+              requiredAmount: BigInt(approval.requiredAmount.raw),
+              ...(transaction.gasLimit === null || BigInt(transaction.gasLimit) === 0n
+                ? {}
+                : {
+                    estimatedGas: {
+                      gas: BigInt(transaction.gasLimit),
+                      source: 'hosted-api',
+                    },
+                  }),
+            });
+            if (prepared.isErr()) return err(prepared.error);
+            const plan = createExecutionPlan({
+              steps: [prepared.value],
+              quoteExpiresAt: response.quote.expiresAt,
+              metadata: { source: 'hosted-api', allowanceSnapshots },
+            });
+            if (plan.isErr()) return err(plan.error);
+            return ok({
+              state: 'approval-required',
+              quote: response,
+              walletExecutionPlan: plan.value,
+            });
+          }
         }
         // oxlint-enable no-await-in-loop
       }
 
+      if (signal?.aborted) return err(CancelError.from(signal.reason));
       const transaction = response.executionPlan.executionStep.transaction;
       const execution = createTransactionRequest({
         id: 'execute-swap',
@@ -1008,6 +1099,27 @@ function isAbortFailure(cause: unknown, signal: AbortSignal | undefined): boolea
     signal?.aborted === true ||
     (cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'TimeoutError'))
   );
+}
+
+function awaitResultWithCancellation<Value, ErrorType>(
+  result: PromiseLike<Result<Value, ErrorType>>,
+  signal: AbortSignal | undefined,
+): Promise<Result<Value, ErrorType | CancelError>> {
+  if (signal === undefined) return Promise.resolve(result);
+  if (signal.aborted) return Promise.resolve(err(CancelError.from(signal.reason)));
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (value: Result<Value, ErrorType | CancelError>) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      resolve(value);
+    };
+    const abort = () => settle(err(CancelError.from(signal.reason)));
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(result).then(settle);
+  });
 }
 
 function sleep(
@@ -1266,6 +1378,7 @@ function decodeSwapQuoteResponse(
     readonly amount: OseroApiIntegerString;
     readonly slippageBps: string;
     readonly referralCode: number | null;
+    readonly provider?: OseroApiQuoteProvider;
   },
 ): Result<OseroApiSwapQuoteResponse, UnexpectedError> {
   return decode(value, (root) => {
@@ -1313,12 +1426,16 @@ function assertSwapQuoteInvariants(
     readonly amount: OseroApiIntegerString;
     readonly slippageBps: string;
     readonly referralCode: number | null;
+    readonly provider?: OseroApiQuoteProvider;
   },
 ): void {
   const { executionPlan, pair, provider, quote, refreshContext, routeSummary, statusContext } =
     response;
   if (!isAddressEqual(refreshContext.walletAddress, expected.fromAddress)) {
     throw new DecodeError('$.refreshContext.walletAddress must match the requested fromAddress');
+  }
+  if (expected.provider !== undefined && provider !== expected.provider) {
+    throw new DecodeError('$.provider must match the provider-locked Refresh Context');
   }
   if (quote.inputAmount.raw !== expected.amount || refreshContext.amount !== expected.amount) {
     throw new DecodeError('quote and Refresh Context amounts must match the requested amount');
@@ -1859,7 +1976,7 @@ function decodeLifiToken(value: unknown, path: string): OseroApiLifiToken {
   const record = asRecord(value, path);
   return {
     chainId: positiveChainIdField(record, 'chainId', `${path}.chainId`),
-    address: addressField(record, 'address', `${path}.address`),
+    address: addressField(record, 'address', `${path}.address`, true),
     symbol: nonEmptyStringField(record, 'symbol', `${path}.symbol`),
     decimals: decimalsField(record, 'decimals', `${path}.decimals`),
   };
@@ -1999,9 +2116,14 @@ function decodeReferralCode(value: unknown, path: string): number {
   return code;
 }
 
-function addressField(record: Record<string, unknown>, field: string, path: string): Address {
+function addressField(
+  record: Record<string, unknown>,
+  field: string,
+  path: string,
+  allowZero = false,
+): Address {
   const value = stringField(record, field, path);
-  if (!isAddress(value) || /^0x0{40}$/i.test(value)) {
+  if (!isAddress(value) || (!allowZero && /^0x0{40}$/i.test(value))) {
     throw new DecodeError(`${path} must be a non-zero EVM address`);
   }
   return value as Address;

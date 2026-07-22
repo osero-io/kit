@@ -8,10 +8,12 @@ if (!contractRoot) {
   console.error('OSERO_API_CONTRACT_ROOT must point to the authoritative API checkout.');
   process.exit(1);
 }
-const fixture = resolve(contractRoot, 'docs/client-migration/examples/enso-same-chain-quote.json');
-if (!existsSync(fixture)) {
-  console.error(`Authoritative Enso contract fixture not found: ${fixture}`);
-  process.exit(1);
+for (const name of ['enso-same-chain-quote.json', 'lifi-cross-chain-quote.json']) {
+  const fixture = resolve(contractRoot, 'docs/client-migration/examples', name);
+  if (!existsSync(fixture)) {
+    console.error(`Authoritative contract fixture not found: ${fixture}`);
+    process.exit(1);
+  }
 }
 
 const forwarded = process.argv

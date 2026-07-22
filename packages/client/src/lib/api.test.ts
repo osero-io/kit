@@ -16,13 +16,7 @@ import {
   type OseroApiSwapStatusResponse,
 } from './api.js';
 import { parseSlippage, referral, UINT256_MAX } from './domain.js';
-import {
-  ApiRequestError,
-  ApiResponseError,
-  ConfigurationError,
-  InsufficientAllowanceError,
-  TimeoutError,
-} from './errors.js';
+import { ApiRequestError, ApiResponseError, ConfigurationError, TimeoutError } from './errors.js';
 
 const WALLET: Address = '0x1111111111111111111111111111111111111111';
 const OTHER_WALLET: Address = '0x9999999999999999999999999999999999999999';
@@ -143,6 +137,7 @@ function sameChainQuoteForAmount(raw: `${bigint}`): OseroApiSwapQuoteResponse {
 function quoteWithApproval(
   options: {
     readonly encodedSpender?: Address;
+    readonly spender?: Address;
     readonly sender?: Address;
     readonly tokenChainId?: number;
     readonly recipient?: Address;
@@ -155,7 +150,7 @@ function quoteWithApproval(
   const approvalData = encodeFunctionData({
     abi: erc20Abi,
     functionName: 'approve',
-    args: [options.encodedSpender ?? SPENDER, requiredAmount],
+    args: [options.encodedSpender ?? options.spender ?? SPENDER, requiredAmount],
   });
   return {
     ...ENSO_SAME_CHAIN_QUOTE,
@@ -175,7 +170,7 @@ function quoteWithApproval(
             chainId: options.tokenChainId ?? 1,
             symbol: options.tokenSymbol ?? ENSO_SAME_CHAIN_QUOTE.pair.source.symbol,
           },
-          spender: SPENDER,
+          spender: options.spender ?? SPENDER,
           requiredAmount: {
             raw: requiredAmount.toString() as `${bigint}`,
             formatted: formatUnits(requiredAmount, 18),
@@ -287,7 +282,7 @@ function fetchSequence(...responses: FetchResponse[]): {
 }
 
 function publicClient(
-  allowance: bigint,
+  allowance: bigint | readonly bigint[],
   chainId = 8453,
 ): {
   readonly client: PublicClient;
@@ -295,7 +290,14 @@ function publicClient(
   readonly readContract: Mock;
 } {
   const getBlockNumber = mockFn(async () => 123n);
-  const readContract = mockFn(async () => allowance);
+  const allowances = typeof allowance === 'bigint' ? [allowance] : allowance;
+  let allowanceIndex = 0;
+  const readContract = mockFn(async () => {
+    const value = allowances[Math.min(allowanceIndex, allowances.length - 1)];
+    allowanceIndex += 1;
+    if (value === undefined) throw new Error('No allowance configured');
+    return value;
+  });
   const client = {
     chain: { ...base, id: chainId },
     getBlockNumber,
@@ -553,7 +555,7 @@ describe('hosted quote verification and preparation', () => {
     expect(rpc.readContract).toHaveBeenCalledTimes(1);
   });
 
-  it('fails closed when an Approval Step is insufficient until Quote Refresh is added', async () => {
+  it('exposes only the exact API-prepared approval when the first Approval Step is insufficient', async () => {
     const transport = fetchSequence({ body: quoteWithApproval() });
     const rpc = publicClient(0n, 1);
     const client = OseroApiClient.create({
@@ -569,8 +571,242 @@ describe('hosted quote verification and preparation', () => {
       }),
     );
 
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) expect(result.error).toBeInstanceOf(InsufficientAllowanceError);
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('approval-required');
+      expect(result.value.quote.executionPlan.executionStep).toBeDefined();
+      expect(result.value.walletExecutionPlan.steps).toEqual([
+        {
+          __typename: 'TransactionRequest',
+          id: 'approval-1',
+          chainId: 1,
+          from: WALLET,
+          to: ENSO_SAME_CHAIN_QUOTE.pair.source.address,
+          data: quoteWithApproval().executionPlan.approvalSteps[0]?.transaction.calldata,
+          value: 0n,
+          operation: 'APPROVE_ERC20',
+          authorization: {
+            kind: 'erc20-approval',
+            token: ENSO_SAME_CHAIN_QUOTE.pair.source.address,
+            owner: WALLET,
+            spender: SPENDER,
+            amount: 1_000_000_000_000_000_000n,
+          },
+          estimatedGas: { gas: 50_000n, source: 'hosted-api' },
+        },
+      ]);
+      expect(result.value.walletExecutionPlan.quoteExpiresAt).toBe(
+        ENSO_SAME_CHAIN_QUOTE.quote.expiresAt,
+      );
+    }
+    expect(rpc.readContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: ENSO_SAME_CHAIN_QUOTE.pair.source.address,
+        args: [WALLET, SPENDER],
+        blockNumber: 123n,
+      }),
+    );
+  });
+
+  it('checks multiple Approval Steps in order and withholds all steps after the first insufficient one', async () => {
+    const first = quoteWithApproval().executionPlan.approvalSteps[0]!;
+    const second = quoteWithApproval({ spender: OTHER_SPENDER }).executionPlan.approvalSteps[0]!;
+    const laterSpender: Address = '0x8888888888888888888888888888888888888888';
+    const third = quoteWithApproval({ spender: laterSpender }).executionPlan.approvalSteps[0]!;
+    const fixture = {
+      ...quoteWithApproval(),
+      executionPlan: {
+        ...quoteWithApproval().executionPlan,
+        approvalSteps: [first, second, third],
+      },
+    };
+    const transport = fetchSequence({ body: fixture });
+    const rpc = publicClient([1_000_000_000_000_000_000n, 0n], 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.getSwapQuote(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('approval-required');
+      expect(result.value.walletExecutionPlan.steps).toHaveLength(1);
+      expect(result.value.walletExecutionPlan.steps[0]?.authorization?.spender).toBe(OTHER_SPENDER);
+    }
+    expect(rpc.readContract).toHaveBeenCalledTimes(2);
+    expect(rpc.readContract).not.toHaveBeenCalledWith(
+      expect.objectContaining({ args: [WALLET, laterSpender] }),
+    );
+  });
+
+  it('refreshes with the returned context unchanged and rechecks a changed spender', async () => {
+    const initial = quoteWithApproval();
+    const refreshed = quoteWithApproval({ spender: OTHER_SPENDER });
+    const transport = fetchSequence({ body: initial }, { body: refreshed });
+    const rpc = publicClient([0n, 0n], 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+    const request = quoteRequest({
+      fromAssetId: 'ethereum:usds',
+      amount: amount(1_000_000_000_000_000_000n),
+    });
+
+    const first = await client.getSwapQuote(request);
+    if (first.isErr()) throw first.error;
+    const result = await client.refreshSwapQuote(first.value.quote.refreshContext);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('approval-required');
+      expect(result.value.walletExecutionPlan.steps[0]?.authorization?.spender).toBe(OTHER_SPENDER);
+    }
+    expect(JSON.parse(String(transport.calls[1]?.init?.body))).toEqual(initial.refreshContext);
+    expect(transport.calls[1]?.url).toBe('https://api.osero.org/v1/swap/quote/refresh');
+    expect(rpc.readContract).toHaveBeenCalledTimes(2);
+    expect(rpc.readContract).toHaveBeenLastCalledWith(
+      expect.objectContaining({ args: [WALLET, OTHER_SPENDER] }),
+    );
+  });
+
+  it('rechecks allowance when refresh repeats an Approval Step and becomes ready once sufficient', async () => {
+    const approvalQuote = quoteWithApproval();
+    const transport = fetchSequence(
+      { body: approvalQuote },
+      { body: approvalQuote },
+      { body: approvalQuote },
+    );
+    const rpc = publicClient([0n, 0n, 1_000_000_000_000_000_000n], 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+    const initial = await client.getSwapQuote(
+      quoteRequest({
+        fromAssetId: 'ethereum:usds',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+    );
+    if (initial.isErr()) throw initial.error;
+
+    const repeated = await client.refreshSwapQuote(initial.value.quote.refreshContext);
+    if (repeated.isErr()) throw repeated.error;
+    const ready = await client.refreshSwapQuote(repeated.value.quote.refreshContext);
+
+    expect(repeated.value.state).toBe('approval-required');
+    expect(ready.isOk()).toBe(true);
+    if (ready.isOk()) {
+      expect(ready.value.state).toBe('ready-to-execute');
+      expect(ready.value.walletExecutionPlan.steps.map((step) => step.operation)).toEqual([
+        'SWAP_EXACT_IN',
+      ]);
+    }
+    expect(rpc.readContract).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns typed provider and allowance RPC failures without exposing a plan', async () => {
+    const providerTransport = fetchSequence({ body: quoteWithApproval() });
+    const providerFailure = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: providerTransport.fetch,
+      publicClientProvider: async () => {
+        throw new Error('provider unavailable');
+      },
+    });
+    const rpcTransport = fetchSequence({ body: quoteWithApproval() });
+    const rpc = publicClient(0n, 1);
+    rpc.readContract.mockRejectedValueOnce(new Error('allowance unavailable'));
+    const rpcFailure = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: rpcTransport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+    const request = quoteRequest({
+      fromAssetId: 'ethereum:usds',
+      amount: amount(1_000_000_000_000_000_000n),
+    });
+
+    const failedProvider = await providerFailure.getSwapQuote(request);
+    const failedRpc = await rpcFailure.getSwapQuote(request);
+
+    expect(failedProvider.isErr()).toBe(true);
+    if (failedProvider.isErr()) expect(failedProvider.error.code).toBe('CONFIGURATION_ERROR');
+    expect(failedRpc.isErr()).toBe(true);
+    if (failedRpc.isErr()) expect(failedRpc.error.code).toBe('RPC_REQUEST_FAILED');
+  });
+
+  it('fails closed on provider switching, malformed refresh responses, and cancellation', async () => {
+    const switchedProvider = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      provider: 'future-provider',
+      refreshContext: {
+        ...ENSO_SAME_CHAIN_QUOTE.refreshContext,
+        provider: 'future-provider',
+      },
+      providerDetails: { provider: 'future-provider' },
+    };
+    const switchedTransport = fetchSequence({ body: switchedProvider });
+    const switchedClient = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: switchedTransport.fetch,
+    });
+    const switched = await switchedClient.refreshSwapQuote(ENSO_SAME_CHAIN_QUOTE.refreshContext);
+
+    const malformedTransport = fetchSequence({
+      body: changedQuote(['executionPlan', 'executionStep', 'transaction', 'calldata'], '0x1'),
+    });
+    const malformedClient = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: malformedTransport.fetch,
+    });
+    const malformed = await malformedClient.refreshSwapQuote(ENSO_SAME_CHAIN_QUOTE.refreshContext);
+
+    const controller = new AbortController();
+    const cancelledFetch = mockFn(
+      async (): Promise<Response> => new Response(JSON.stringify(quoteWithApproval())),
+    );
+    let markAllowanceReadStarted!: () => void;
+    const allowanceReadStarted = new Promise<void>((resolve) => {
+      markAllowanceReadStarted = resolve;
+    });
+    const cancelledRpc = {
+      chain: { ...base, id: 1 },
+      getBlockNumber: async () => 123n,
+      readContract: () => {
+        markAllowanceReadStarted();
+        return new Promise<bigint>(() => {});
+      },
+    } as unknown as PublicClient;
+    const cancelledClient = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: cancelledFetch,
+      publicClientProvider: () => cancelledRpc,
+    });
+    const pendingCancellation = cancelledClient.refreshSwapQuote(
+      ENSO_SAME_CHAIN_QUOTE.refreshContext,
+      { signal: controller.signal },
+    );
+    await allowanceReadStarted;
+    controller.abort('stop during allowance read');
+    const cancelled = await pendingCancellation;
+
+    expect(switched.isErr()).toBe(true);
+    if (switched.isErr()) expect(switched.error).toBeInstanceOf(ApiResponseError);
+    expect(malformed.isErr()).toBe(true);
+    if (malformed.isErr()) expect(malformed.error).toBeInstanceOf(ApiResponseError);
+    expect(cancelled.isErr()).toBe(true);
+    if (cancelled.isErr()) expect(cancelled.error.code).toBe('CANCELLED');
   });
 
   it('skips a zero-required Approval Step without configuring allowance RPC', async () => {
@@ -738,7 +974,32 @@ describe('hosted quote verification and preparation', () => {
         routeId: 'route-1',
         usesComposer: true,
         gasCostUsd: '0.42',
-        steps: [],
+        steps: [
+          {
+            id: 'step-1',
+            type: 'swap',
+            tool: 'lifi',
+            executionDurationSeconds: null,
+            feeCosts: [],
+            gasCosts: [
+              {
+                type: 'SEND',
+                price: '1',
+                estimate: '1',
+                limit: '1',
+                amount: '1',
+                amountUsd: null,
+                token: {
+                  chainId: 1,
+                  address: '0x0000000000000000000000000000000000000000',
+                  symbol: 'ETH',
+                  decimals: 18,
+                },
+              },
+            ],
+            includedSteps: [],
+          },
+        ],
       },
     } as const;
     const unknownQuote = {
@@ -763,6 +1024,9 @@ describe('hosted quote verification and preparation', () => {
     expect(lifi.isOk()).toBe(true);
     if (lifi.isOk() && isOseroApiLifiProviderDetails(lifi.value.quote.providerDetails)) {
       expect(lifi.value.quote.providerDetails.usesComposer).toBe(true);
+      expect(lifi.value.quote.providerDetails.steps[0]?.gasCosts[0]?.token.address).toBe(
+        '0x0000000000000000000000000000000000000000',
+      );
     }
     expect(unknown.isOk()).toBe(true);
     if (unknown.isOk()) {

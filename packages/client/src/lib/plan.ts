@@ -88,21 +88,47 @@ export function createApprovalTransaction(input: {
     );
   }
 
+  return createPreparedApprovalTransaction({
+    id: input.id,
+    chainId: input.chainId,
+    sender: owner.value,
+    recipient: token.value,
+    calldata: data,
+    value: 0n,
+    token: token.value,
+    spender: spender.value,
+    requiredAmount: amount.value,
+    ...(input.estimatedGas === undefined ? {} : { estimatedGas: input.estimatedGas }),
+  });
+}
+
+export function createPreparedApprovalTransaction(input: {
+  readonly id: string;
+  readonly chainId: number;
+  readonly sender: Address;
+  readonly recipient: Address;
+  readonly calldata: Hex;
+  readonly value: bigint;
+  readonly token: Address;
+  readonly spender: Address;
+  readonly requiredAmount: bigint;
+  readonly estimatedGas?: AdvisoryGasEstimate;
+}): Result<TransactionRequest, ValidationError> {
   return validateTransactionRequest({
     __typename: 'TransactionRequest',
     id: input.id,
     chainId: input.chainId,
-    from: owner.value,
-    to: token.value,
-    data,
-    value: 0n,
+    from: input.sender,
+    to: input.recipient,
+    data: input.calldata,
+    value: input.value,
     operation: 'APPROVE_ERC20',
     authorization: {
       kind: 'erc20-approval',
-      token: token.value,
-      owner: owner.value,
-      spender: spender.value,
-      amount: amount.value,
+      token: input.token,
+      owner: input.sender,
+      spender: input.spender,
+      amount: input.requiredAmount,
     },
     ...(input.estimatedGas === undefined ? {} : { estimatedGas: input.estimatedGas }),
   });
