@@ -64,3 +64,17 @@ Hosted API vocabulary is different: the client ships **no gate**. The `OSERO_API
 ## Package exports
 
 `@osero/client` ships six subpath exports: `.` (types, client, registries), `./actions`, `./api`, `./viem`, `./ethers`, `./privy`. The `package.json` `exports` map has an `osero-sdk` condition pointing at raw `.ts` source for in-repo consumers (examples), and `import`/`default` for the built `./dist/*.js` for published consumers. Keep those in sync when adding a new entrypoint.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `osero-io/kit`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five default canonical labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain documentation uses the single-context layout. See `docs/agents/domain.md`.
