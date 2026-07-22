@@ -26,7 +26,7 @@
     "dist/lib/adapters.d.ts": "7e979afb51d19a8cada82952093748d8426da0d2f4bccb66bba89748aa44909c",
     "dist/lib/addresses.d.ts": "029395ff4e9aca2abd9bd0de7f009359015e247351fb757ad2082d0d114abd93",
     "dist/lib/allowance.d.ts": "8206d4383289f24fb8711f53bb2e1523eea3aec1003ef329532ed56df50dbc0c",
-    "dist/lib/api.d.ts": "52350d58ea553a56458bf0c94444dde7a118d8cdd3620b982dd129cc6abefb06",
+    "dist/lib/api.d.ts": "e83d8c0e42014ea92f55a6b068f445b8a1a77eb8d26596dccd57300cc76671c1",
     "dist/lib/apy.d.ts": "bfebea166f9d798c687d00e7c15e0cf1aaede4ec404b54bbac83de8a99612fe7",
     "dist/lib/balances.d.ts": "40aa1a136036dafb8369d04f15d95ec558d2ca8c0674788381f6c417777f0e1f",
     "dist/lib/capabilities.d.ts": "f3d5f99731a677f98122aec8c79e2eb062e57bab7edf82af29c95d0e53334a83",

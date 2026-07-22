@@ -43,7 +43,7 @@ async function main() {
   const attribution = optionalReferral();
 
   banner(`API quote execution — ${chain.name}`);
-  const quote = await api.getSwapQuote({
+  const workflow = await api.getSwapQuote({
     fromAddress: account.address,
     fromAssetId: 'base:usdc',
     toAssetId: 'ethereum:susds',
@@ -51,22 +51,21 @@ async function main() {
     slippage: slippage.value,
     ...(attribution === undefined ? {} : { referral: attribution }),
   });
-  if (quote.isErr()) throw quote.error;
+  if (workflow.isErr()) throw workflow.error;
+  const { quote, walletExecutionPlan } = workflow.value;
 
-  console.log(`  amount out: ${quote.value.quote.amountOut?.formatted ?? 'preview unavailable'}`);
-  console.log(`  bridge: ${quote.value.bridge.required ? quote.value.bridge.protocol : 'none'}`);
-  console.log(`  tx count: ${quote.value.executionPlan.steps.length}`);
-  console.log(describePlan(quote.value.executionPlan));
+  console.log(`  amount out: ${quote.quote.expectedOutput.formatted}`);
+  console.log(`  bridge: ${quote.routeSummary.bridge ?? 'none'}`);
+  console.log(`  tx count: ${walletExecutionPlan.steps.length}`);
+  console.log(describePlan(walletExecutionPlan));
 
-  const result = await sendWith(wallet, quote.value.executionPlan);
+  const result = await sendWith(wallet, walletExecutionPlan);
   if (result.isErr()) throw result.error;
 
   banner('Submitted');
   console.log(describeResult(result.value, chain.explorerUrl));
-  if (quote.value.bridge.required) {
-    console.log(
-      'Track completion with api.waitForSwapCompletion(quote.value, result.value.txHash).',
-    );
+  if (quote.statusContext !== null) {
+    console.log('Track completion with api.waitForSwapCompletion(quote, result.value.txHash).');
   }
 }
 

@@ -1,5 +1,6 @@
 import {
   decodeFunctionData,
+  formatUnits,
   getAddress,
   isAddress,
   isAddressEqual,
@@ -13,7 +14,6 @@ import {
 import { erc20Abi } from './abis/erc20.js';
 import { prepareAllowanceWithPublicClient } from './allowance.js';
 import {
-  type ApprovalPolicy,
   type Referral,
   parseSlippage,
   referral as createReferral,
@@ -36,6 +36,7 @@ import { createExecutionPlan, createTransactionRequest } from './plan.js';
 import { referralCodeForApi } from './referrals.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './result.js';
 import type { ExecutionPlan } from './types.js';
+import { validateQuoteExpiry } from './validation.js';
 
 export const DEFAULT_OSERO_API_BASE_URL = 'https://api.osero.org/v1/';
 
@@ -161,8 +162,6 @@ export type OseroApiChainId = OseroApiKnownChainId | (number & {});
 export type OseroApiChainKey = OseroApiKnownChainKey | (string & {});
 export type OseroApiBridgeProtocol = OseroApiKnownBridgeProtocol | (string & {});
 export type OseroApiAssetKind = 'counter' | 'vault' | (string & {});
-export type OseroApiSwapDirection = 'to-susds' | 'from-susds' | 'swap' | (string & {});
-export type OseroApiSwapExecutionKind = 'same-chain' | 'cross-chain' | (string & {});
 export type OseroApiBridgeState = 'pending' | 'completed' | 'failed' | 'unknown' | (string & {});
 export type OseroApiBridgeProviderStatus =
   | 'pending'
@@ -231,7 +230,6 @@ export type OseroApiSwapQuoteRequest = {
   readonly amount: OseroApiInputAmount;
   readonly slippage?: Slippage;
   readonly referral?: Referral;
-  readonly approvalPolicy?: ApprovalPolicy;
 };
 
 export type OseroApiSwapStatusRequest = {
@@ -332,7 +330,7 @@ function matchByLocator(
 
 function parseAssetLocatorString(
   value: string,
-): { readonly chainId: number; readonly address: string } | undefined {
+): { readonly chainId: number; readonly address: Address } | undefined {
   const separator = value.indexOf(':');
   if (separator === -1) {
     return undefined;
@@ -343,7 +341,7 @@ function parseAssetLocatorString(
     return undefined;
   }
   const chainId = Number(head);
-  return Number.isSafeInteger(chainId) ? { chainId, address: tail } : undefined;
+  return Number.isSafeInteger(chainId) ? { chainId, address: tail as Address } : undefined;
 }
 
 export type OseroApiSwapAmount = {
@@ -351,92 +349,192 @@ export type OseroApiSwapAmount = {
   readonly formatted: string;
 };
 
-export type OseroApiSwapTransaction = {
-  readonly to: Address;
-  readonly from: Address;
-  readonly data: Hex;
+declare const unknownQuoteProviderBrand: unique symbol;
+
+export type OseroApiUnknownQuoteProvider = string & {
+  readonly [unknownQuoteProviderBrand]: true;
+};
+
+export type OseroApiQuoteProvider = 'enso' | 'lifi' | OseroApiUnknownQuoteProvider;
+export type OseroApiReferralAttributionStatus = 'not-requested' | 'applied' | 'not-applied';
+
+export type OseroApiSwapSlippage = {
+  readonly bps: string;
+  readonly percent: string;
+};
+
+export type OseroApiReferralAttribution = {
+  readonly requestedCode: number | null;
+  readonly status: OseroApiReferralAttributionStatus;
+};
+
+export type OseroApiPreparedTransaction = {
+  readonly chainId: OseroApiChainId;
+  readonly sender: Address;
+  readonly recipient: Address;
+  readonly calldata: Hex;
   readonly value: OseroApiIntegerString;
+  readonly gasLimit: OseroApiIntegerString | null;
 };
 
-export type OseroApiSwapRouteHop = {
-  readonly protocol: string;
-  readonly action: string;
-  readonly chainId: number;
-  readonly sourceChainId: number | null;
-  readonly destinationChainId: number | null;
-};
-
-export type OseroApiSwapBridgeStatusRequest = {
-  readonly sourceChainId: OseroApiChainId;
-  readonly bridgeProtocol: OseroApiBridgeProtocol;
-};
-
-export type OseroApiSwapQuoteInfo = {
-  readonly amountIn: OseroApiSwapAmount;
-  readonly amountOut: OseroApiSwapAmount | null;
-  readonly previewUnavailable: boolean;
-  readonly slippage: {
-    readonly bps: string;
-    readonly percent: string;
-  };
-  readonly gas: OseroApiIntegerString | null;
-  readonly priceImpactBps: number | null;
-  readonly createdAt: number | null;
-};
-
-export type OseroApiSwapApproval = {
+export type OseroApiApprovalStep = {
   readonly token: OseroApiSwapAsset;
   readonly spender: Address;
-  readonly amount: OseroApiSwapAmount;
-  readonly gas: OseroApiIntegerString | null;
-  readonly transaction: OseroApiSwapTransaction;
+  readonly requiredAmount: OseroApiSwapAmount;
+  readonly transaction: OseroApiPreparedTransaction;
 };
 
-export type OseroApiSwapExecution = {
-  readonly kind: OseroApiSwapExecutionKind;
-  readonly sourceChainId: OseroApiChainId;
-  readonly destinationChainId: OseroApiChainId;
-  readonly transaction: OseroApiSwapTransaction;
-  readonly route: readonly OseroApiSwapRouteHop[];
+export type OseroApiExecutionStep = {
+  readonly transaction: OseroApiPreparedTransaction;
 };
 
-/**
- * Discriminated on `required`. A bridge-tracked quote (`required: true`)
- * always carries a non-null `protocol` + `statusRequest` — the decoder
- * enforces this because {@link OseroApiClient.getSwapStatusForQuote}
- * relies on the narrowing. When `required` is `false` the fields are
- * `null` today; the decoder tolerates future non-null informational
- * values rather than failing.
- */
-export type OseroApiSwapBridge =
-  | {
-      readonly required: true;
-      readonly protocol: OseroApiBridgeProtocol;
-      readonly statusRequest: OseroApiSwapBridgeStatusRequest;
-    }
-  | {
-      readonly required: false;
-      readonly protocol: OseroApiBridgeProtocol | null;
-      readonly statusRequest: OseroApiSwapBridgeStatusRequest | null;
-    };
+export type OseroApiExecutionPlan = {
+  readonly approvalSteps: readonly OseroApiApprovalStep[];
+  readonly executionStep: OseroApiExecutionStep;
+};
 
 export type OseroApiSwapPair = {
-  readonly direction: OseroApiSwapDirection;
-  readonly from: OseroApiSwapAsset;
-  readonly to: OseroApiSwapAsset;
+  readonly source: OseroApiSwapAsset;
+  readonly destination: OseroApiSwapAsset;
 };
+
+export type OseroApiSwapQuoteEconomics = {
+  readonly inputAmount: OseroApiSwapAmount;
+  readonly expectedOutput: OseroApiSwapAmount;
+  readonly minimumOutput: OseroApiSwapAmount | null;
+  readonly slippage: OseroApiSwapSlippage;
+  readonly referralAttribution: OseroApiReferralAttribution;
+  readonly quotedAt: string;
+  readonly expiresAt: string;
+};
+
+export type OseroApiRouteSummary = {
+  readonly kind: 'same-chain' | 'cross-chain';
+  readonly sourceChainId: OseroApiChainId;
+  readonly destinationChainId: OseroApiChainId;
+  readonly bridge: OseroApiBridgeProtocol | null;
+};
+
+export type OseroApiRefreshContext = {
+  readonly provider: OseroApiQuoteProvider;
+  readonly walletAddress: Address;
+  readonly sourceAssetId: OseroApiAssetId;
+  readonly destinationAssetId: OseroApiAssetId;
+  readonly amount: OseroApiIntegerString;
+  readonly slippage: OseroApiSwapSlippage;
+  readonly referralCode: number | null;
+};
+
+export type OseroApiStatusContext = {
+  readonly provider: OseroApiQuoteProvider;
+  readonly sourceChainId: OseroApiChainId;
+  readonly destinationChainId: OseroApiChainId;
+  readonly bridge: OseroApiBridgeProtocol;
+};
+
+export type OseroApiEnsoRouteLabel = {
+  readonly protocol: string;
+  readonly action: string;
+};
+
+export type OseroApiEnsoProviderDetails = {
+  readonly provider: 'enso';
+  readonly route: readonly OseroApiEnsoRouteLabel[];
+  readonly gasUnits: OseroApiIntegerString | null;
+  readonly priceImpactBps: number | null;
+  readonly simulationBlockNumber: number | null;
+};
+
+export type OseroApiLifiToken = {
+  readonly chainId: OseroApiChainId;
+  readonly address: Address;
+  readonly symbol: string;
+  readonly decimals: number;
+};
+
+export type OseroApiLifiFeeCost = {
+  readonly name: string;
+  readonly description: string | null;
+  readonly amount: OseroApiIntegerString;
+  readonly amountUsd: string | null;
+  readonly percentage: string | null;
+  readonly included: boolean;
+  readonly token: OseroApiLifiToken;
+};
+
+export type OseroApiLifiGasCost = {
+  readonly type: string;
+  readonly price: OseroApiIntegerString;
+  readonly estimate: OseroApiIntegerString;
+  readonly limit: OseroApiIntegerString;
+  readonly amount: OseroApiIntegerString;
+  readonly amountUsd: string | null;
+  readonly token: OseroApiLifiToken;
+};
+
+export type OseroApiLifiIncludedStep = {
+  readonly id: string;
+  readonly type: string;
+  readonly tool: string;
+};
+
+export type OseroApiLifiStep = {
+  readonly id: string;
+  readonly type: string;
+  readonly tool: string;
+  readonly executionDurationSeconds: number | null;
+  readonly feeCosts: readonly OseroApiLifiFeeCost[];
+  readonly gasCosts: readonly OseroApiLifiGasCost[];
+  readonly includedSteps: readonly OseroApiLifiIncludedStep[];
+};
+
+export type OseroApiLifiProviderDetails = {
+  readonly provider: 'lifi';
+  readonly routeId: string;
+  readonly usesComposer: boolean;
+  readonly gasCostUsd: string | null;
+  readonly steps: readonly OseroApiLifiStep[];
+};
+
+export type OseroApiUnknownProviderDetails = Readonly<Record<string, unknown>> & {
+  readonly provider: OseroApiUnknownQuoteProvider;
+};
+
+export type OseroApiQuoteProviderDetails =
+  | OseroApiEnsoProviderDetails
+  | OseroApiLifiProviderDetails
+  | OseroApiUnknownProviderDetails;
+
+export function isOseroApiEnsoProviderDetails(
+  details: OseroApiQuoteProviderDetails,
+): details is OseroApiEnsoProviderDetails {
+  return details.provider === 'enso';
+}
+
+export function isOseroApiLifiProviderDetails(
+  details: OseroApiQuoteProviderDetails,
+): details is OseroApiLifiProviderDetails {
+  return details.provider === 'lifi';
+}
 
 export type OseroApiSwapQuoteResponse = {
+  readonly provider: OseroApiQuoteProvider;
   readonly pair: OseroApiSwapPair;
-  readonly quote: OseroApiSwapQuoteInfo;
-  readonly approval: OseroApiSwapApproval;
-  readonly execution: OseroApiSwapExecution;
-  readonly bridge: OseroApiSwapBridge;
+  readonly quote: OseroApiSwapQuoteEconomics;
+  readonly routeSummary: OseroApiRouteSummary;
+  readonly executionPlan: OseroApiExecutionPlan;
+  readonly refreshContext: OseroApiRefreshContext;
+  readonly statusContext: OseroApiStatusContext | null;
+  readonly providerDetails: OseroApiQuoteProviderDetails;
 };
 
-export type OseroApiSwapQuote = OseroApiSwapQuoteResponse & {
-  readonly executionPlan: ExecutionPlan;
+export type OseroApiReadyToExecute = {
+  readonly state: 'ready-to-execute';
+  readonly quote: OseroApiSwapQuoteResponse;
+  readonly walletExecutionPlan: ExecutionPlan;
 };
+
+export type OseroApiHostedSwapWorkflow = OseroApiReadyToExecute;
 
 export type OseroApiSwapStatusBridge = {
   readonly protocol: OseroApiBridgeProtocol;
@@ -487,15 +585,15 @@ type RequestJsonArgs<T> = {
 /**
  * HTTP client for `https://api.osero.org/v1/`. It is intentionally
  * independent from the on-chain `OseroClient`: callers can use it only to
- * fetch quotes, or pass `quote.executionPlan` to the existing wallet
- * adapters for execution.
+ * fetch quotes, or pass the Hosted Swap Workflow's `walletExecutionPlan`
+ * to the existing wallet adapters for execution.
  *
  * Validation philosophy: the client checks wire grammar and execution
  * safety (addresses, hex payloads, integer bounds) and its own response
  * contract, while the hosted API is the sole authority on supported
  * assets, pairs, and policy limits. Requests the API would accept are
  * never rejected locally, and responses containing assets, chains,
- * protocols, kinds, directions, or states unknown to this SDK release
+ * protocols, providers, or states unknown to this SDK release
  * decode normally.
  */
 export class OseroApiClient {
@@ -555,17 +653,9 @@ export class OseroApiClient {
   getSwapQuote(
     request: OseroApiSwapQuoteRequest,
     options?: OseroApiRequestOptions,
-  ): ResultAsync<OseroApiSwapQuote, OseroApiClientError> {
+  ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
     const body = encodeSwapQuoteRequest(request);
     if (body.isErr()) return errAsync(body.error);
-    if (this.#publicClientProvider === undefined) {
-      return errAsync(
-        new ConfigurationError(
-          'getSwapQuote requires publicClientProvider for allowance-aware preparation',
-          'publicClientProvider',
-        ),
-      );
-    }
 
     return this.requestJson({
       method: 'POST',
@@ -575,9 +665,13 @@ export class OseroApiClient {
       decoder: (value) =>
         decodeSwapQuoteResponse(value, {
           fromAddress: body.value.fromAddress,
+          fromAssetId: body.value.fromAssetId,
+          toAssetId: body.value.toAssetId,
           amount: body.value.amount,
+          slippageBps: body.value.slippage ?? '5',
+          referralCode: body.value.referralCode ?? null,
         }),
-    }).andThen((response) => this.prepareHostedPlan(response, request.approvalPolicy ?? 'exact'));
+    }).andThen((response) => this.prepareHostedWorkflow(response));
   }
 
   getSwapStatus(
@@ -599,7 +693,7 @@ export class OseroApiClient {
     txHash: Hex,
     options?: OseroApiRequestOptions,
   ): ResultAsync<OseroApiSwapStatusResponse, OseroApiClientError> {
-    if (!quote.bridge.required) {
+    if (quote.statusContext === null) {
       return errAsync(
         ValidationError.forField(
           'quote',
@@ -610,8 +704,8 @@ export class OseroApiClient {
     return this.getSwapStatus(
       {
         txHash,
-        sourceChainId: quote.bridge.statusRequest.sourceChainId,
-        bridgeProtocol: quote.bridge.statusRequest.bridgeProtocol,
+        sourceChainId: quote.statusContext.sourceChainId,
+        bridgeProtocol: quote.statusContext.bridge,
       },
       options,
     );
@@ -622,12 +716,12 @@ export class OseroApiClient {
     txHash: Hex,
     options: WaitForSwapCompletionOptions = {},
   ): ResultAsync<OseroApiSwapCompletion, OseroApiClientError> {
-    if (!quote.bridge.required) {
+    if (quote.statusContext === null) {
       return errAsync(
         ValidationError.forField('quote', 'waitForSwapCompletion requires a cross-chain quote'),
       );
     }
-    const statusRequest = quote.bridge.statusRequest;
+    const statusRequest = quote.statusContext;
     if (!isTransactionHash(txHash)) {
       return errAsync(ValidationError.forField('txHash', 'txHash must be a 32-byte hex string'));
     }
@@ -674,7 +768,7 @@ export class OseroApiClient {
           {
             txHash,
             sourceChainId: statusRequest.sourceChainId,
-            bridgeProtocol: statusRequest.bridgeProtocol,
+            bridgeProtocol: statusRequest.bridge,
           },
           {
             ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
@@ -723,101 +817,102 @@ export class OseroApiClient {
     return new ResultAsync(wait());
   }
 
-  private prepareHostedPlan(
+  private prepareHostedWorkflow(
     response: OseroApiSwapQuoteResponse,
-    approvalPolicy: ApprovalPolicy,
-  ): ResultAsync<OseroApiSwapQuote, OseroApiClientError> {
-    if (approvalPolicy !== 'exact' && approvalPolicy !== 'max' && approvalPolicy !== 'none') {
-      return errAsync(
-        ValidationError.forField('approvalPolicy', 'approvalPolicy must be exact, max, or none'),
-      );
-    }
-    const provider = this.#publicClientProvider;
-    if (provider === undefined) {
-      return errAsync(
-        new ConfigurationError('publicClientProvider is not configured', 'publicClientProvider'),
-      );
-    }
-
-    const preparation = async (): Promise<Result<OseroApiSwapQuote, OseroApiClientError>> => {
-      const publicClient = await ResultAsync.fromPromise(
-        Promise.resolve().then(() => provider(response.execution.sourceChainId)),
-        (cause) =>
-          new ConfigurationError(
-            `publicClientProvider failed for chain ${response.execution.sourceChainId}`,
-            'publicClientProvider',
-            { cause },
-          ),
-      );
-      if (publicClient.isErr()) return err(publicClient.error);
-      if (publicClient.value.chain?.id !== response.execution.sourceChainId) {
-        return err(
-          new ConfigurationError(
-            'publicClientProvider returned a client for the wrong source chain',
-            'publicClientProvider',
-          ),
+  ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
+    const preparation = async (): Promise<
+      Result<OseroApiHostedSwapWorkflow, OseroApiClientError>
+    > => {
+      const allowanceSnapshots = [];
+      const approvalSteps = response.executionPlan.approvalSteps
+        .map((approval, index) => [index, approval] as const)
+        .filter(([, approval]) => BigInt(approval.requiredAmount.raw) > 0n);
+      if (approvalSteps.length > 0) {
+        const provider = this.#publicClientProvider;
+        if (provider === undefined) {
+          return err(
+            new ConfigurationError(
+              'quote preparation requires publicClientProvider when Approval Steps are present',
+              'publicClientProvider',
+            ),
+          );
+        }
+        const chainId = response.routeSummary.sourceChainId;
+        const publicClient = await ResultAsync.fromPromise(
+          Promise.resolve().then(() => provider(chainId)),
+          (cause) =>
+            new ConfigurationError(
+              `publicClientProvider failed for chain ${chainId}`,
+              'publicClientProvider',
+              { cause },
+            ),
         );
+        if (publicClient.isErr()) return err(publicClient.error);
+        if (publicClient.value.chain?.id !== chainId) {
+          return err(
+            new ConfigurationError(
+              'publicClientProvider returned a client for the wrong source chain',
+              'publicClientProvider',
+            ),
+          );
+        }
+        const block = await ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
+          RpcError.from({ cause, operation: 'getBlockNumber', chainId }),
+        );
+        if (block.isErr()) return err(block.error);
+
+        // Approval Steps are checked in API order so the first insufficient step fails closed.
+        // oxlint-disable no-await-in-loop
+        for (const [index, approval] of approvalSteps) {
+          const allowance = await prepareAllowanceWithPublicClient(publicClient.value, {
+            stepId: `approval-${index + 1}`,
+            chainId,
+            token: approval.token.address,
+            owner: approval.transaction.sender,
+            spender: approval.spender,
+            requiredAmount: BigInt(approval.requiredAmount.raw),
+            policy: 'none',
+            blockNumber: block.value,
+          });
+          if (allowance.isErr()) return err(allowance.error);
+          allowanceSnapshots.push(allowance.value.snapshot);
+        }
+        // oxlint-enable no-await-in-loop
       }
-      const block = await ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
-        RpcError.from({
-          cause,
-          operation: 'getBlockNumber',
-          chainId: response.execution.sourceChainId,
-        }),
-      );
-      if (block.isErr()) return err(block.error);
 
-      const approvalGas =
-        response.approval.gas === null
-          ? undefined
-          : {
-              gas: BigInt(response.approval.gas),
-              source: 'hosted-api' as const,
-            };
-      const allowance = await prepareAllowanceWithPublicClient(publicClient.value, {
-        stepId: 'approve-input-token',
-        chainId: response.execution.sourceChainId,
-        token: response.approval.token.address,
-        owner: response.execution.transaction.from,
-        spender: response.approval.spender,
-        requiredAmount: BigInt(response.approval.amount.raw),
-        policy: approvalPolicy,
-        blockNumber: block.value,
-        ...(approvalGas === undefined || approvalGas.gas === 0n
-          ? {}
-          : { estimatedGas: approvalGas }),
-      });
-      if (allowance.isErr()) return err(allowance.error);
-
+      const transaction = response.executionPlan.executionStep.transaction;
       const execution = createTransactionRequest({
         id: 'execute-swap',
-        chainId: response.execution.sourceChainId,
-        from: response.execution.transaction.from,
-        to: response.execution.transaction.to,
-        data: response.execution.transaction.data,
-        value: BigInt(response.execution.transaction.value),
+        chainId: transaction.chainId,
+        from: transaction.sender,
+        to: transaction.recipient,
+        data: transaction.calldata,
+        value: BigInt(transaction.value),
         operation: 'SWAP_EXACT_IN',
-        ...(response.quote.gas === null || BigInt(response.quote.gas) === 0n
+        ...(transaction.gasLimit === null || BigInt(transaction.gasLimit) === 0n
           ? {}
           : {
               estimatedGas: {
-                gas: BigInt(response.quote.gas),
+                gas: BigInt(transaction.gasLimit),
                 source: 'hosted-api',
               },
             }),
       });
       if (execution.isErr()) return err(execution.error);
       const plan = createExecutionPlan({
-        steps: allowance.value.approval
-          ? [allowance.value.approval, execution.value]
-          : [execution.value],
+        steps: [execution.value],
+        quoteExpiresAt: response.quote.expiresAt,
         metadata: {
           source: 'hosted-api',
-          allowanceSnapshots: [allowance.value.snapshot],
+          ...(allowanceSnapshots.length === 0 ? {} : { allowanceSnapshots }),
         },
       });
       if (plan.isErr()) return err(plan.error);
-      return ok({ ...response, executionPlan: plan.value });
+      return ok({
+        state: 'ready-to-execute',
+        quote: response,
+        walletExecutionPlan: plan.value,
+      });
     };
     return new ResultAsync(preparation());
   }
@@ -1066,17 +1161,6 @@ function encodeSwapQuoteRequest(
   }
   const referralCode = referralCodeForApi(configuredReferral);
   if (referralCode.isErr()) return err(referralCode.error);
-  if (
-    request.approvalPolicy !== undefined &&
-    request.approvalPolicy !== 'exact' &&
-    request.approvalPolicy !== 'max' &&
-    request.approvalPolicy !== 'none'
-  ) {
-    return err(
-      ValidationError.forField('approvalPolicy', 'approvalPolicy must be exact, max, or none'),
-    );
-  }
-
   return ok({
     fromAddress: getAddress(request.fromAddress),
     fromAssetId: fromAssetId.value,
@@ -1177,19 +1261,35 @@ function decodeSwapQuoteResponse(
   value: unknown,
   expected: {
     readonly fromAddress: Address;
+    readonly fromAssetId: string;
+    readonly toAssetId: string;
     readonly amount: OseroApiIntegerString;
+    readonly slippageBps: string;
+    readonly referralCode: number | null;
   },
 ): Result<OseroApiSwapQuoteResponse, UnexpectedError> {
   return decode(value, (root) => {
     const response = {
+      provider: decodeQuoteProvider(requiredField(root, 'provider', '$.provider'), '$.provider'),
       pair: decodeSwapPair(requiredField(root, 'pair', '$.pair'), '$.pair'),
-      quote: decodeSwapQuoteInfo(requiredField(root, 'quote', '$.quote'), '$.quote'),
-      approval: decodeSwapApproval(requiredField(root, 'approval', '$.approval'), '$.approval'),
-      execution: decodeSwapExecution(
-        requiredField(root, 'execution', '$.execution'),
-        '$.execution',
+      quote: decodeSwapQuoteEconomics(requiredField(root, 'quote', '$.quote'), '$.quote'),
+      routeSummary: decodeRouteSummary(
+        requiredField(root, 'routeSummary', '$.routeSummary'),
+        '$.routeSummary',
       ),
-      bridge: decodeSwapBridge(requiredField(root, 'bridge', '$.bridge'), '$.bridge'),
+      executionPlan: decodeApiExecutionPlan(
+        requiredField(root, 'executionPlan', '$.executionPlan'),
+        '$.executionPlan',
+      ),
+      refreshContext: decodeRefreshContext(
+        requiredField(root, 'refreshContext', '$.refreshContext'),
+        '$.refreshContext',
+      ),
+      statusContext: nullableField(root, 'statusContext', '$.statusContext', decodeStatusContext),
+      providerDetails: decodeQuoteProviderDetails(
+        requiredField(root, 'providerDetails', '$.providerDetails'),
+        '$.providerDetails',
+      ),
     };
     assertSwapQuoteInvariants(response, expected);
     return response;
@@ -1208,40 +1308,195 @@ function assertSwapQuoteInvariants(
   response: OseroApiSwapQuoteResponse,
   expected: {
     readonly fromAddress: Address;
+    readonly fromAssetId: string;
+    readonly toAssetId: string;
     readonly amount: OseroApiIntegerString;
+    readonly slippageBps: string;
+    readonly referralCode: number | null;
   },
 ): void {
-  const { approval, bridge, execution, quote } = response;
-  if (!isAddressEqual(approval.transaction.to, approval.token.address)) {
-    throw new DecodeError('$.approval.transaction.to must match $.approval.token.address');
+  const { executionPlan, pair, provider, quote, refreshContext, routeSummary, statusContext } =
+    response;
+  if (!isAddressEqual(refreshContext.walletAddress, expected.fromAddress)) {
+    throw new DecodeError('$.refreshContext.walletAddress must match the requested fromAddress');
   }
-  if (approval.transaction.value !== '0') {
-    throw new DecodeError('$.approval.transaction.value must be 0');
-  }
-  if (approval.token.chainId !== execution.sourceChainId) {
-    throw new DecodeError('$.approval.token.chainId must match $.execution.sourceChainId');
+  if (quote.inputAmount.raw !== expected.amount || refreshContext.amount !== expected.amount) {
+    throw new DecodeError('quote and Refresh Context amounts must match the requested amount');
   }
   if (
-    !isAddressEqual(approval.transaction.from, expected.fromAddress) ||
-    !isAddressEqual(execution.transaction.from, expected.fromAddress)
+    pair.source.assetId !== refreshContext.sourceAssetId ||
+    pair.destination.assetId !== refreshContext.destinationAssetId
   ) {
-    throw new DecodeError('approval and execution senders must match the requested fromAddress');
+    throw new DecodeError('$.refreshContext asset ids must match $.pair');
   }
-  if (quote.amountIn.raw !== expected.amount) {
-    throw new DecodeError('$.quote.amountIn.raw must match the requested amount');
+  assertRequestedAsset(pair.source, expected.fromAssetId, 'source');
+  assertRequestedAsset(pair.destination, expected.toAssetId, 'destination');
+  if (quote.slippage.bps !== expected.slippageBps) {
+    throw new DecodeError('$.quote.slippage.bps must match the requested slippage');
   }
-  if (bridge.required && bridge.statusRequest.sourceChainId !== execution.sourceChainId) {
+  if (quote.referralAttribution.requestedCode !== expected.referralCode) {
     throw new DecodeError(
-      '$.bridge.statusRequest.sourceChainId must match $.execution.sourceChainId',
+      '$.quote.referralAttribution.requestedCode must match the requested referral',
     );
   }
+  if (
+    pair.source.chainId !== routeSummary.sourceChainId ||
+    pair.destination.chainId !== routeSummary.destinationChainId
+  ) {
+    throw new DecodeError('$.routeSummary chains must match $.pair');
+  }
+  if (
+    quote.slippage.bps !== refreshContext.slippage.bps ||
+    quote.slippage.percent !== refreshContext.slippage.percent
+  ) {
+    throw new DecodeError('$.refreshContext.slippage must match $.quote.slippage');
+  }
+  if (quote.referralAttribution.requestedCode !== refreshContext.referralCode) {
+    throw new DecodeError(
+      '$.quote.referralAttribution.requestedCode must match $.refreshContext.referralCode',
+    );
+  }
+  if (
+    provider !== refreshContext.provider ||
+    provider !== response.providerDetails.provider ||
+    (statusContext !== null && provider !== statusContext.provider)
+  ) {
+    throw new DecodeError('provider tags must agree across the normalized quote');
+  }
+  if (Date.parse(quote.expiresAt) <= Date.parse(quote.quotedAt)) {
+    throw new DecodeError('$.quote.expiresAt must be after $.quote.quotedAt');
+  }
+  assertAmountFormat(quote.inputAmount, pair.source, '$.quote.inputAmount');
+  assertAmountFormat(quote.expectedOutput, pair.destination, '$.quote.expectedOutput');
+  if (BigInt(quote.inputAmount.raw) === 0n || BigInt(quote.expectedOutput.raw) === 0n) {
+    throw new DecodeError('Input Amount and Expected Output must be positive');
+  }
+  if (quote.minimumOutput !== null) {
+    assertAmountFormat(quote.minimumOutput, pair.destination, '$.quote.minimumOutput');
+    if (BigInt(quote.minimumOutput.raw) > BigInt(quote.expectedOutput.raw)) {
+      throw new DecodeError('$.quote.minimumOutput.raw must not exceed Expected Output');
+    }
+  }
 
+  if (routeSummary.kind === 'same-chain') {
+    if (
+      routeSummary.sourceChainId !== routeSummary.destinationChainId ||
+      routeSummary.bridge !== null ||
+      statusContext !== null
+    ) {
+      throw new DecodeError(
+        'same-chain quotes require equal chains, a null bridge, and null Status Context',
+      );
+    }
+  } else {
+    if (
+      routeSummary.sourceChainId === routeSummary.destinationChainId ||
+      routeSummary.bridge === null ||
+      statusContext === null
+    ) {
+      throw new DecodeError(
+        'cross-chain quotes require distinct chains, a bridge, and Status Context',
+      );
+    }
+    if (
+      statusContext.sourceChainId !== routeSummary.sourceChainId ||
+      statusContext.destinationChainId !== routeSummary.destinationChainId ||
+      statusContext.bridge !== routeSummary.bridge
+    ) {
+      throw new DecodeError('$.statusContext must match $.routeSummary');
+    }
+  }
+
+  for (const [index, approval] of executionPlan.approvalSteps.entries()) {
+    const path = `$.executionPlan.approvalSteps[${index}]`;
+    assertPreparedTransaction(
+      approval.transaction,
+      routeSummary.sourceChainId,
+      expected.fromAddress,
+      path,
+    );
+    if (!assetsMatch(approval.token, pair.source)) {
+      throw new DecodeError(`${path}.token must match $.pair.source`);
+    }
+    assertAmountFormat(approval.requiredAmount, pair.source, `${path}.requiredAmount`);
+    if (!isAddressEqual(approval.transaction.recipient, approval.token.address)) {
+      throw new DecodeError(`${path}.transaction.recipient must match the approval token`);
+    }
+    if (approval.transaction.value !== '0') {
+      throw new DecodeError(`${path}.transaction.value must be 0`);
+    }
+    assertApprovalCalldata(approval, path);
+  }
+  assertPreparedTransaction(
+    executionPlan.executionStep.transaction,
+    routeSummary.sourceChainId,
+    expected.fromAddress,
+    '$.executionPlan.executionStep',
+  );
+}
+
+function assertAmountFormat(
+  amount: OseroApiSwapAmount,
+  asset: OseroApiSwapAsset,
+  path: string,
+): void {
+  if (formatUnits(BigInt(amount.raw), asset.decimals) !== amount.formatted) {
+    throw new DecodeError(`${path}.formatted must match its raw amount and asset decimals`);
+  }
+}
+
+function assetsMatch(left: OseroApiSwapAsset, right: OseroApiSwapAsset): boolean {
+  return (
+    left.assetId === right.assetId &&
+    left.chainId === right.chainId &&
+    left.chainKey === right.chainKey &&
+    left.chainName === right.chainName &&
+    left.chainShortName === right.chainShortName &&
+    left.symbol === right.symbol &&
+    left.decimals === right.decimals &&
+    isAddressEqual(left.address, right.address) &&
+    left.label === right.label
+  );
+}
+
+function assertRequestedAsset(
+  asset: OseroApiSwapAsset,
+  requestedRef: string,
+  role: 'source' | 'destination',
+): void {
+  const locator = parseAssetLocatorString(requestedRef);
+  if (locator === undefined) {
+    if (asset.assetId !== requestedRef) {
+      throw new DecodeError(`$.pair.${role}.assetId must match the requested asset id`);
+    }
+    return;
+  }
+  if (asset.chainId !== locator.chainId || !isAddressEqual(asset.address, locator.address)) {
+    throw new DecodeError(`$.pair.${role} must match the requested asset locator`);
+  }
+}
+
+function assertPreparedTransaction(
+  transaction: OseroApiPreparedTransaction,
+  sourceChainId: number,
+  sender: Address,
+  path: string,
+): void {
+  if (transaction.chainId !== sourceChainId) {
+    throw new DecodeError(`${path}.transaction.chainId must match the source chain`);
+  }
+  if (!isAddressEqual(transaction.sender, sender)) {
+    throw new DecodeError(`${path}.transaction.sender must match the requested wallet`);
+  }
+}
+
+function assertApprovalCalldata(approval: OseroApiApprovalStep, path: string): void {
   let decoded: DecodeFunctionDataReturnType<typeof erc20Abi>;
   try {
-    decoded = decodeFunctionData({ abi: erc20Abi, data: approval.transaction.data });
+    decoded = decodeFunctionData({ abi: erc20Abi, data: approval.transaction.calldata });
   } catch (cause) {
     throw new DecodeError(
-      `$.approval.transaction.data must encode ERC-20 approve: ${
+      `${path}.transaction.calldata must encode ERC-20 approve: ${
         cause instanceof Error ? cause.message : String(cause)
       }`,
     );
@@ -1251,10 +1506,10 @@ function assertSwapQuoteInvariants(
     decoded.args[0] === undefined ||
     decoded.args[1] === undefined ||
     !isAddressEqual(decoded.args[0], approval.spender) ||
-    decoded.args[1] !== BigInt(approval.amount.raw)
+    decoded.args[1] !== BigInt(approval.requiredAmount.raw)
   ) {
     throw new DecodeError(
-      '$.approval.transaction.data must match approve($.approval.spender, $.approval.amount.raw)',
+      `${path}.transaction.calldata must match approve(spender, requiredAmount.raw)`,
     );
   }
 }
@@ -1281,9 +1536,11 @@ function decodeSupportedAsset(value: unknown, path: string): OseroApiSupportedAs
 function decodeSwapPair(value: unknown, path: string): OseroApiSwapPair {
   const record = asRecord(value, path);
   return {
-    direction: nonEmptyStringField(record, 'direction', `${path}.direction`),
-    from: decodeSwapAsset(requiredField(record, 'from', `${path}.from`), `${path}.from`),
-    to: decodeSwapAsset(requiredField(record, 'to', `${path}.to`), `${path}.to`),
+    source: decodeSwapAsset(requiredField(record, 'source', `${path}.source`), `${path}.source`),
+    destination: decodeSwapAsset(
+      requiredField(record, 'destination', `${path}.destination`),
+      `${path}.destination`,
+    ),
   };
 }
 
@@ -1307,22 +1564,71 @@ function decodeSwapAsset(value: unknown, path: string): OseroApiSwapAsset {
   };
 }
 
-function decodeSwapQuoteInfo(value: unknown, path: string): OseroApiSwapQuoteInfo {
+function decodeSwapQuoteEconomics(value: unknown, path: string): OseroApiSwapQuoteEconomics {
   const record = asRecord(value, path);
   return {
-    amountIn: decodeSwapAmount(
-      requiredField(record, 'amountIn', `${path}.amountIn`),
-      `${path}.amountIn`,
+    inputAmount: decodeSwapAmount(
+      requiredField(record, 'inputAmount', `${path}.inputAmount`),
+      `${path}.inputAmount`,
     ),
-    amountOut: nullableField(record, 'amountOut', `${path}.amountOut`, decodeSwapAmount),
-    previewUnavailable: booleanField(record, 'previewUnavailable', `${path}.previewUnavailable`),
+    expectedOutput: decodeSwapAmount(
+      requiredField(record, 'expectedOutput', `${path}.expectedOutput`),
+      `${path}.expectedOutput`,
+    ),
+    minimumOutput: nullableField(
+      record,
+      'minimumOutput',
+      `${path}.minimumOutput`,
+      decodeSwapAmount,
+    ),
     slippage: decodeSlippage(
       requiredField(record, 'slippage', `${path}.slippage`),
       `${path}.slippage`,
     ),
-    gas: nullableField(record, 'gas', `${path}.gas`, decodeNonNegativeIntegerString),
-    priceImpactBps: nullableField(record, 'priceImpactBps', `${path}.priceImpactBps`, decodeNumber),
-    createdAt: nullableField(record, 'createdAt', `${path}.createdAt`, decodeNumber),
+    referralAttribution: decodeReferralAttribution(
+      requiredField(record, 'referralAttribution', `${path}.referralAttribution`),
+      `${path}.referralAttribution`,
+    ),
+    quotedAt: timestampField(record, 'quotedAt', `${path}.quotedAt`),
+    expiresAt: timestampField(record, 'expiresAt', `${path}.expiresAt`),
+  };
+}
+
+function decodeReferralAttribution(value: unknown, path: string): OseroApiReferralAttribution {
+  const record = asRecord(value, path);
+  const status = nonEmptyStringField(record, 'status', `${path}.status`);
+  if (status !== 'not-requested' && status !== 'applied' && status !== 'not-applied') {
+    throw new DecodeError(`${path}.status is not a valid Referral Attribution status`);
+  }
+  const requestedCode = nullableField(
+    record,
+    'requestedCode',
+    `${path}.requestedCode`,
+    decodeReferralCode,
+  );
+  if ((status === 'not-requested') !== (requestedCode === null)) {
+    throw new DecodeError(
+      `${path}.requestedCode must be null exactly when no referral was requested`,
+    );
+  }
+  return { requestedCode, status };
+}
+
+function decodeRouteSummary(value: unknown, path: string): OseroApiRouteSummary {
+  const record = asRecord(value, path);
+  const kind = nonEmptyStringField(record, 'kind', `${path}.kind`);
+  if (kind !== 'same-chain' && kind !== 'cross-chain') {
+    throw new DecodeError(`${path}.kind must be same-chain or cross-chain`);
+  }
+  return {
+    kind,
+    sourceChainId: positiveChainIdField(record, 'sourceChainId', `${path}.sourceChainId`),
+    destinationChainId: positiveChainIdField(
+      record,
+      'destinationChainId',
+      `${path}.destinationChainId`,
+    ),
+    bridge: nullableField(record, 'bridge', `${path}.bridge`, decodeNonEmptyString),
   };
 }
 
@@ -1330,120 +1636,241 @@ function decodeSwapAmount(value: unknown, path: string): OseroApiSwapAmount {
   const record = asRecord(value, path);
   return {
     raw: uint256StringField(record, 'raw', `${path}.raw`),
-    formatted: stringField(record, 'formatted', `${path}.formatted`),
+    formatted: decimalStringField(record, 'formatted', `${path}.formatted`),
   };
 }
 
-function decodeSlippage(
-  value: unknown,
-  path: string,
-): { readonly bps: string; readonly percent: string } {
+function decodeSlippage(value: unknown, path: string): OseroApiSwapSlippage {
+  const record = asRecord(value, path);
+  const bps = stringField(record, 'bps', `${path}.bps`);
+  if (parseSlippage(bps).isErr()) {
+    throw new DecodeError(`${path}.bps must be a decimal basis-point value from 0 to 10000`);
+  }
+  const percent = decimalStringField(record, 'percent', `${path}.percent`);
+  if (percent !== slippageBpsToPercent(bps)) {
+    throw new DecodeError(`${path}.percent must match ${path}.bps`);
+  }
+  return {
+    bps,
+    percent,
+  };
+}
+
+function slippageBpsToPercent(value: string): string {
+  const [whole = '0', fraction = ''] = value.split('.');
+  const scale = fraction.length + 2;
+  const numerator = `${whole}${fraction}`.replace(/^0+(?=\d)/, '');
+  const padded = numerator.padStart(scale + 1, '0');
+  const percentWhole = padded.slice(0, -scale);
+  const percentFraction = padded.slice(-scale).replace(/0+$/, '');
+  return percentFraction ? `${percentWhole}.${percentFraction}` : percentWhole;
+}
+
+function decodeApiExecutionPlan(value: unknown, path: string): OseroApiExecutionPlan {
   const record = asRecord(value, path);
   return {
-    bps: stringField(record, 'bps', `${path}.bps`),
-    percent: stringField(record, 'percent', `${path}.percent`),
+    approvalSteps: arrayField(record, 'approvalSteps', `${path}.approvalSteps`, decodeApprovalStep),
+    executionStep: decodeExecutionStep(
+      requiredField(record, 'executionStep', `${path}.executionStep`),
+      `${path}.executionStep`,
+    ),
   };
 }
 
-function decodeSwapApproval(value: unknown, path: string): OseroApiSwapApproval {
+function decodeApprovalStep(value: unknown, path: string): OseroApiApprovalStep {
   const record = asRecord(value, path);
   return {
     token: decodeSwapAsset(requiredField(record, 'token', `${path}.token`), `${path}.token`),
     spender: addressField(record, 'spender', `${path}.spender`),
-    amount: decodeSwapAmount(requiredField(record, 'amount', `${path}.amount`), `${path}.amount`),
-    gas: nullableField(record, 'gas', `${path}.gas`, decodeNonNegativeIntegerString),
-    transaction: decodeSwapTransaction(
+    requiredAmount: decodeSwapAmount(
+      requiredField(record, 'requiredAmount', `${path}.requiredAmount`),
+      `${path}.requiredAmount`,
+    ),
+    transaction: decodePreparedTransaction(
       requiredField(record, 'transaction', `${path}.transaction`),
       `${path}.transaction`,
     ),
   };
 }
 
-function decodeSwapExecution(value: unknown, path: string): OseroApiSwapExecution {
+function decodeExecutionStep(value: unknown, path: string): OseroApiExecutionStep {
   const record = asRecord(value, path);
   return {
-    kind: nonEmptyStringField(record, 'kind', `${path}.kind`),
+    transaction: decodePreparedTransaction(
+      requiredField(record, 'transaction', `${path}.transaction`),
+      `${path}.transaction`,
+    ),
+  };
+}
+
+function decodePreparedTransaction(value: unknown, path: string): OseroApiPreparedTransaction {
+  const record = asRecord(value, path);
+  return {
+    chainId: positiveChainIdField(record, 'chainId', `${path}.chainId`),
+    sender: addressField(record, 'sender', `${path}.sender`),
+    recipient: addressField(record, 'recipient', `${path}.recipient`),
+    calldata: calldataField(record, 'calldata', `${path}.calldata`),
+    value: uint256StringField(record, 'value', `${path}.value`),
+    gasLimit: nullableField(record, 'gasLimit', `${path}.gasLimit`, decodeUint256String),
+  };
+}
+
+function decodeRefreshContext(value: unknown, path: string): OseroApiRefreshContext {
+  const record = asRecord(value, path);
+  return {
+    provider: decodeQuoteProvider(
+      requiredField(record, 'provider', `${path}.provider`),
+      `${path}.provider`,
+    ),
+    walletAddress: addressField(record, 'walletAddress', `${path}.walletAddress`),
+    sourceAssetId: nonEmptyStringField(record, 'sourceAssetId', `${path}.sourceAssetId`),
+    destinationAssetId: nonEmptyStringField(
+      record,
+      'destinationAssetId',
+      `${path}.destinationAssetId`,
+    ),
+    amount: uint256StringField(record, 'amount', `${path}.amount`),
+    slippage: decodeSlippage(
+      requiredField(record, 'slippage', `${path}.slippage`),
+      `${path}.slippage`,
+    ),
+    referralCode: nullableField(record, 'referralCode', `${path}.referralCode`, decodeReferralCode),
+  };
+}
+
+function decodeStatusContext(value: unknown, path: string): OseroApiStatusContext {
+  const record = asRecord(value, path);
+  return {
+    provider: decodeQuoteProvider(
+      requiredField(record, 'provider', `${path}.provider`),
+      `${path}.provider`,
+    ),
     sourceChainId: positiveChainIdField(record, 'sourceChainId', `${path}.sourceChainId`),
     destinationChainId: positiveChainIdField(
       record,
       'destinationChainId',
       `${path}.destinationChainId`,
     ),
-    transaction: decodeSwapTransaction(
-      requiredField(record, 'transaction', `${path}.transaction`),
-      `${path}.transaction`,
-    ),
-    route: arrayField(record, 'route', `${path}.route`, decodeSwapRouteHop),
+    bridge: nonEmptyStringField(record, 'bridge', `${path}.bridge`),
   };
 }
 
-function decodeSwapBridge(value: unknown, path: string): OseroApiSwapBridge {
-  const record = asRecord(value, path);
-  const required = booleanField(record, 'required', `${path}.required`);
-  // Absent keys decode as null so a future API that omits bridge metadata
-  // on same-chain quotes keeps decoding; the required:true arm below still
-  // rejects missing metadata because getSwapStatusForQuote depends on it.
-  const protocol =
-    'protocol' in record
-      ? nullableField(record, 'protocol', `${path}.protocol`, decodeNonEmptyString)
-      : null;
-  const statusRequest =
-    'statusRequest' in record
-      ? nullableField(
-          record,
-          'statusRequest',
-          `${path}.statusRequest`,
-          decodeSwapBridgeStatusRequest,
-        )
-      : null;
-
-  if (required) {
-    if (protocol === null) {
-      throw new DecodeError(`${path}.protocol must not be null when bridge.required is true`);
-    }
-    if (statusRequest === null) {
-      throw new DecodeError(`${path}.statusRequest must not be null when bridge.required is true`);
-    }
-    return { required: true, protocol, statusRequest };
-  }
-
-  return { required: false, protocol, statusRequest };
+function decodeQuoteProvider(value: unknown, path: string): OseroApiQuoteProvider {
+  return decodeNonEmptyString(value, path) as OseroApiQuoteProvider;
 }
 
-function decodeSwapBridgeStatusRequest(
-  value: unknown,
+function decodeQuoteProviderDetails(value: unknown, path: string): OseroApiQuoteProviderDetails {
+  const record = asRecord(value, path);
+  const provider = nonEmptyStringField(record, 'provider', `${path}.provider`);
+  if (provider === 'enso') return decodeEnsoProviderDetails(record, path);
+  if (provider === 'lifi') return decodeLifiProviderDetails(record, path);
+  return { ...record, provider: provider as OseroApiUnknownQuoteProvider };
+}
+
+function decodeEnsoProviderDetails(
+  record: Record<string, unknown>,
   path: string,
-): OseroApiSwapBridgeStatusRequest {
-  const record = asRecord(value, path);
+): OseroApiEnsoProviderDetails {
   return {
-    sourceChainId: positiveChainIdField(record, 'sourceChainId', `${path}.sourceChainId`),
-    bridgeProtocol: nonEmptyStringField(record, 'bridgeProtocol', `${path}.bridgeProtocol`),
-  };
-}
-
-function decodeSwapTransaction(value: unknown, path: string): OseroApiSwapTransaction {
-  const record = asRecord(value, path);
-  return {
-    to: addressField(record, 'to', `${path}.to`),
-    from: addressField(record, 'from', `${path}.from`),
-    data: hexField(record, 'data', `${path}.data`),
-    value: transactionValueField(record, 'value', `${path}.value`),
-  };
-}
-
-function decodeSwapRouteHop(value: unknown, path: string): OseroApiSwapRouteHop {
-  const record = asRecord(value, path);
-  return {
-    protocol: stringField(record, 'protocol', `${path}.protocol`),
-    action: stringField(record, 'action', `${path}.action`),
-    chainId: positiveIntegerField(record, 'chainId', `${path}.chainId`),
-    sourceChainId: nullableField(record, 'sourceChainId', `${path}.sourceChainId`, decodeNumber),
-    destinationChainId: nullableField(
+    provider: 'enso',
+    route: arrayField(record, 'route', `${path}.route`, decodeEnsoRouteLabel),
+    gasUnits: nullableField(record, 'gasUnits', `${path}.gasUnits`, decodeUint256String),
+    priceImpactBps: nullableField(record, 'priceImpactBps', `${path}.priceImpactBps`, decodeNumber),
+    simulationBlockNumber: nullableField(
       record,
-      'destinationChainId',
-      `${path}.destinationChainId`,
-      decodeNumber,
+      'simulationBlockNumber',
+      `${path}.simulationBlockNumber`,
+      decodeNonNegativeSafeInteger,
     ),
+  };
+}
+
+function decodeEnsoRouteLabel(value: unknown, path: string): OseroApiEnsoRouteLabel {
+  const record = asRecord(value, path);
+  return {
+    protocol: nonEmptyStringField(record, 'protocol', `${path}.protocol`),
+    action: nonEmptyStringField(record, 'action', `${path}.action`),
+  };
+}
+
+function decodeLifiProviderDetails(
+  record: Record<string, unknown>,
+  path: string,
+): OseroApiLifiProviderDetails {
+  return {
+    provider: 'lifi',
+    routeId: nonEmptyStringField(record, 'routeId', `${path}.routeId`),
+    usesComposer: booleanField(record, 'usesComposer', `${path}.usesComposer`),
+    gasCostUsd: nullableField(record, 'gasCostUsd', `${path}.gasCostUsd`, decodeString),
+    steps: arrayField(record, 'steps', `${path}.steps`, decodeLifiStep),
+  };
+}
+
+function decodeLifiStep(value: unknown, path: string): OseroApiLifiStep {
+  const record = asRecord(value, path);
+  return {
+    id: nonEmptyStringField(record, 'id', `${path}.id`),
+    type: nonEmptyStringField(record, 'type', `${path}.type`),
+    tool: nonEmptyStringField(record, 'tool', `${path}.tool`),
+    executionDurationSeconds: nullableField(
+      record,
+      'executionDurationSeconds',
+      `${path}.executionDurationSeconds`,
+      decodeNonNegativeNumber,
+    ),
+    feeCosts: arrayField(record, 'feeCosts', `${path}.feeCosts`, decodeLifiFeeCost),
+    gasCosts: arrayField(record, 'gasCosts', `${path}.gasCosts`, decodeLifiGasCost),
+    includedSteps: arrayField(
+      record,
+      'includedSteps',
+      `${path}.includedSteps`,
+      decodeLifiIncludedStep,
+    ),
+  };
+}
+
+function decodeLifiFeeCost(value: unknown, path: string): OseroApiLifiFeeCost {
+  const record = asRecord(value, path);
+  return {
+    name: nonEmptyStringField(record, 'name', `${path}.name`),
+    description: nullableField(record, 'description', `${path}.description`, decodeString),
+    amount: nonNegativeIntegerStringField(record, 'amount', `${path}.amount`),
+    amountUsd: nullableField(record, 'amountUsd', `${path}.amountUsd`, decodeString),
+    percentage: nullableField(record, 'percentage', `${path}.percentage`, decodeString),
+    included: booleanField(record, 'included', `${path}.included`),
+    token: decodeLifiToken(requiredField(record, 'token', `${path}.token`), `${path}.token`),
+  };
+}
+
+function decodeLifiGasCost(value: unknown, path: string): OseroApiLifiGasCost {
+  const record = asRecord(value, path);
+  return {
+    type: nonEmptyStringField(record, 'type', `${path}.type`),
+    price: nonNegativeIntegerStringField(record, 'price', `${path}.price`),
+    estimate: nonNegativeIntegerStringField(record, 'estimate', `${path}.estimate`),
+    limit: nonNegativeIntegerStringField(record, 'limit', `${path}.limit`),
+    amount: nonNegativeIntegerStringField(record, 'amount', `${path}.amount`),
+    amountUsd: nullableField(record, 'amountUsd', `${path}.amountUsd`, decodeString),
+    token: decodeLifiToken(requiredField(record, 'token', `${path}.token`), `${path}.token`),
+  };
+}
+
+function decodeLifiToken(value: unknown, path: string): OseroApiLifiToken {
+  const record = asRecord(value, path);
+  return {
+    chainId: positiveChainIdField(record, 'chainId', `${path}.chainId`),
+    address: addressField(record, 'address', `${path}.address`),
+    symbol: nonEmptyStringField(record, 'symbol', `${path}.symbol`),
+    decimals: decimalsField(record, 'decimals', `${path}.decimals`),
+  };
+}
+
+function decodeLifiIncludedStep(value: unknown, path: string): OseroApiLifiIncludedStep {
+  const record = asRecord(value, path);
+  return {
+    id: nonEmptyStringField(record, 'id', `${path}.id`),
+    type: nonEmptyStringField(record, 'type', `${path}.type`),
+    tool: nonEmptyStringField(record, 'tool', `${path}.tool`),
   };
 }
 
@@ -1546,30 +1973,44 @@ function decodeNumber(value: unknown, path: string): number {
   return value;
 }
 
-function positiveIntegerField(
-  record: Record<string, unknown>,
-  field: string,
-  path: string,
-): number {
-  const value = decodeNumber(requiredField(record, field, path), path);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new DecodeError(`${path} must be a positive integer`);
+function decodeNonNegativeNumber(value: unknown, path: string): number {
+  const number = decodeNumber(value, path);
+  if (number < 0) {
+    throw new DecodeError(`${path} must be non-negative`);
   }
-  return value;
+  return number;
+}
+
+function decodeNonNegativeSafeInteger(value: unknown, path: string): number {
+  const number = decodeNumber(value, path);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new DecodeError(`${path} must be a non-negative safe integer`);
+  }
+  return number;
+}
+
+function decodeReferralCode(value: unknown, path: string): number {
+  const code = decodeNonNegativeSafeInteger(value, path);
+  if (code < OSERO_API_REFERRAL_CODE_MIN || code > OSERO_API_REFERRAL_CODE_MAX) {
+    throw new DecodeError(
+      `${path} must be between ${OSERO_API_REFERRAL_CODE_MIN} and ${OSERO_API_REFERRAL_CODE_MAX}`,
+    );
+  }
+  return code;
 }
 
 function addressField(record: Record<string, unknown>, field: string, path: string): Address {
   const value = stringField(record, field, path);
-  if (!isAddress(value)) {
-    throw new DecodeError(`${path} must be an EVM address`);
+  if (!isAddress(value) || /^0x0{40}$/i.test(value)) {
+    throw new DecodeError(`${path} must be a non-zero EVM address`);
   }
-  return getAddress(value);
+  return value as Address;
 }
 
-function hexField(record: Record<string, unknown>, field: string, path: string): Hex {
+function calldataField(record: Record<string, unknown>, field: string, path: string): Hex {
   const value = stringField(record, field, path);
-  if (!isHex(value)) {
-    throw new DecodeError(`${path} must be a 0x-prefixed hex string`);
+  if (!isHex(value, { strict: true }) || !/^0x(?:[0-9a-fA-F]{2})*$/.test(value)) {
+    throw new DecodeError(`${path} must be byte-aligned 0x-prefixed hex data`);
   }
   return value;
 }
@@ -1599,7 +2040,11 @@ function uint256StringField(
   field: string,
   path: string,
 ): OseroApiIntegerString {
-  return encodeUint256String(BigInt(nonNegativeIntegerStringField(record, field, path)), path);
+  return decodeUint256String(requiredField(record, field, path), path);
+}
+
+function decodeUint256String(value: unknown, path: string): OseroApiIntegerString {
+  return encodeUint256String(BigInt(decodeNonNegativeIntegerString(value, path)), path);
 }
 
 function decodeNonNegativeIntegerString(value: unknown, path: string): OseroApiIntegerString {
@@ -1610,38 +2055,27 @@ function decodeNonNegativeIntegerString(value: unknown, path: string): OseroApiI
   return text as OseroApiIntegerString;
 }
 
-function transactionValueField(
-  record: Record<string, unknown>,
-  field: string,
-  path: string,
-): OseroApiIntegerString {
-  return decodeIntegerLikeUint256String(requiredField(record, field, path), path);
-}
-
-function decodeIntegerLikeUint256String(value: unknown, path: string): OseroApiIntegerString {
-  if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new DecodeError(`${path} must be a safe non-negative integer number`);
-    }
-    return encodeUint256String(BigInt(value), path);
-  }
-
-  const text = decodeString(value, path);
-  if (/^(?:0|[1-9][0-9]*)$/.test(text)) {
-    return encodeUint256String(BigInt(text), path);
-  }
-  if (/^0x[0-9a-fA-F]+$/.test(text)) {
-    return encodeUint256String(BigInt(text), path);
-  }
-
-  throw new DecodeError(`${path} must be a non-negative integer string, number, or hex string`);
-}
-
 function encodeUint256String(value: bigint, path: string): OseroApiIntegerString {
   if (value > UINT256_MAX) {
     throw new DecodeError(`${path} must fit within uint256`);
   }
   return value.toString() as OseroApiIntegerString;
+}
+
+function decimalStringField(record: Record<string, unknown>, field: string, path: string): string {
+  const value = stringField(record, field, path);
+  if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(value)) {
+    throw new DecodeError(`${path} must be a non-negative decimal string`);
+  }
+  return value;
+}
+
+function timestampField(record: Record<string, unknown>, field: string, path: string): string {
+  const value = stringField(record, field, path);
+  if (validateQuoteExpiry(value, path).isErr()) {
+    throw new DecodeError(`${path} must be a valid UTC instant`);
+  }
+  return value;
 }
 
 /**

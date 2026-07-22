@@ -45,7 +45,7 @@ async function main() {
   }
 
   banner('Quote Ethereum USDT → Ethereum USDS');
-  const quote = await api.getSwapQuote({
+  const workflow = await api.getSwapQuote({
     fromAddress,
     fromAssetId: 'ethereum:usdt',
     toAssetId: 'ethereum:usds',
@@ -53,15 +53,15 @@ async function main() {
     slippage: slippage.value,
     ...(attribution === undefined ? {} : { referral: attribution }),
   });
-  if (quote.isErr()) throw quote.error;
+  if (workflow.isErr()) throw workflow.error;
+  const { quote, walletExecutionPlan } = workflow.value;
 
-  console.log(`amount in:  ${quote.value.quote.amountIn.formatted} USDT`);
-  console.log(
-    `amount out: ${quote.value.quote.amountOut?.formatted ?? 'preview unavailable'} USDS`,
-  );
-  console.log(`bridge:     ${quote.value.bridge.required ? quote.value.bridge.protocol : 'none'}`);
-  console.log(`tx count:   ${quote.value.executionPlan.steps.length}`);
-  console.log(describePlan(quote.value.executionPlan));
+  console.log(`amount in:  ${quote.quote.inputAmount.formatted} USDT`);
+  console.log(`amount out: ${quote.quote.expectedOutput.formatted} USDS`);
+  console.log(`bridge:     ${quote.routeSummary.bridge ?? 'none'}`);
+  console.log(`state:      ${workflow.value.state}`);
+  console.log(`tx count:   ${walletExecutionPlan.steps.length}`);
+  console.log(describePlan(walletExecutionPlan));
 }
 
 main().catch((error) => {
