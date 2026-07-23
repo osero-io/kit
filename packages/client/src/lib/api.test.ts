@@ -17,6 +17,8 @@ import {
   isOseroApiLifiTransferStatusProviderDetails,
   matchOseroApiAsset,
   oseroApiAmount,
+  OSERO_API_KNOWN_ASSET_IDS,
+  OSERO_API_KNOWN_CHAIN_IDS,
   OseroApiClient,
   type OseroApiFetch,
   type OseroApiInputAmount,
@@ -323,6 +325,48 @@ describe('OseroApiClient request boundaries', () => {
     expect(() => OseroApiClient.create({ fetch: 1 as never })).toThrow(ConfigurationError);
   });
 
+  it('tracks the hosted asset and chain vocabulary independently of native action chains', () => {
+    expect(OSERO_API_KNOWN_CHAIN_IDS).toEqual([
+      1, 8453, 42161, 10, 59144, 56, 130, 137, 143, 999, 9745, 43114, 80094,
+    ]);
+    expect(OSERO_API_KNOWN_ASSET_IDS).toEqual(
+      expect.arrayContaining([
+        'ethereum:usdc',
+        'base:usdc',
+        'arbitrum:usdc',
+        'optimism:usdc',
+        'linea:usdc',
+        'avalanche_c:usdc',
+        'hyperevm:usdc',
+        'monad:usdc',
+        'polygon:usdc',
+        'unichain:usdc',
+        'berachain:usdce',
+        'ethereum:usde',
+        'arbitrum:usde',
+        'base:usde',
+        'optimism:usde',
+        'linea:usde',
+        'avalanche_c:usde',
+        'bnb:usde',
+        'berachain:usde',
+        'hyperevm:usde',
+        'plasma:usde',
+        'ethereum:ausd',
+        'ethereum:gho',
+        'ethereum:pyusd',
+        'arbitrum:pyusd',
+        'ethereum:rlusd',
+        'ethereum:usdd',
+        'ethereum:usdg',
+        'ethereum:usdt',
+        'ethereum:usdtb',
+        'ethereum:frxusd',
+        'ethereum:susds',
+      ]),
+    );
+  });
+
   it('brands only positive uint256 hosted amounts', () => {
     const zero = oseroApiAmount(0n);
     const overflow = oseroApiAmount(UINT256_MAX + 1n);
@@ -501,6 +545,57 @@ describe('hosted quote verification and preparation', () => {
           value: 0n,
           operation: 'SWAP_EXACT_IN',
         }),
+      ]);
+    }
+  });
+
+  it('prepares a wallet plan on a hosted API chain without local action capabilities', async () => {
+    const baseFixture = crossChainQuoteFixture();
+    const fixture: OseroApiSwapQuoteResponse = {
+      ...baseFixture,
+      pair: {
+        ...baseFixture.pair,
+        source: {
+          ...baseFixture.pair.source,
+          assetId: 'linea:usde',
+          chainId: 59144,
+          chainKey: 'linea',
+          chainName: 'Linea',
+          chainShortName: 'Linea',
+          symbol: 'USDe',
+          label: 'USDe - Linea',
+        },
+      },
+      routeSummary: { ...baseFixture.routeSummary, sourceChainId: 59144 },
+      executionPlan: {
+        ...baseFixture.executionPlan,
+        executionStep: {
+          transaction: {
+            ...baseFixture.executionPlan.executionStep.transaction,
+            chainId: 59144,
+          },
+        },
+      },
+      refreshContext: {
+        ...baseFixture.refreshContext,
+        sourceAssetId: 'linea:usde',
+      },
+      statusContext: { ...baseFixture.statusContext!, sourceChainId: 59144 },
+    };
+    const transport = fetchSequence({ body: fixture });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(
+      quoteRequest({
+        fromAssetId: 'linea:usde',
+        amount: amount(1_000_000_000_000_000_000n),
+      }),
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.walletExecutionPlan.steps).toEqual([
+        expect.objectContaining({ chainId: 59144, operation: 'SWAP_EXACT_IN' }),
       ]);
     }
   });

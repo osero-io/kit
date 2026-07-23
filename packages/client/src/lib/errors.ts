@@ -144,6 +144,11 @@ export class ConfigurationError extends OseroError<'CONFIGURATION_ERROR'> {
   }
 }
 
+/**
+ * A local SDK operation has no contract capability for the requested chain.
+ * Hosted API chains are handled independently by `OseroApiClient` and do not
+ * use this error.
+ */
 export class UnsupportedChainError extends OseroError<'UNSUPPORTED_CHAIN'> {
   override readonly name = 'UnsupportedChainError' as const;
   readonly code = 'UNSUPPORTED_CHAIN' as const;
