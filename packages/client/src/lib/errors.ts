@@ -1,5 +1,8 @@
 import type { Address, Hex } from 'viem';
 
+import type { HostedSwapProgressType } from './hostedSwap.js';
+import type { ExecutionPlan, QuoteExpiry, TransactionResult } from './types.js';
+
 export type ExecutionStage =
   | 'preflight'
   | 'simulation'
@@ -28,6 +31,12 @@ export type ExecutionFailureContext = {
   readonly completed: readonly CompletedExecutionStep[];
 };
 
+export type HostedSwapFailureContext = {
+  readonly progressType: HostedSwapProgressType;
+  readonly approvalResults: readonly TransactionResult[];
+  readonly executionResult?: TransactionResult;
+};
+
 export type OseroErrorCode =
   | 'VALIDATION_ERROR'
   | 'CONFIGURATION_ERROR'
@@ -36,6 +45,7 @@ export type OseroErrorCode =
   | 'CHAIN_MISMATCH'
   | 'UNSUPPORTED_CAPABILITY'
   | 'INSUFFICIENT_ALLOWANCE'
+  | 'QUOTE_EXPIRED'
   | 'CANCELLED'
   | 'SIMULATION_FAILED'
   | 'SIGNING_FAILED'
@@ -48,6 +58,8 @@ export type OseroErrorCode =
   | 'API_RESPONSE_INVALID'
   | 'TIMEOUT'
   | 'PROGRESS_CALLBACK_FAILED'
+  | 'APPROVAL_LIMIT_EXCEEDED'
+  | 'QUOTE_REFRESH_LIMIT_EXCEEDED'
   | 'UNEXPECTED_ERROR';
 
 function extractMessage(cause: unknown, fallback: string): string {
@@ -132,6 +144,11 @@ export class ConfigurationError extends OseroError<'CONFIGURATION_ERROR'> {
   }
 }
 
+/**
+ * A local SDK operation has no contract capability for the requested chain.
+ * Hosted API chains are handled independently by `OseroApiClient` and do not
+ * use this error.
+ */
 export class UnsupportedChainError extends OseroError<'UNSUPPORTED_CHAIN'> {
   override readonly name = 'UnsupportedChainError' as const;
   readonly code = 'UNSUPPORTED_CHAIN' as const;
@@ -196,6 +213,42 @@ export class InsufficientAllowanceError extends OseroError<'INSUFFICIENT_ALLOWAN
   }
 }
 
+export class QuoteExpiredError extends OseroError<'QUOTE_EXPIRED'> {
+  override readonly name = 'QuoteExpiredError' as const;
+  readonly code = 'QUOTE_EXPIRED' as const;
+
+  constructor(
+    readonly plan: ExecutionPlan,
+    readonly quoteExpiresAt: QuoteExpiry,
+  ) {
+    super(`Execution plan ${plan.id} expired with its hosted quote at ${quoteExpiresAt}`);
+  }
+}
+
+export class ApprovalLimitError extends OseroError<'APPROVAL_LIMIT_EXCEEDED'> {
+  override readonly name = 'ApprovalLimitError' as const;
+  readonly code = 'APPROVAL_LIMIT_EXCEEDED' as const;
+
+  constructor(
+    readonly limit: number,
+    readonly approvalResults: readonly TransactionResult[],
+  ) {
+    super(`Hosted Swap Workflow requires more than ${limit} approval transactions`);
+  }
+}
+
+export class QuoteRefreshLimitError extends OseroError<'QUOTE_REFRESH_LIMIT_EXCEEDED'> {
+  override readonly name = 'QuoteRefreshLimitError' as const;
+  readonly code = 'QUOTE_REFRESH_LIMIT_EXCEEDED' as const;
+
+  constructor(
+    readonly limit: number,
+    readonly approvalResults: readonly TransactionResult[],
+  ) {
+    super(`Hosted Swap Workflow requires more than ${limit} Quote Refreshes`);
+  }
+}
+
 abstract class ExecutionError<Code extends OseroErrorCode> extends OseroError<Code> {
   constructor(
     message: string,
@@ -210,11 +263,29 @@ export class ProgressCallbackError extends ExecutionError<'PROGRESS_CALLBACK_FAI
   override readonly name = 'ProgressCallbackError' as const;
   readonly code = 'PROGRESS_CALLBACK_FAILED' as const;
 
+  constructor(
+    message: string,
+    execution?: ExecutionFailureContext,
+    options?: ErrorOptions,
+    readonly hostedSwap?: HostedSwapFailureContext,
+  ) {
+    super(message, execution, options);
+  }
+
   static from(cause: unknown, execution: ExecutionFailureContext): ProgressCallbackError {
     return new ProgressCallbackError(
       extractMessage(cause, 'Execution progress callback failed'),
       execution,
       { cause },
+    );
+  }
+
+  static fromHostedSwap(cause: unknown, context: HostedSwapFailureContext): ProgressCallbackError {
+    return new ProgressCallbackError(
+      extractMessage(cause, 'Hosted Swap Workflow progress callback failed'),
+      undefined,
+      { cause },
+      context,
     );
   }
 }

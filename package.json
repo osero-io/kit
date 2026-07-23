@@ -9,6 +9,8 @@
     "version-packages:stable": "changeset pre exit && changeset version && oxfmt .changeset packages",
     "release:prepare": "node scripts/prepare-changesets-release.mjs",
     "clean:client": "node scripts/clean-client-output.mjs",
+    "typecheck:api-v1-contract": "node scripts/typecheck-api-v1-contract.mjs",
+    "test:api-v1-contract": "node scripts/run-api-v1-contract-tests.mjs",
     "api:report:check": "node scripts/check-client-api.mjs",
     "api:report:write": "node scripts/check-client-api.mjs --write",
     "package:validate": "node scripts/validate-client-package.mjs",

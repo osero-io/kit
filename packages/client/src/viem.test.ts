@@ -74,7 +74,7 @@ const factory: AdapterContractFactory = (configuration = {}) => {
 
 defineAdapterContract('viem', factory);
 
-function singlePlan() {
+function singlePlan(quoteExpiresAt?: string) {
   const transaction = createTransactionRequest({
     id: 'swap',
     chainId: 8453,
@@ -85,13 +85,17 @@ function singlePlan() {
     estimatedGas: { gas: 1n, source: 'hosted-api' },
   });
   if (transaction.isErr()) throw transaction.error;
-  const valuePlan = createExecutionPlan({ steps: [transaction.value] });
+  const valuePlan = createExecutionPlan({
+    steps: [transaction.value],
+    ...(quoteExpiresAt === undefined ? {} : { quoteExpiresAt }),
+  });
   if (valuePlan.isErr()) throw valuePlan.error;
   return valuePlan.value;
 }
 
 describe('viem stage behavior', () => {
   beforeEach(resetActions);
+  afterEach(() => vi.useRealTimers());
 
   it('returns typed configuration failure for a disconnected wallet without throwing', async () => {
     const disconnected = {} as WalletClient;
@@ -144,6 +148,22 @@ describe('viem stage behavior', () => {
       expect.anything(),
       expect.objectContaining({ gas: 115n }),
     );
+  });
+
+  it('rechecks quote expiry after estimation and immediately before wallet submission', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-22T19:59:59Z'));
+    actions.estimateGas.mockImplementation(async () => {
+      vi.setSystemTime(new Date('2026-07-22T20:00:00Z'));
+      return 100n;
+    });
+
+    const result = await sendWith(wallet(ACCOUNT, 8453), singlePlan('2026-07-22T20:00:00Z'));
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('QUOTE_EXPIRED');
+    expect(actions.estimateGas).toHaveBeenCalledOnce();
+    expect(actions.sendTransaction).not.toHaveBeenCalled();
   });
 
   it('preserves the submitted hash on receipt failure and records partial progress', async () => {

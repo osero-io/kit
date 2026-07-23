@@ -1,5 +1,5 @@
-import { parseSlippage, referral, type Referral } from '@osero/client';
-import { oseroApiAmount, OseroApiClient } from '@osero/client/api';
+import { parseSlippage, referral, type ExecutionPlanHandler, type Referral } from '@osero/client';
+import { oseroApiAmount, OseroApiClient, type OseroApiApprovalRequired } from '@osero/client/api';
 import { createPublicClient, http, isAddress, parseUnits } from 'viem';
 import { mainnet } from 'viem/chains';
 
@@ -14,6 +14,19 @@ function optionalReferral(): Referral | undefined {
   const result = referral(BigInt(raw));
   if (result.isErr()) throw result.error;
   return result.value;
+}
+
+export async function submitApprovalAndRefresh(
+  api: OseroApiClient,
+  workflow: OseroApiApprovalRequired,
+  executePlan: ExecutionPlanHandler,
+) {
+  const approval = await executePlan(workflow.walletExecutionPlan);
+  if (approval.isErr()) throw approval.error;
+
+  const refreshed = await api.refreshSwapQuote(workflow.quote.refreshContext);
+  if (refreshed.isErr()) throw refreshed.error;
+  return refreshed.value;
 }
 
 async function main() {
@@ -45,7 +58,7 @@ async function main() {
   }
 
   banner('Quote Ethereum USDT → Ethereum USDS');
-  const quote = await api.getSwapQuote({
+  const workflow = await api.getSwapQuote({
     fromAddress,
     fromAssetId: 'ethereum:usdt',
     toAssetId: 'ethereum:usds',
@@ -53,15 +66,26 @@ async function main() {
     slippage: slippage.value,
     ...(attribution === undefined ? {} : { referral: attribution }),
   });
-  if (quote.isErr()) throw quote.error;
+  if (workflow.isErr()) throw workflow.error;
+  const { quote, walletExecutionPlan } = workflow.value;
 
-  console.log(`amount in:  ${quote.value.quote.amountIn.formatted} USDT`);
-  console.log(
-    `amount out: ${quote.value.quote.amountOut?.formatted ?? 'preview unavailable'} USDS`,
-  );
-  console.log(`bridge:     ${quote.value.bridge.required ? quote.value.bridge.protocol : 'none'}`);
-  console.log(`tx count:   ${quote.value.executionPlan.steps.length}`);
-  console.log(describePlan(quote.value.executionPlan));
+  console.log(`amount in:  ${quote.quote.inputAmount.formatted} USDT`);
+  console.log(`amount out: ${quote.quote.expectedOutput.formatted} USDS`);
+  console.log(`provider:   ${quote.provider}`);
+  console.log(`bridge:     ${quote.routeSummary.bridge ?? 'none'}`);
+  console.log(`state:      ${workflow.value.state}`);
+  console.log(`tx count:   ${walletExecutionPlan.steps.length}`);
+  console.log(describePlan(walletExecutionPlan));
+
+  banner('Manual Hosted Swap Workflow');
+  if (workflow.value.state === 'approval-required') {
+    console.log('Submit only the approval Wallet Execution Plan shown above.');
+    console.log('After confirmation, discard the quote actions and call:');
+    console.log('submitApprovalAndRefresh(api, workflow.value, executePlan)');
+  } else {
+    console.log('The Wallet Execution Plan contains only the fresh execution action.');
+  }
+  console.log('Never submit quote.executionPlan directly; it is the API Execution Plan.');
 }
 
 main().catch((error) => {

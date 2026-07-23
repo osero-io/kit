@@ -38,11 +38,11 @@ Three plan variants, discriminated by `__typename`:
 
 1. `OseroClient.create({ transports, defaultSlippageBps })` — stateless; lazily builds viem public clients per chain in `getPublicClient(chainId)` (memoised in a `Map`). `_setPublicClientForTesting` is how tests inject fakes.
 2. Actions in `src/lib/actions/` (`mintUsds`, `mintSUsds`, `redeemUsds`, `redeemSUsds`, plus `preview*` helpers) take `(client, request)` and return `ResultAsync<ExecutionPlan, ActionError>` — they branch on `chain.isMainnet` because mainnet uses Sky's `UsdsPsmWrapper` + Lite PSM while L2s use Spark's PSM3.
-3. `OseroApiClient` in `src/lib/api.ts` calls the hosted API, passes asset refs through (the hosted API validates assets, pairs, and policy), and attaches an adapter-compatible `ExecutionPlan` to every quote. API quote execution transactions use operation `SWAP`; local actions keep specific mint/redeem operation tags.
+3. `OseroApiClient` in `src/lib/api.ts` calls the hosted API, passes asset refs through (the hosted API validates assets, pairs, and policy), and returns a discriminated Hosted Swap Workflow. The quote retains its diagnostic API Execution Plan, while `walletExecutionPlan` contains only the currently safe actions. Hosted execution transactions use operation `SWAP_EXACT_IN`; local actions keep specific mint/redeem operation tags.
 
 ### Plan construction
 
-Never hand-build plan objects. Use the helpers in `src/lib/plan.ts` (`makeTransactionRequest`, `makeApprovalTransaction`, `makeSingleApprovalPlan`, `makeApprovalRequiredPlan`, `makeMultiStepPlan`) so the `__typename` tags and `operation` provenance stay consistent. Hosted API quote conversion belongs in `swapQuoteToExecutionPlan`.
+Never hand-build plan objects. Use the constructors in `src/lib/plan.ts` so schema tags, checksums, expiry, and operation provenance stay consistent. Hosted API preparation belongs in `src/lib/api.ts`; never pass an API Execution Plan directly to a wallet adapter.
 
 ### Errors & results
 

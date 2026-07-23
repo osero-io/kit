@@ -1,6 +1,13 @@
 import { defineChain, type Address, type Chain as ViemChain } from 'viem';
 import { arbitrum, base, mainnet, optimism } from 'viem/chains';
 
+/**
+ * Chains with local sUSDS action capabilities in `@osero/client`.
+ *
+ * This is intentionally not the hosted API chain list. `OseroApiClient`
+ * accepts API asset refs and response chains independently of these local
+ * contract capabilities.
+ */
 export const SUPPORTED_CHAIN_IDS = [1, 10, 130, 8453, 42161] as const;
 export type OseroChainId = (typeof SUPPORTED_CHAIN_IDS)[number];
 export type TokenSymbol = 'USDC' | 'USDS' | 'sUSDS';

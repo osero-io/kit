@@ -28,7 +28,7 @@
 
   Client-side validation narrows to wire grammar and execution safety (EVM addresses, hex payloads, uint256 amounts, 32-byte tx hashes). Server-policy checks that 0.x ran locally are now enforced by the API instead of pre-flight `ValidationError`s: asset/pair membership and slippage failures come back as 400s with stable codes (`SWAP_ASSET_NOT_SUPPORTED`, `SWAP_PAIR_NOT_SUPPORTED`, `SLIPPAGE_INVALID`, `SLIPPAGE_OUT_OF_RANGE`), an out-of-range referral code is a plain 400 from request validation, and a printable-ASCII but invalid API key is a 401. Empty keys and keys containing non-ASCII, whitespace, or control characters remain local `ValidationError`s. `getTokenBalance` additionally accepts any ERC-20 address alongside the canonical token symbols.
 
-  Hosted API quote execution plans tag execution transactions as `SWAP_EXACT_IN`; derive user-facing labels from `quote.pair.from` and `quote.pair.to`. See `docs/osero-sdk/upgrading-0-to-1.md` for the full migration guide.
+  Hosted API Execution Plans tag execution transactions as `SWAP_EXACT_IN`; derive user-facing labels from `quote.pair.source` and `quote.pair.destination`. See `docs/osero-sdk/upgrading-0-to-1.md` for the full migration guide.
 
 ## Unreleased
 

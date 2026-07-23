@@ -18,6 +18,7 @@ import {
   TransactionError,
   ValidationError,
 } from './lib/errors.js';
+import { checkExecutionPlanExpiry } from './lib/plan.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './lib/result.js';
 import type {
   ConfirmationOptions,
@@ -86,6 +87,7 @@ function resolveOptions(
 
 function sendSingleTransaction(
   signer: Signer,
+  plan: ExecutionPlan,
   request: TransactionRequest,
   context: SingleTransactionContext,
   options: ResolvedOptions,
@@ -104,11 +106,14 @@ function sendSingleTransaction(
       const numerator = gas * BigInt(10_000 + options.gasBufferBps);
       return (numerator + 9_999n) / 10_000n;
     })
-    .andThen((gasLimit) =>
-      ResultAsync.fromPromise(signer.sendTransaction({ ...transaction, gasLimit }), (cause) =>
-        mapSendError(cause, context),
-      ),
-    )
+    .andThen((gasLimit) => {
+      const expiry = checkExecutionPlanExpiry(plan);
+      if (expiry.isErr()) return errAsync(expiry.error);
+      return ResultAsync.fromPromise(
+        signer.sendTransaction({ ...transaction, gasLimit }),
+        (cause) => mapSendError(cause, context),
+      );
+    })
     .andThen((response) => waitForEthersReceipt(response, context, options));
 }
 
@@ -307,7 +312,7 @@ function executePlan(
   return new ResultAsync(preflight()).andThen((validatedPlan) =>
     verifyResumeReceipts(signer, validatedPlan, resolvedOptions.value).andThen(() => {
       const executor: SingleTxExecutor = (transaction, context) =>
-        sendSingleTransaction(signer, transaction, context, resolvedOptions.value);
+        sendSingleTransaction(signer, validatedPlan, transaction, context, resolvedOptions.value);
       return runExecutionPlan(
         validatedPlan,
         executor,

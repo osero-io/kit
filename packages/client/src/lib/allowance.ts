@@ -47,6 +47,11 @@ export type PreparedAllowance = {
   readonly snapshot: AllowanceSnapshot;
 };
 
+export type AllowanceCheck = {
+  readonly needsApproval: boolean;
+  readonly snapshot: AllowanceSnapshot;
+};
+
 type ValidatedAllowanceInput = Omit<
   PrepareAllowanceInput,
   'token' | 'owner' | 'spender' | 'requiredAmount'
@@ -75,6 +80,18 @@ export function prepareAllowanceWithPublicClient(
   const validated = validateAllowanceInput(input);
   if (validated.isErr()) return errAsync(validated.error);
   return readAndPrepareAllowance(publicClient, validated.value);
+}
+
+export function checkAllowanceWithPublicClient(
+  publicClient: Pick<PublicClient, 'readContract'>,
+  input: PrepareAllowanceInput,
+): ResultAsync<AllowanceCheck, ValidationError | RpcError> {
+  const validated = validateAllowanceInput(input);
+  if (validated.isErr()) return errAsync(validated.error);
+  return readAllowanceSnapshot(publicClient, validated.value).map((snapshot) => ({
+    needsApproval: requiresApproval(validated.value, snapshot.allowance),
+    snapshot,
+  }));
 }
 
 function validateAllowanceInput(
@@ -114,37 +131,8 @@ function readAndPrepareAllowance(
   publicClient: Pick<PublicClient, 'readContract'>,
   input: ValidatedAllowanceInput,
 ): ResultAsync<PreparedAllowance, ValidationError | RpcError | InsufficientAllowanceError> {
-  return ResultAsync.fromPromise(
-    publicClient.readContract({
-      address: input.token,
-      abi: erc20Abi,
-      functionName: 'allowance',
-      args: [input.owner, input.spender],
-      ...(input.blockNumber === undefined ? {} : { blockNumber: input.blockNumber }),
-    }),
-    (cause) =>
-      RpcError.from({
-        cause,
-        operation: 'readContract',
-        chainId: input.chainId,
-        contract: input.token,
-        functionName: 'allowance',
-      }),
-  ).andThen((allowance) => {
-    const needsApproval = input.enforceSpendingCap
-      ? allowance !== input.requiredAmount
-      : allowance < input.requiredAmount;
-    const snapshot = {
-      token: input.token,
-      owner: input.owner,
-      spender: input.spender,
-      allowance,
-      requiredAmount: input.requiredAmount,
-      policy: input.policy,
-      ...(input.blockNumber === undefined ? {} : { observedAtBlock: input.blockNumber }),
-    } satisfies AllowanceSnapshot;
-
-    if (!needsApproval) return ok({ snapshot });
+  return readAllowanceSnapshot(publicClient, input).andThen((snapshot) => {
+    if (!requiresApproval(input, snapshot.allowance)) return ok({ snapshot });
     if (input.policy === 'none') {
       return err(
         new InsufficientAllowanceError(
@@ -152,7 +140,7 @@ function readAndPrepareAllowance(
           input.owner,
           input.spender,
           input.requiredAmount,
-          allowance,
+          snapshot.allowance,
         ),
       );
     }
@@ -173,4 +161,47 @@ function readAndPrepareAllowance(
       snapshot: { ...snapshot, approvalAmount },
     });
   });
+}
+
+function readAllowanceSnapshot(
+  publicClient: Pick<PublicClient, 'readContract'>,
+  input: ValidatedAllowanceInput,
+): ResultAsync<AllowanceSnapshot, RpcError> {
+  return ResultAsync.fromPromise(
+    publicClient.readContract({
+      address: input.token,
+      abi: erc20Abi,
+      functionName: 'allowance',
+      args: [input.owner, input.spender],
+      ...(input.blockNumber === undefined ? {} : { blockNumber: input.blockNumber }),
+    }),
+    (cause) =>
+      RpcError.from({
+        cause,
+        operation: 'readContract',
+        chainId: input.chainId,
+        contract: input.token,
+        functionName: 'allowance',
+      }),
+  ).map((allowance) => allowanceSnapshot(input, allowance));
+}
+
+function allowanceSnapshot(input: ValidatedAllowanceInput, allowance: bigint): AllowanceSnapshot {
+  const snapshot = {
+    token: input.token,
+    owner: input.owner,
+    spender: input.spender,
+    allowance,
+    requiredAmount: input.requiredAmount,
+    policy: input.policy,
+  } satisfies AllowanceSnapshot;
+  return input.blockNumber === undefined
+    ? snapshot
+    : { ...snapshot, observedAtBlock: input.blockNumber };
+}
+
+function requiresApproval(input: ValidatedAllowanceInput, allowance: bigint): boolean {
+  return input.enforceSpendingCap
+    ? allowance !== input.requiredAmount
+    : allowance < input.requiredAmount;
 }

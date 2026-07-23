@@ -30,6 +30,7 @@ import {
   TransactionError,
   ValidationError,
 } from './lib/errors.js';
+import { checkExecutionPlanExpiry } from './lib/plan.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './lib/result.js';
 import type {
   ConfirmationOptions,
@@ -103,6 +104,7 @@ function resolveOptions(
 
 function sendSingleTransaction(
   walletClient: ConnectedWalletClient,
+  plan: ExecutionPlan,
   request: TransactionRequest,
   context: SingleTransactionContext,
   options: ResolvedOptions,
@@ -120,8 +122,10 @@ function sendSingleTransaction(
       const numerator = gas * BigInt(10_000 + options.gasBufferBps);
       return (numerator + 9_999n) / 10_000n;
     })
-    .andThen((gas) =>
-      ResultAsync.fromPromise(
+    .andThen((gas) => {
+      const expiry = checkExecutionPlanExpiry(plan);
+      if (expiry.isErr()) return errAsync(expiry.error);
+      return ResultAsync.fromPromise(
         sendTransactionWithViem(walletClient, {
           account: walletClient.account,
           chain: walletClient.chain,
@@ -131,8 +135,8 @@ function sendSingleTransaction(
           gas,
         }),
         (cause) => mapSendError(cause, context),
-      ),
-    )
+      );
+    })
     .andThen((submittedHash) => {
       const confirmation = async (): Promise<SingleTransactionResult> => {
         await context.notifySubmitted(submittedHash);
@@ -280,7 +284,13 @@ function executePlan(
 
   return verifyResumeReceipts(walletClient, binding.value, resolvedOptions.value).andThen(() => {
     const executor: SingleTxExecutor = (transaction, context) =>
-      sendSingleTransaction(walletClient, transaction, context, resolvedOptions.value);
+      sendSingleTransaction(
+        walletClient,
+        binding.value,
+        transaction,
+        context,
+        resolvedOptions.value,
+      );
     return runExecutionPlan(
       binding.value,
       executor,

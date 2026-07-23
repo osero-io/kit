@@ -6,7 +6,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
 
 import { loadPrivateKey, optionalEnv, optionalRpcUrl, requireEnv } from '../shared/env.js';
-import { banner, describePlan, describeResult } from '../shared/format.js';
+import { banner, describeResult } from '../shared/format.js';
 
 const SOURCE_CHAIN_ID = 8453 as const;
 const AMOUNT_USDC = parseUnits('1', 6);
@@ -43,30 +43,40 @@ async function main() {
   const attribution = optionalReferral();
 
   banner(`API quote execution — ${chain.name}`);
-  const quote = await api.getSwapQuote({
-    fromAddress: account.address,
-    fromAssetId: 'base:usdc',
-    toAssetId: 'ethereum:susds',
-    amount: amount.value,
-    slippage: slippage.value,
-    ...(attribution === undefined ? {} : { referral: attribution }),
-  });
-  if (quote.isErr()) throw quote.error;
+  const execution = await api.executeSwap(
+    {
+      fromAddress: account.address,
+      fromAssetId: 'base:usdc',
+      toAssetId: 'ethereum:susds',
+      amount: amount.value,
+      slippage: slippage.value,
+      ...(attribution === undefined ? {} : { referral: attribution }),
+    },
+    sendWith(wallet),
+    {
+      onProgress: (event) => console.log(`  ${event.type}`),
+    },
+  );
+  if (execution.isErr()) throw execution.error;
+  const { approvalResults, executionResult, finalQuote } = execution.value;
 
-  console.log(`  amount out: ${quote.value.quote.amountOut?.formatted ?? 'preview unavailable'}`);
-  console.log(`  bridge: ${quote.value.bridge.required ? quote.value.bridge.protocol : 'none'}`);
-  console.log(`  tx count: ${quote.value.executionPlan.steps.length}`);
-  console.log(describePlan(quote.value.executionPlan));
+  console.log(`  amount out: ${finalQuote.quote.expectedOutput.formatted}`);
+  console.log(`  bridge: ${finalQuote.routeSummary.bridge ?? 'none'}`);
+  console.log(`  approvals: ${approvalResults.length}`);
 
-  const result = await sendWith(wallet, quote.value.executionPlan);
-  if (result.isErr()) throw result.error;
-
-  banner('Submitted');
-  console.log(describeResult(result.value, chain.explorerUrl));
-  if (quote.value.bridge.required) {
-    console.log(
-      'Track completion with api.waitForSwapCompletion(quote.value, result.value.txHash).',
-    );
+  banner('Source-chain execution confirmed');
+  console.log(describeResult(executionResult, chain.explorerUrl));
+  if (finalQuote.statusContext !== null) {
+    banner('Separate Transfer Status lifecycle');
+    const transfer = await api.waitForSwapCompletion(finalQuote, executionResult.txHash, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 30 * 60_000,
+      onStatus: (status) => console.log(`  ${status.state}`),
+    });
+    if (transfer.isErr()) throw transfer.error;
+    console.log(`  final state: ${transfer.value.state}`);
+    if (transfer.value.state === 'failed') console.log(`  error: ${transfer.value.error}`);
+    console.log(`  destination: ${transfer.value.destinationTransactionHash ?? 'not reported'}`);
   }
 }
 

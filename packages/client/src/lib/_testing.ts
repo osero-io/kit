@@ -2,11 +2,17 @@ import { getAddress } from 'viem';
 import type { Mock } from 'vitest';
 import { vi } from 'vitest';
 
+import type { OseroApiTransferState, OseroApiTransferStatus } from './api.js';
 import { CHAINS, type OseroChainId } from './chains.js';
 import { OseroClient, type OseroPublicClient } from './OseroClient.js';
 import { createExecutionPlan, createTransactionRequest } from './plan.js';
-import type { Result } from './result.js';
-import type { ExecutionPlan, SendWithError, TransactionResult } from './types.js';
+import { okAsync, type Result } from './result.js';
+import type {
+  ExecutionPlan,
+  ExecutionPlanHandler,
+  SendWithError,
+  TransactionResult,
+} from './types.js';
 
 export type MockPublicClient = {
   readonly chain: (typeof CHAINS)[OseroChainId]['viemChain'];
@@ -26,6 +32,94 @@ export function mockFn<T extends TestProcedure>(implementation: T): Mock<T>;
 export function mockFn<T extends TestProcedure>(implementation?: T): Mock | Mock<T> {
   if (implementation === undefined) return vi.fn<() => void>();
   return vi.fn<T>(implementation);
+}
+
+export const TEST_SOURCE_TRANSACTION_HASH =
+  '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+export const TEST_DESTINATION_TRANSACTION_HASH =
+  '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const;
+
+export function singleTransactionResultForPlan(
+  plan: ExecutionPlan,
+  hash: `0x${string}`,
+): TransactionResult {
+  const step = plan.steps[0]!;
+  return {
+    planId: plan.id,
+    transactions: [
+      {
+        planId: plan.id,
+        stepId: step.id,
+        stepIndex: 0,
+        operation: step.operation,
+        submittedHash: hash,
+        hash,
+        confirmation: {
+          status: 'success',
+          transactionHash: hash,
+          confirmations: 1,
+        },
+      },
+    ],
+    txHash: hash,
+  };
+}
+
+export function createExecutionHandlerFake(): {
+  readonly handler: ExecutionPlanHandler;
+  readonly calls: ExecutionPlan[];
+  readonly results: TransactionResult[];
+} {
+  const calls: ExecutionPlan[] = [];
+  const results: TransactionResult[] = [];
+  const handler: ExecutionPlanHandler = (plan) => {
+    calls.push(plan);
+    const hash = `0x${calls.length.toString(16).padStart(64, '0')}` as `0x${string}`;
+    const result = singleTransactionResultForPlan(plan, hash);
+    results.push(result);
+    return okAsync(result);
+  };
+  return { handler, calls, results };
+}
+
+function transferStatusFixtureBase(state: OseroApiTransferState) {
+  return {
+    state,
+    sourceChainId: 8453,
+    destinationChainId: 1,
+    bridge: 'future-bridge',
+    sourceTransactionHash: TEST_SOURCE_TRANSACTION_HASH,
+    destinationTransactionHash: state === 'completed' ? TEST_DESTINATION_TRANSACTION_HASH : null,
+    error: state === 'failed' ? 'bridge failed' : null,
+  } as const;
+}
+
+export function ensoTransferStatusFixture(
+  state: OseroApiTransferState,
+  providerStatus: string = state,
+): OseroApiTransferStatus {
+  return {
+    ...transferStatusFixtureBase(state),
+    provider: 'enso',
+    providerDetails: {
+      provider: 'enso',
+      status: providerStatus,
+    },
+  };
+}
+
+export function lifiTransferStatusFixture(
+  state: OseroApiTransferState = 'completed',
+): OseroApiTransferStatus {
+  return {
+    ...transferStatusFixtureBase(state),
+    provider: 'lifi',
+    providerDetails: {
+      provider: 'lifi',
+      status: state === 'completed' ? 'DONE' : 'PENDING',
+      substatus: state === 'completed' ? 'COMPLETED' : null,
+    },
+  };
 }
 
 export function createMockClient(
@@ -71,7 +165,7 @@ const CONTRACT_ACCOUNT_LOWER = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as c
 const CONTRACT_ACCOUNT = getAddress(CONTRACT_ACCOUNT_LOWER);
 const CONTRACT_TARGET = '0x2222222222222222222222222222222222222222' as const;
 
-function contractPlan(): ExecutionPlan {
+function contractPlan(quoteExpiresAt?: string): ExecutionPlan {
   const steps = ['one', 'two'].map((id) => {
     const result = createTransactionRequest({
       id,
@@ -84,13 +178,18 @@ function contractPlan(): ExecutionPlan {
     if (result.isErr()) throw result.error;
     return result.value;
   });
-  const result = createExecutionPlan({ steps });
+  const result = createExecutionPlan({
+    steps,
+    ...(quoteExpiresAt === undefined ? {} : { quoteExpiresAt }),
+  });
   if (result.isErr()) throw result.error;
   return result.value;
 }
 
 export function defineAdapterContract(name: string, factory: AdapterContractFactory): void {
   describe(`${name} adapter contract`, () => {
+    afterEach(() => vi.useRealTimers());
+
     it.each(['direct', 'curried'] as const)(
       'executes matching plans with %s invocation and preserves every hash',
       async (form) => {
@@ -180,15 +279,58 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
     it('negotiates unsupported batch capability before broadcasting', async () => {
       const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
       const valuePlan = contractPlan();
-      const batch = {
-        ...valuePlan,
-        requirements: { ...valuePlan.requirements, execution: 'atomic-batch' as const },
-      };
+      const batch = createExecutionPlan({
+        steps: valuePlan.steps,
+        requirements: { ...valuePlan.requirements, execution: 'atomic-batch' },
+      });
+      if (batch.isErr()) throw batch.error;
 
-      const result = await harness.execute(batch, 'direct');
+      const result = await harness.execute(batch.value, 'direct');
 
       expect(result.isErr()).toBe(true);
       if (result.isErr()) expect(result.error.code).toBe('UNSUPPORTED_CAPABILITY');
+      expect(harness.broadcast).not.toHaveBeenCalled();
+    });
+
+    it('rejects a hosted plan at quote expiry before broadcasting', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-22T20:00:00Z'));
+      const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+      const valuePlan = contractPlan('2026-07-22T20:00:00Z');
+
+      const result = await harness.execute(valuePlan, 'direct');
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error.code).toBe('QUOTE_EXPIRED');
+        if (result.error.code === 'QUOTE_EXPIRED') {
+          expect(result.error.plan).toEqual(valuePlan);
+          expect(result.error.quoteExpiresAt).toBe('2026-07-22T20:00:00Z');
+        }
+      }
+      expect(harness.broadcast).not.toHaveBeenCalled();
+    });
+
+    it('executes a plan before its quote expires', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-22T19:59:59Z'));
+      const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+
+      const result = await harness.execute(contractPlan('2026-07-22T20:00:00Z'), 'direct');
+
+      expect(result.isOk()).toBe(true);
+      expect(harness.broadcast).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects a constrained plan with detached quote expiry before broadcasting', async () => {
+      const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+      const valuePlan = contractPlan('2026-07-22T20:00:00Z');
+      const detached = { ...valuePlan, quoteExpiresAt: undefined } as unknown as ExecutionPlan;
+
+      const result = await harness.execute(detached, 'direct');
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
       expect(harness.broadcast).not.toHaveBeenCalled();
     });
   });

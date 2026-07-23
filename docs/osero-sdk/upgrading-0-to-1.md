@@ -276,9 +276,13 @@ Operational APIs remain non-throwing even when user callbacks or transport/provi
 
 ## Hosted API
 
-### Configuration requires an allowance read provider
+The v1 hosted response is a breaking replacement for the removed legacy Enso-shaped quote and bridge-status response. There is no compatibility decoder or fallback. Migrate request handling, quote inspection, wallet execution, and cross-chain status together.
 
-Executable hosted quotes can contain an approval. 1.0 verifies that approval and then decides whether it is needed from live allowance:
+### Configuration and Quote Providers
+
+The API selects a Quote Provider; the initial request does not contain a provider hint. Enso and LI.FI differences are normalized in the quote lifecycle. Use `quote.provider` for the selected provider and Provider Details only for attribution or diagnostics. Known details have type guards, while unknown Quote Providers and opaque Provider Details remain valid.
+
+Executable hosted quotes can contain Approval Steps. The client verifies each Approval Step and uses a source-chain public client to decide whether its authorization is currently needed:
 
 ```ts
 import { OseroApiClient } from '@osero/client/api';
@@ -291,7 +295,7 @@ const api = OseroApiClient.create({
 
 `publicClientProvider` must supply a client for the source chain before requesting an executable quote. API key precedence is per-request override, provider, then static key.
 
-### Hosted amounts and policies are constructed values
+### Hosted amounts are constructed values
 
 ```ts
 import { parseSlippage } from '@osero/client';
@@ -308,11 +312,10 @@ const quote = await api.getSwapQuote({
   toAssetId: 'ethereum:susds',
   amount: amount.value,
   slippage: slippage.value,
-  approvalPolicy: 'exact',
 });
 ```
 
-The client verifies response sender, raw amount, source chain, transaction chain, native value, approval target, and decoded `approve(spender, amount)` semantics before returning an execution plan.
+The client verifies response sender, raw amount, source chain, transaction chain, native value, approval target, and decoded `approve(spender, amount)` semantics before returning a Hosted Swap Workflow.
 
 ### Asset refs are API-authoritative
 
@@ -328,11 +331,64 @@ The client verifies response sender, raw amount, source chain, transaction chain
 | `OseroApiToSusdsQuoteRequest`, `OseroApiFromSusdsQuoteRequest`          | `OseroApiSwapQuoteRequest`                          |
 | direction-derived hosted mint/redeem operation                          | `SWAP_EXACT_IN`; label from `quote.pair`            |
 
-Responses decode unknown future asset, chain, protocol, direction, kind, and status vocabulary. Fields required for safe execution remain strict.
+Responses decode unknown future asset, chain, protocol, and Quote Provider vocabulary. Fields required for safe execution and normalized Transfer Status states remain strict.
 
-### Completion polling
+### API and Wallet Execution Plans
 
-`waitForSwapCompletion` now requires a finite timeout policy, supports `AbortSignal`, and awaits async status callbacks. A provider bridge failure is returned as a terminal status payload, while caller cancellation, timeout, transport failure, callback failure, and malformed responses remain distinct errors.
+The quote contains an API Execution Plan with every conditional Approval Step and its final execution action. It is diagnostic data, not a sequential wallet plan. Never pass `workflow.quote.executionPlan` to `sendWith`: confirming one Approval Step invalidates every remaining quoted action.
+
+`getSwapQuote` and `refreshSwapQuote` instead return a discriminated Hosted Swap Workflow. Its `walletExecutionPlan` contains only actions that are currently safe to submit:
+
+```ts
+const workflow = await api.getSwapQuote(request);
+if (workflow.isErr()) throw workflow.error;
+
+if (workflow.value.state === 'approval-required') {
+  const approval = await sendWith(walletClient)(workflow.value.walletExecutionPlan);
+  if (approval.isErr()) throw approval.error;
+
+  const refreshed = await api.refreshSwapQuote(workflow.value.quote.refreshContext);
+  if (refreshed.isErr()) throw refreshed.error;
+  // Inspect refreshed.value.state and repeat from this boundary.
+} else {
+  const execution = await sendWith(walletClient)(workflow.value.walletExecutionPlan);
+  if (execution.isErr()) throw execution.error;
+}
+```
+
+Quote Refresh is provider-locked and does not repeat provider selection. Use the manual calls when the application needs to prompt, persist, pause, or resume. Wallet Execution Plans carry `quote.expiresAt`; execution rejects an expired plan, so perform Quote Refresh before trying again.
+
+For an automatic but bounded lifecycle, use the high-level executor:
+
+```ts
+const execution = await api.executeSwap(request, sendWith(walletClient), {
+  approvalTransactionLimit: 3,
+  quoteRefreshLimit: 5,
+  signal: abortController.signal,
+  onProgress: (event) => persist(event),
+});
+```
+
+It submits one approval-only Wallet Execution Plan at a time, refreshes after each confirmation or expiry, and submits only a fresh execution action. Its result preserves every approval result, the final quote, and the source-chain execution result. Limit, callback, cancellation, wallet, HTTP, and expiry failures remain distinct typed results.
+
+### Transfer Status
+
+The Hosted Swap Workflow ends at source-chain confirmation. Cross-chain delivery is a separate Transfer Status lifecycle:
+
+```ts
+const transfer = await api.waitForSwapCompletion(
+  execution.value.finalQuote,
+  execution.value.executionResult.txHash,
+  {
+    pollingIntervalMs: 5_000,
+    timeoutMs: 30 * 60_000,
+    signal: abortController.signal,
+    onStatus: (status) => persist(status),
+  },
+);
+```
+
+Status requests pair the source transaction hash with the final quote's complete Status Context and serialize its Quote Provider, source chain, destination chain, and bridge unchanged. `waitForSwapCompletion` requires a finite timeout policy, supports `AbortSignal`, and awaits async status callbacks. It polls normalized `pending` and `unknown` states; `completed` and `failed` are returned as successful terminal Transfer Status observations. Provider-native values stay in Provider Details. Same-chain quotes reject polling before an HTTP request, and caller cancellation, timeout, transport failure, callback failure, and malformed responses remain distinct errors.
 
 ## Reads, simulation, and APY
 

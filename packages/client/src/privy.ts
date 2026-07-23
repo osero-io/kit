@@ -30,6 +30,7 @@ import {
   UnsupportedCapabilityError,
   ValidationError,
 } from './lib/errors.js';
+import { checkExecutionPlanExpiry } from './lib/plan.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './lib/result.js';
 import type {
   ConfirmationOptions,
@@ -269,10 +270,13 @@ async function sendPrivyTransaction(
 function sendSingleTransaction(
   privy: PrivyExecutorClient,
   wallet: PrivyWallet,
+  plan: ExecutionPlan,
   request: TransactionRequest,
   context: SingleTransactionContext,
   options: ResolvedOptions,
 ): ResultAsync<SingleTransactionResult, SendWithError> {
+  const expiry = checkExecutionPlanExpiry(plan);
+  if (expiry.isErr()) return errAsync(expiry.error);
   return ResultAsync.fromPromise(
     sendPrivyTransaction(privy, wallet, request, options.idempotencyKeys?.[request.id]),
     (cause) =>
@@ -397,7 +401,14 @@ function executePlan(
 
   return verifyResumeReceipts(binding.value, resolvedOptions.value).andThen(() => {
     const executor: SingleTxExecutor = (transaction, context) =>
-      sendSingleTransaction(privy, wallet, transaction, context, resolvedOptions.value);
+      sendSingleTransaction(
+        privy,
+        wallet,
+        binding.value,
+        transaction,
+        context,
+        resolvedOptions.value,
+      );
     return runExecutionPlan(
       binding.value,
       executor,
