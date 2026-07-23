@@ -5,5 +5,13 @@
     "@osero/examples": "0.0.0",
     "@osero/client": "0.8.0"
   },
-  "changesets": ["flexible-api-swaps"]
+  "changesets": [
+    "drive-hosted-approval-refresh",
+    "execute-hosted-swap-workflows",
+    "flexible-api-swaps",
+    "guard-wallet-quote-expiry",
+    "poll-normalized-transfer-status",
+    "prepare-provider-neutral-quotes",
+    "publish-hosted-v1-surface"
+  ]
 }
