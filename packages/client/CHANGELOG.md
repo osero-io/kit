@@ -1,5 +1,35 @@
 # @osero/client
 
+## 1.0.0-next.1
+
+### Major Changes
+
+- 7fcfe4a: Replace legacy bridge-status requests and responses with normalized Transfer Status. Status requests
+  now keep the source transaction hash and complete quote Status Context together, known Enso and LI.FI
+  Provider Details are typed, and unknown providers remain inspectable. Polling continues for pending
+  and unknown states and returns completed or failed Transfer Status observations without discarding
+  provider diagnostics.
+- 7fcfe4a: Replace the legacy hosted quote response with the provider-neutral API contract. Same-chain quotes
+  now return a `ready-to-execute` Hosted Swap Workflow containing the normalized API quote and a
+  separate execution-only, expiry-bound Wallet Execution Plan. Enso and LI.FI Provider Details are
+  typed, unknown providers remain inspectable and executable, and hosted approval policy is removed.
+- 7fcfe4a: Publish the breaking v1 hosted API migration as a provider-neutral Hosted Swap Workflow. Replace
+  the legacy Enso-shaped quote and bridge status with discriminated approval and ready states,
+  provider-locked Quote Refresh, expiry-bound Wallet Execution Plans, bounded high-level execution,
+  and normalized Transfer Status polling.
+
+### Minor Changes
+
+- 7fcfe4a: Add manual hosted Approval Step and provider-locked Quote Refresh transitions. Insufficient
+  allowance now returns one exact approval-only Wallet Execution Plan, while refreshed quotes restart
+  allowance preparation before exposing replacement execution calldata.
+- 7fcfe4a: Add a bounded wallet-neutral Hosted Swap Workflow executor. It confirms one approval at a time,
+  performs provider-locked Quote Refreshes after approvals or expiry, emits serialized lifecycle
+  progress, and returns the final quote with every confirmed wallet result.
+- 7fcfe4a: Add optional hosted quote expiry constraints to Wallet Execution Plans. Expiry now participates in
+  plan identity and persistence, and viem, ethers, and Privy executions fail with a typed
+  `QuoteExpiredError` when the quote expires before broadcast.
+
 ## 1.0.0-next.0
 
 ### Major Changes
