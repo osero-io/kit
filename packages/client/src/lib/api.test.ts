@@ -263,8 +263,12 @@ type CapturedRequest = {
   readonly init?: RequestInit;
 };
 
-const receiverAwareFetch: OseroApiFetch = function (this: typeof globalThis): Promise<Response> {
-  if (this !== globalThis) throw new TypeError('Illegal invocation');
+/**
+ * Models browser fetch: WebIDL maps a null/undefined receiver to the realm's
+ * global object, but rejects any other receiver with a brand-check TypeError.
+ */
+const receiverAwareFetch: OseroApiFetch = function (this: unknown): Promise<Response> {
+  if (this !== globalThis && this !== undefined) throw new TypeError('Illegal invocation');
   return Promise.resolve(new Response(JSON.stringify({ assets: [] })));
 };
 
@@ -330,7 +334,7 @@ describe('OseroApiClient request boundaries', () => {
     expect(() => OseroApiClient.create({ fetch: 1 as never })).toThrow(ConfigurationError);
   });
 
-  it('calls the global fetch implementation with the global receiver', async () => {
+  it('calls the default global fetch with a receiver browsers accept', async () => {
     vi.stubGlobal('fetch', receiverAwareFetch);
 
     try {
@@ -341,6 +345,35 @@ describe('OseroApiClient request boundaries', () => {
       expect(result.isOk()).toBe(true);
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it('calls a caller-supplied fetch with a receiver browsers accept', async () => {
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: receiverAwareFetch });
+
+    const result = await client.getSupportedAssets();
+
+    expect(result.isOk()).toBe(true);
+  });
+
+  it('never hands the client instance to fetch as its receiver', async () => {
+    const receivers: unknown[] = [];
+    const probe: OseroApiFetch = function (this: unknown): Promise<Response> {
+      receivers.push(this);
+      return Promise.resolve(new Response(JSON.stringify({ assets: [] })));
+    };
+
+    await OseroApiClient.create({ apiKey: API_KEY, fetch: probe }).getSupportedAssets();
+    vi.stubGlobal('fetch', probe);
+    try {
+      await OseroApiClient.create({ apiKey: API_KEY }).getSupportedAssets();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(receivers).toHaveLength(2);
+    for (const receiver of receivers) {
+      expect(receiver === undefined || receiver === globalThis).toBe(true);
     }
   });
 
