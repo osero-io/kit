@@ -32,6 +32,7 @@ const OPERATIONS: Readonly<Record<OperationType, true>> = {
   REDEEM_USDS_FOR_USDC: true,
   REDEEM_SUSDS_FOR_USDS: true,
   WITHDRAW_USDS_FROM_SUSDS: true,
+  RECOVER_CROSS_CHAIN_TRANSFER: true,
 };
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const HEX_BYTES_PATTERN = /^0x(?:[0-9a-fA-F]{2})*$/;

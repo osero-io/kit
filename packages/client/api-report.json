@@ -26,7 +26,7 @@
     "dist/lib/adapters.d.ts": "7e979afb51d19a8cada82952093748d8426da0d2f4bccb66bba89748aa44909c",
     "dist/lib/addresses.d.ts": "029395ff4e9aca2abd9bd0de7f009359015e247351fb757ad2082d0d114abd93",
     "dist/lib/allowance.d.ts": "3c9bcd9d584c89fbf64525c56dceb044c9365c43956e4cdd64322049a7b51906",
-    "dist/lib/api.d.ts": "7c62b5bb1cc303806360598c1db5f80da5c05e794a3282579674e80fcd7b739c",
+    "dist/lib/api.d.ts": "7345cc09adcb9ee758dd9b3c19563270f54f7fbcc0ec2530d8a974c87e675dec",
     "dist/lib/apy.d.ts": "bfebea166f9d798c687d00e7c15e0cf1aaede4ec404b54bbac83de8a99612fe7",
     "dist/lib/balances.d.ts": "40aa1a136036dafb8369d04f15d95ec558d2ca8c0674788381f6c417777f0e1f",
     "dist/lib/capabilities.d.ts": "81cd58e95d639b45c440794d919ec74a0b8178998a828b7ce6cf0b0fc22a3252",
@@ -42,7 +42,7 @@
     "dist/lib/result.d.ts": "c73c658251fe9f6dc9f1fe392124b4d0861fa046351ddef248a6ac2a5c4706c4",
     "dist/lib/simulation.d.ts": "17f32e308e760b5b630209f8289cff9db477a8be52ef7e038ee4f8f202b31027",
     "dist/lib/tokens.d.ts": "f5f3b40e7223143233708bcb8d4f2dfe7cdda0566831f12b6826aa4acc130d71",
-    "dist/lib/types.d.ts": "6e8579ed67e7282c887340d21a04dc7497eadb2340e6e2c320759bd922512eb7",
+    "dist/lib/types.d.ts": "f3fa2689689fb27e4bd88fd7e80f5ec855275228447743a10d2bbcb440a87cbf",
     "dist/lib/validation.d.ts": "463f5bb33d1ca89b4fb62c0463f9f125ae9b3c120270f3fa09c4dda9972444f7",
     "dist/privy.d.ts": "10aca54d313e6ea8d976b57ee02273e672f434e124669368737ab01c8b0d689d",
     "dist/viem.d.ts": "39e60d5c5b724573f4b9ecc43236f6bdb2cee06cdb7d764687babd02fd1ad199"

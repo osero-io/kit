@@ -30,7 +30,8 @@ export type OperationType =
   | 'MINT_SUSDS_WITH_USDS'
   | 'REDEEM_USDS_FOR_USDC'
   | 'REDEEM_SUSDS_FOR_USDS'
-  | 'WITHDRAW_USDS_FROM_SUSDS';
+  | 'WITHDRAW_USDS_FROM_SUSDS'
+  | 'RECOVER_CROSS_CHAIN_TRANSFER';
 
 export type ApprovalAuthorization = {
   readonly kind: 'erc20-approval';

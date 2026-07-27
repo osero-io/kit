@@ -7,19 +7,27 @@ import {
   ensoTransferStatusFixture,
   lifiTransferStatusFixture,
   mockFn,
+  zeroXRecoveryContextFixture,
+  zeroXTransferStatusFixture,
   TEST_DESTINATION_TRANSACTION_HASH as DESTINATION_HASH,
   TEST_SOURCE_TRANSACTION_HASH as SOURCE_HASH,
 } from './_testing.js';
 import { erc20Abi } from './abis/erc20.js';
 import {
+  isOseroApiActionableRecovery,
+  isOseroApiEnsoProviderDetails,
   isOseroApiEnsoTransferStatusProviderDetails,
   isOseroApiLifiProviderDetails,
   isOseroApiLifiTransferStatusProviderDetails,
+  isOseroApiZeroXProviderDetails,
+  isOseroApiZeroXStatusContext,
+  isOseroApiZeroXTransferStatusProviderDetails,
   matchOseroApiAsset,
   oseroApiAmount,
   OSERO_API_KNOWN_ASSET_IDS,
   OSERO_API_KNOWN_CHAIN_IDS,
   OseroApiClient,
+  prepareRecoveryExecutionPlan,
   type OseroApiFetch,
   type OseroApiInputAmount,
   type OseroApiSwapQuoteRequest,
@@ -1996,5 +2004,581 @@ describe('Transfer Status polling', () => {
     if (callback.isErr()) expect(callback.error.code).toBe('CONFIGURATION_ERROR');
     expect(sameChain.isErr()).toBe(true);
     if (sameChain.isErr()) expect(sameChain.error.code).toBe('VALIDATION_ERROR');
+  });
+});
+
+const ZEROX_SAME_CHAIN_QUOTE = {
+  ...ENSO_SAME_CHAIN_QUOTE,
+  provider: '0x',
+  quote: {
+    ...ENSO_SAME_CHAIN_QUOTE.quote,
+    minimumOutput: { raw: '975000000000000000', formatted: '0.975' },
+  },
+  refreshContext: { ...ENSO_SAME_CHAIN_QUOTE.refreshContext, provider: '0x' },
+  providerDetails: {
+    provider: '0x',
+    zid: '0x111111111111111111111111',
+    route: [{ type: 'fill', source: 'Uniswap_V3' }],
+    fees: {
+      integratorFee: null,
+      zeroExFee: { amount: '2500', token: OUTPUT_TOKEN, type: 'volume' },
+      bridgeNativeFee: null,
+    },
+    gasLimit: '250000',
+    totalNetworkFee: '4500000000000000',
+    estimatedTimeSeconds: null,
+  },
+} as const satisfies OseroApiSwapQuoteResponse;
+
+const ZEROX_QUOTE_ID = '0x22222222222222222222222222222222';
+
+function zeroXCrossChainQuoteFixture(): OseroApiSwapQuoteResponse {
+  const crossChain = crossChainQuoteFixture();
+  return {
+    ...crossChain,
+    provider: '0x',
+    quote: ZEROX_SAME_CHAIN_QUOTE.quote,
+    routeSummary: { ...crossChain.routeSummary, bridge: 'across_v4' },
+    refreshContext: { ...crossChain.refreshContext, provider: '0x' },
+    statusContext: {
+      provider: '0x',
+      sourceChainId: 8453,
+      destinationChainId: 1,
+      bridge: 'across_v4',
+      providerQuoteId: ZEROX_QUOTE_ID,
+    },
+    providerDetails: {
+      ...ZEROX_SAME_CHAIN_QUOTE.providerDetails,
+      zid: '0x333333333333333333333333',
+      route: [
+        { type: 'swap', source: '0x' },
+        { type: 'bridge', source: 'across_v4' },
+      ],
+      estimatedTimeSeconds: 30,
+    },
+  };
+}
+
+function zeroXQuoteRequest(): OseroApiSwapQuoteRequest {
+  return quoteRequest({
+    fromAssetId: 'ethereum:usds',
+    amount: amount(1_000_000_000_000_000_000n),
+  });
+}
+
+describe('0x quotes', () => {
+  it('decodes and narrows 0x Provider Details on a same-chain quote', async () => {
+    const transport = fetchSequence({ body: ZEROX_SAME_CHAIN_QUOTE });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(zeroXQuoteRequest());
+
+    expect(result.isOk()).toBe(true);
+    if (!result.isOk()) return;
+    expect(result.value.state).toBe('ready-to-execute');
+    expect(result.value.quote).toEqual(ZEROX_SAME_CHAIN_QUOTE);
+    expect(isOseroApiEnsoProviderDetails(result.value.quote.providerDetails)).toBe(false);
+    expect(isOseroApiZeroXProviderDetails(result.value.quote.providerDetails)).toBe(true);
+    if (!isOseroApiZeroXProviderDetails(result.value.quote.providerDetails)) return;
+    const details = result.value.quote.providerDetails;
+    expect(details.zid).toBe('0x111111111111111111111111');
+    expect(details.route).toEqual([{ type: 'fill', source: 'Uniswap_V3' }]);
+    expect(details.fees.zeroExFee).toEqual({
+      amount: '2500',
+      token: OUTPUT_TOKEN,
+      type: 'volume',
+    });
+    expect(details.fees.integratorFee).toBeNull();
+    expect(details.fees.bridgeNativeFee).toBeNull();
+    expect(details.totalNetworkFee).toBe('4500000000000000');
+  });
+
+  it('exposes an Integrator Fee without restating it in Expected Output', async () => {
+    const fixture: OseroApiSwapQuoteResponse = {
+      ...ZEROX_SAME_CHAIN_QUOTE,
+      providerDetails: {
+        ...ZEROX_SAME_CHAIN_QUOTE.providerDetails,
+        fees: {
+          ...ZEROX_SAME_CHAIN_QUOTE.providerDetails.fees,
+          integratorFee: { amount: '2500', token: OUTPUT_TOKEN, type: 'volume' },
+        },
+      },
+    };
+    const transport = fetchSequence({ body: fixture });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(zeroXQuoteRequest());
+
+    expect(result.isOk()).toBe(true);
+    if (!result.isOk()) return;
+    // The API ranks the net Expected Output, so it is reported unchanged.
+    expect(result.value.quote.quote.expectedOutput).toEqual(
+      ZEROX_SAME_CHAIN_QUOTE.quote.expectedOutput,
+    );
+    if (!isOseroApiZeroXProviderDetails(result.value.quote.providerDetails)) return;
+    expect(result.value.quote.providerDetails.fees.integratorFee).toEqual({
+      amount: '2500',
+      token: OUTPUT_TOKEN,
+      type: 'volume',
+    });
+  });
+
+  it('carries the Provider Quote ID on a 0x cross-chain Status Context', async () => {
+    const fixture = zeroXCrossChainQuoteFixture();
+    const transport = fetchSequence({ body: fixture });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(zeroXQuoteRequest());
+
+    expect(result.isOk()).toBe(true);
+    if (!result.isOk()) return;
+    const statusContext = result.value.quote.statusContext;
+    expect(statusContext).not.toBeNull();
+    expect(isOseroApiZeroXStatusContext(statusContext!)).toBe(true);
+    if (!isOseroApiZeroXStatusContext(statusContext!)) return;
+    expect(statusContext.providerQuoteId).toBe(ZEROX_QUOTE_ID);
+    expect(statusContext.bridge).toBe('across_v4');
+  });
+
+  it('turns a 0x allowance issue into an Approval Step bound to the returned spender', async () => {
+    const approvalQuote = quoteWithApproval({ spender: SPENDER });
+    const fixture: OseroApiSwapQuoteResponse = {
+      ...approvalQuote,
+      provider: '0x',
+      quote: ZEROX_SAME_CHAIN_QUOTE.quote,
+      refreshContext: { ...approvalQuote.refreshContext, provider: '0x' },
+      providerDetails: ZEROX_SAME_CHAIN_QUOTE.providerDetails,
+    };
+    const transport = fetchSequence({ body: fixture });
+    const chain = publicClient(0n, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => chain.client,
+    });
+
+    const result = await client.getSwapQuote(zeroXQuoteRequest());
+
+    expect(result.isOk()).toBe(true);
+    if (!result.isOk()) return;
+    expect(result.value.state).toBe('approval-required');
+    expect(result.value.walletExecutionPlan.steps).toEqual([
+      expect.objectContaining({
+        operation: 'APPROVE_ERC20',
+        authorization: expect.objectContaining({ spender: SPENDER }),
+      }),
+    ]);
+  });
+
+  it.each([
+    [
+      'a missing Provider Quote ID',
+      {
+        statusContext: {
+          provider: '0x',
+          sourceChainId: 8453,
+          destinationChainId: 1,
+          bridge: 'across_v4',
+        },
+      },
+    ],
+    [
+      'an empty Provider Quote ID',
+      {
+        statusContext: {
+          provider: '0x',
+          sourceChainId: 8453,
+          destinationChainId: 1,
+          bridge: 'across_v4',
+          providerQuoteId: '',
+        },
+      },
+    ],
+  ])('rejects a 0x cross-chain quote with %s', async (_name, override) => {
+    const transport = fetchSequence({ body: { ...zeroXCrossChainQuoteFixture(), ...override } });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(zeroXQuoteRequest());
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
+  });
+
+  it.each([
+    ['zid', { zid: '' }],
+    ['route entry', { route: [{ type: 'fill' }] }],
+    ['fees', { fees: { integratorFee: null, zeroExFee: null } }],
+    [
+      'fee amount',
+      {
+        fees: {
+          integratorFee: null,
+          zeroExFee: { amount: '-1', token: OUTPUT_TOKEN, type: 'volume' },
+          bridgeNativeFee: null,
+        },
+      },
+    ],
+    [
+      'fee token',
+      {
+        fees: {
+          integratorFee: null,
+          zeroExFee: { amount: '1', token: 'not-an-address', type: 'volume' },
+          bridgeNativeFee: null,
+        },
+      },
+    ],
+    ['total network fee', { totalNetworkFee: '0x10' }],
+    ['estimated time', { estimatedTimeSeconds: -1 }],
+  ])('rejects malformed 0x Provider Details %s', async (_name, override) => {
+    const transport = fetchSequence({
+      body: {
+        ...ZEROX_SAME_CHAIN_QUOTE,
+        providerDetails: { ...ZEROX_SAME_CHAIN_QUOTE.providerDetails, ...override },
+      },
+    });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(zeroXQuoteRequest());
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
+  });
+});
+
+describe('0x Transfer Status and recovery', () => {
+  it('serializes the Provider Quote ID into the status query', async () => {
+    const fixture = zeroXTransferStatusFixture();
+    const transport = fetchSequence({ body: fixture });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      baseUrl: 'https://contract.test/v1/',
+      fetch: transport.fetch,
+    });
+
+    const result = await client.getSwapStatusForQuote(zeroXCrossChainQuoteFixture(), SOURCE_HASH);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value).toEqual(fixture);
+    expect(transport.calls[0]?.url).toBe(
+      `https://contract.test/v1/swap/status/${SOURCE_HASH}?provider=0x&sourceChainId=8453` +
+        `&destinationChainId=1&bridge=across_v4&providerQuoteId=${ZEROX_QUOTE_ID}`,
+    );
+  });
+
+  it('refuses to poll a 0x Status Context that lost its Provider Quote ID', async () => {
+    const transport = fetchSequence({ body: zeroXTransferStatusFixture() });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapStatus({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: {
+        provider: '0x',
+        sourceChainId: 8453,
+        destinationChainId: 1,
+        bridge: 'across_v4',
+      } as never,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(transport.calls).toHaveLength(0);
+  });
+
+  it('echoes Status Context fields an unknown provider adds', async () => {
+    const fixture = {
+      ...lifiTransferStatusFixture('unknown'),
+      provider: 'future-provider',
+      providerDetails: { provider: 'future-provider', lifecycle: 'phase-2' },
+    } as const;
+    const transport = fetchSequence({ body: fixture });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      baseUrl: 'https://contract.test/v1/',
+      fetch: transport.fetch,
+    });
+
+    const result = await client.getSwapStatus({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: {
+        provider: 'future-provider',
+        sourceChainId: 8453,
+        destinationChainId: 1,
+        bridge: 'future-bridge',
+        settlementEpoch: 7,
+      } as never,
+    });
+
+    expect(result.isOk()).toBe(true);
+    expect(transport.calls[0]?.url).toContain('settlementEpoch=7');
+  });
+
+  it('narrows 0x Transfer Status Provider Details and normalized Recovery Context', async () => {
+    const fixture = zeroXTransferStatusFixture('failed', zeroXRecoveryContextFixture());
+    const transport = fetchSequence({ body: fixture });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapStatusForQuote(zeroXCrossChainQuoteFixture(), SOURCE_HASH);
+
+    expect(result.isOk()).toBe(true);
+    if (!result.isOk()) return;
+    expect(isOseroApiZeroXTransferStatusProviderDetails(result.value.providerDetails)).toBe(true);
+    if (!isOseroApiZeroXTransferStatusProviderDetails(result.value.providerDetails)) return;
+    expect(result.value.providerDetails.failureReason).toBe('internal');
+    expect(result.value.providerDetails.recoveryStatus).toBe('manual_action_required');
+    expect(result.value.recoveryContext).toEqual(zeroXRecoveryContextFixture());
+  });
+
+  it.each([
+    ['recovery state', { state: 'in-progress' }],
+    ['recovery reason', { reason: 'exploded' }],
+    ['recovery chain', { chainId: 0 }],
+    ['recovery token', { tokenAddress: '0x0000000000000000000000000000000000000000' }],
+    ['recovery amount', { amount: '1.5' }],
+    ['recovery deadline', { deadline: 'tomorrow' }],
+    [
+      'a sender on the Recovery Transaction',
+      {
+        action: {
+          transaction: {
+            chainId: 8453,
+            sender: WALLET,
+            recipient: OTHER_SPENDER,
+            calldata: '0x9abc',
+            value: '0',
+            gasLimit: null,
+          },
+        },
+      },
+    ],
+    [
+      'Recovery Transaction calldata',
+      {
+        action: {
+          transaction: {
+            chainId: 8453,
+            recipient: OTHER_SPENDER,
+            calldata: '0x9',
+            value: '0',
+            gasLimit: null,
+          },
+        },
+      },
+    ],
+  ])('rejects malformed %s', async (_name, override) => {
+    const transport = fetchSequence({
+      body: zeroXTransferStatusFixture('failed', {
+        ...zeroXRecoveryContextFixture(),
+        ...override,
+      } as never),
+    });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapStatusForQuote(zeroXCrossChainQuoteFixture(), SOURCE_HASH);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
+  });
+
+  it('returns a failed transfer so the caller can inspect its Recovery Context', async () => {
+    const failed = zeroXTransferStatusFixture('failed', zeroXRecoveryContextFixture());
+    const transport = fetchSequence(
+      { body: zeroXTransferStatusFixture('pending') },
+      { body: failed },
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.waitForSwapCompletion(zeroXCrossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 1,
+      timeoutMs: 1_000,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('failed');
+      expect(result.value.recoveryContext?.state).toBe('action-required');
+    }
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  it('keeps polling a failed transfer while automatic recovery is pending', async () => {
+    const recovering = zeroXTransferStatusFixture(
+      'failed',
+      zeroXRecoveryContextFixture({ state: 'pending', action: null, deadline: null }),
+    );
+    const recovered = zeroXTransferStatusFixture(
+      'failed',
+      zeroXRecoveryContextFixture({
+        state: 'completed',
+        action: null,
+        deadline: null,
+        settledAmount: '997500',
+      }),
+    );
+    const transport = fetchSequence(
+      { body: recovering },
+      { body: recovering },
+      { body: recovered },
+    );
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.waitForSwapCompletion(zeroXCrossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 1,
+      timeoutMs: 1_000,
+      waitForRecovery: true,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.recoveryContext?.state).toBe('completed');
+      expect(result.value.recoveryContext?.settledAmount).toBe('997500');
+    }
+    expect(transport.calls).toHaveLength(3);
+  });
+
+  it('prepares a sender-free Recovery Action for any submitter', () => {
+    const status = zeroXTransferStatusFixture('failed', zeroXRecoveryContextFixture());
+
+    const plan = prepareRecoveryExecutionPlan(status, OTHER_WALLET);
+
+    expect(plan.isOk()).toBe(true);
+    if (!plan.isOk()) return;
+    expect(plan.value).toMatchObject({
+      version: 2,
+      // The deadline becomes plan expiry so adapters refuse a closed window.
+      quoteExpiresAt: '2030-01-02T00:00:00.000Z',
+      metadata: { source: 'hosted-api' },
+    });
+    expect(plan.value.steps).toEqual([
+      expect.objectContaining({
+        chainId: 8453,
+        from: OTHER_WALLET,
+        to: '0x0000000000000000000000000000000000000004',
+        data: '0x9abc',
+        value: 0n,
+        operation: 'RECOVER_CROSS_CHAIN_TRANSFER',
+        estimatedGas: { gas: 200_000n, source: 'hosted-api' },
+      }),
+    ]);
+  });
+
+  it('omits plan expiry when a Recovery Action has no deadline', () => {
+    const status = zeroXTransferStatusFixture(
+      'failed',
+      zeroXRecoveryContextFixture({ deadline: null }),
+    );
+
+    const plan = prepareRecoveryExecutionPlan(status, WALLET);
+
+    expect(plan.isOk()).toBe(true);
+    if (plan.isOk()) expect(plan.value.version).toBe(1);
+  });
+
+  it.each([
+    ['no Recovery Context', zeroXTransferStatusFixture('failed'), WALLET],
+    [
+      'no Recovery Action',
+      zeroXTransferStatusFixture(
+        'failed',
+        zeroXRecoveryContextFixture({ state: 'unavailable', action: null }),
+      ),
+      WALLET,
+    ],
+    [
+      'an invalid submitter',
+      zeroXTransferStatusFixture('failed', zeroXRecoveryContextFixture()),
+      'not-an-address' as Address,
+    ],
+  ])('refuses to prepare recovery with %s', (_name, status, submitter) => {
+    const plan = prepareRecoveryExecutionPlan(status, submitter);
+
+    expect(plan.isErr()).toBe(true);
+    if (plan.isErr()) expect(plan.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  // A stale or malformed response can pair a non-actionable state with calldata.
+  // Submitting it would broadcast a transaction the API did not authorize.
+  it.each([
+    ['pending', 'pending'],
+    ['completed', 'completed'],
+    ['not-required', 'not-required'],
+    ['unavailable', 'unavailable'],
+  ] as const)('refuses to submit a %s recovery that still carries an action', (_name, state) => {
+    const status = zeroXTransferStatusFixture('failed', zeroXRecoveryContextFixture({ state }));
+
+    expect(isOseroApiActionableRecovery(status.recoveryContext)).toBe(false);
+    const plan = prepareRecoveryExecutionPlan(status, WALLET);
+
+    expect(plan.isErr()).toBe(true);
+    if (plan.isErr()) {
+      expect(plan.error.code).toBe('VALIDATION_ERROR');
+      expect(plan.error.message).toContain('not action-required');
+    }
+  });
+
+  it.each([
+    ['pending', 'pending'],
+    ['completed', 'completed'],
+    ['unknown', 'unknown'],
+  ] as const)(
+    'refuses to recover a transfer whose state is %s rather than failed',
+    (_name, state) => {
+      const status = zeroXTransferStatusFixture(state, zeroXRecoveryContextFixture());
+
+      const plan = prepareRecoveryExecutionPlan(status, WALLET);
+
+      expect(plan.isErr()).toBe(true);
+      if (plan.isErr()) {
+        expect(plan.error.code).toBe('VALIDATION_ERROR');
+        expect(plan.error.message).toContain('only a failed transfer');
+      }
+    },
+  );
+
+  it.each([
+    ['pending', 'pending'],
+    ['completed', 'completed'],
+    ['action-required', 'action-required'],
+    ['not-required', 'not-required'],
+    ['unavailable', 'unavailable'],
+  ] as const)('decodes the %s Recovery Context state', async (_name, state) => {
+    const recoveryContext = zeroXRecoveryContextFixture({
+      state,
+      ...(state === 'action-required' ? {} : { action: null, deadline: null }),
+      ...(state === 'completed' ? { settledAmount: '997500' as const } : {}),
+    });
+    const transport = fetchSequence({
+      body: zeroXTransferStatusFixture('failed', recoveryContext),
+    });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapStatusForQuote(zeroXCrossChainQuoteFixture(), SOURCE_HASH);
+
+    expect(result.isOk()).toBe(true);
+    if (!result.isOk()) return;
+    expect(result.value.recoveryContext).toEqual(recoveryContext);
+    // Only action-required authorizes a wallet transaction.
+    expect(isOseroApiActionableRecovery(result.value.recoveryContext)).toBe(
+      state === 'action-required',
+    );
+  });
+
+  it.each([
+    ['expired', 'expired'],
+    ['cancelled', 'cancelled'],
+    ['out-of-gas', 'out-of-gas'],
+    ['provider-failure', 'provider-failure'],
+    ['unknown', 'unknown'],
+  ] as const)('decodes the %s Recovery Context reason', async (_name, reason) => {
+    const recoveryContext = zeroXRecoveryContextFixture({ reason });
+    const transport = fetchSequence({
+      body: zeroXTransferStatusFixture('failed', recoveryContext),
+    });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapStatusForQuote(zeroXCrossChainQuoteFixture(), SOURCE_HASH);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.recoveryContext?.reason).toBe(reason);
   });
 });
