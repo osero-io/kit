@@ -273,7 +273,9 @@ Simulation reports the pinned block, native balance, relevant token balances/all
 
 ## Hosted API
 
-The hosted client requests a provider-neutral quote. The API selects the Quote Provider; callers do not request Enso, LI.FI, or another provider directly. `quote.provider` identifies that selection, while Provider Details retain provider-specific attribution and diagnostics. Narrow known Provider Details with `isOseroApiEnsoProviderDetails` or `isOseroApiLifiProviderDetails`; preserve unknown providers and their opaque details.
+The hosted client requests a provider-neutral quote. The API selects the Quote Provider; callers do not request Enso, LI.FI, 0x, or another provider directly. `quote.provider` identifies that selection, while Provider Details retain provider-specific attribution and diagnostics. Narrow known Provider Details with `isOseroApiEnsoProviderDetails`, `isOseroApiLifiProviderDetails`, or `isOseroApiZeroXProviderDetails`; preserve unknown providers and their opaque details.
+
+0x is one Quote Provider spanning two upstream APIs — same-chain pairs are filled through the 0x Swap API, cross-chain pairs through the 0x Cross-Chain API — so it reports a single `'0x'` tag either way. `isOseroApiZeroXProviderDetails` narrows to the 0x support id (`zid`), the curated route, gas and network-fee estimates, and `fees`. Those fees are reporting only: `quote.expectedOutput` is already net of the Osero Integrator Fee, the 0x fee, and any bridge-native fee, so never subtract them again when displaying a quote. A `bridgeNativeFee` is paid through the execution transaction's native `value` rather than deducted from the source token. An allowance requirement arrives as an ordinary Approval Step — always spend against the returned `spender`, never a hardcoded AllowanceHolder address.
 
 The client requires an API key and a public-client provider when an Approval Step may need an allowance read.
 
@@ -359,7 +361,45 @@ const completion = await api.waitForSwapCompletion(
 );
 ```
 
-The helper sends the source transaction hash with the quote's complete Status Context: Quote Provider, source chain, destination chain, and bridge. It polls normalized `pending` and `unknown` states and stops on `completed` or `failed`. A terminal `failed` state is a successful Transfer Status observation whose payload preserves the nullable error and Provider Details. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors. Same-chain quotes have no Status Context and reject Transfer Status polling before an HTTP request.
+The helper sends the source transaction hash with the quote's complete Status Context: Quote Provider, source chain, destination chain, bridge, and — for 0x only — the Provider Quote ID. It polls normalized `pending` and `unknown` states and stops on `completed` or `failed`. A terminal `failed` state is a successful Transfer Status observation whose payload preserves the nullable error and Provider Details. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors. Same-chain quotes have no Status Context and reject Transfer Status polling before an HTTP request.
+
+Status Context is a provider-discriminated union. Persist it whole alongside the quote and submit it unchanged: a 0x context additionally carries `providerQuoteId` (0x's `quoteId`), which the client serializes into every status poll and refuses to poll without, because bundled transactions cannot be disambiguated otherwise. `isOseroApiZeroXStatusContext` narrows to it.
+
+### Recovery
+
+A failed cross-chain transfer is not automatically terminal. Inspect `status.recoveryContext` — nullable on every Transfer Status — instead of treating `failed` as the end of the story:
+
+| `recoveryContext.state` | What to show                                                       |
+| ----------------------- | ------------------------------------------------------------------ |
+| `pending`               | Automatic recovery in progress; keep polling with backoff.         |
+| `completed`             | Recovered funds, using `chainId`, `tokenAddress`, `settledAmount`. |
+| `action-required`       | The `deadline` and the Recovery Action, prominently.               |
+| `not-required`          | Funds did not leave, or are already available.                     |
+| `unavailable`           | Stop automated recovery; direct the user to support.               |
+
+Pass `waitForRecovery: true` to `waitForSwapCompletion` to keep polling a failed transfer while its recovery is still `pending`, so the returned status reflects the settled outcome. `reason` normalizes to `expired`, `cancelled`, `out-of-gas`, `provider-failure`, or `unknown`; provider-native strings stay in Provider Details for diagnostics only.
+
+A Recovery Action is deliberately sender-free — any caller may submit it — so name the submitting wallet yourself rather than assuming the original one:
+
+```ts
+import { isOseroApiActionableRecovery, prepareRecoveryExecutionPlan } from '@osero/client/api';
+
+if (isOseroApiActionableRecovery(completion.value.recoveryContext)) {
+  const plan = prepareRecoveryExecutionPlan(completion.value, submitter);
+  if (plan.isErr()) throw plan.error;
+  const recovered = await sendWith(walletClient)(plan.value);
+  if (recovered.isErr()) throw recovered.error;
+
+  // Submission does not settle recovery; keep polling the original transfer.
+  const settled = await api.waitForSwapCompletion(finalQuote, sourceTxHash, {
+    waitForRecovery: true,
+  });
+}
+```
+
+Only a `failed` transfer whose recovery is `action-required` authorizes a submission. Every other state is the API saying no wallet action is wanted, so `prepareRecoveryExecutionPlan` rejects a stale or malformed response that still carries calldata rather than turning it into a signable plan. `isOseroApiActionableRecovery` narrows to the one combination that is submittable, which is also what makes an unsubmittable one unrepresentable on the executable path.
+
+The recipient, calldata, value, and gas limit are carried through unchanged; nonce and fee pricing stay the wallet's job. A non-null `deadline` becomes the plan's quote expiry, so adapters reject a recovery whose window has already closed. Osero never signs or submits a Recovery Action. Recovery status is tracked against the original source transaction, so keep polling that transfer after submitting.
 
 The v1 hosted response is an intentional breaking replacement. The client does not decode or promise compatibility with the removed legacy Enso-shaped quote or bridge-status response.
 

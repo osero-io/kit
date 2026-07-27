@@ -191,6 +191,7 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
       sourceTransactionHash,
       destinationTransactionHash,
       error: null,
+      recoveryContext: null,
       providerDetails: {
         provider: 'lifi',
         status: 'DONE',

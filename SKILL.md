@@ -363,9 +363,24 @@ Quote Refresh; confirming it invalidates the remaining API Execution Plan.
 limits, while `getSwapQuote` and `refreshSwapQuote` preserve manual control.
 Every Wallet Execution Plan is expiry-bound.
 
+`'0x'` is a first-class Quote Provider alongside `'enso'` and `'lifi'`, and one
+provider across both the same-chain and cross-chain 0x APIs. Narrow its details
+with `isOseroApiZeroXProviderDetails`; `quote.expectedOutput` is already net of
+every fee those details report, so never subtract them again.
+
 High-level execution stops at source-chain confirmation. For cross-chain quotes,
 pass the final quote and source transaction hash to `waitForSwapCompletion` as a
-separate, cancellable Transfer Status lifecycle.
+separate, cancellable Transfer Status lifecycle. Status Context is a
+provider-discriminated union that must be persisted whole and submitted
+unchanged — a 0x context also carries the required `providerQuoteId`. A failed
+transfer may still be recoverable: inspect the nullable `recoveryContext`, drive
+UI from its normalized `state`, and turn an `action-required` Recovery Action
+into a submittable plan with `prepareRecoveryExecutionPlan(status, submitter)`.
+Recovery Actions are sender-free by contract, so the submitter is always named
+explicitly. Only a `failed` transfer whose recovery is `action-required`
+authorizes a submission — narrow with `isOseroApiActionableRecovery` rather than
+testing `state` alone — and status polling resumes against the original source
+transaction afterwards.
 
 Advisory snapshot rules:
 

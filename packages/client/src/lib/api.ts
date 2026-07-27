@@ -154,7 +154,13 @@ export const OSERO_API_KNOWN_ASSETS = [
  * The API may adopt new protocols at any time; they decode and re-encode
  * through status polling without an SDK update.
  */
-export const OSERO_API_KNOWN_BRIDGE_PROTOCOLS = ['ccip', 'layerzero', 'relay', 'stargate'] as const;
+export const OSERO_API_KNOWN_BRIDGE_PROTOCOLS = [
+  'across_v4',
+  'ccip',
+  'layerzero',
+  'relay',
+  'stargate',
+] as const;
 
 export type OseroApiKnownAsset = (typeof OSERO_API_KNOWN_ASSETS)[number];
 export type OseroApiKnownChain = (typeof OSERO_API_KNOWN_CHAINS)[number];
@@ -366,7 +372,10 @@ export type OseroApiUnknownQuoteProvider = string & {
   readonly [unknownQuoteProviderBrand]: true;
 };
 
-export type OseroApiQuoteProvider = 'enso' | 'lifi' | OseroApiUnknownQuoteProvider;
+/** Providers this SDK release decodes into named, narrowable shapes. */
+export type OseroApiKnownQuoteProvider = 'enso' | 'lifi' | '0x';
+
+export type OseroApiQuoteProvider = OseroApiKnownQuoteProvider | OseroApiUnknownQuoteProvider;
 export type OseroApiReferralAttributionStatus = 'not-requested' | 'applied' | 'not-applied';
 
 export type OseroApiSwapSlippage = {
@@ -436,12 +445,48 @@ export type OseroApiRefreshContext = {
   readonly referralCode: number | null;
 };
 
-export type OseroApiStatusContext = {
-  readonly provider: OseroApiQuoteProvider;
+type OseroApiStatusContextCommon = {
   readonly sourceChainId: OseroApiChainId;
   readonly destinationChainId: OseroApiChainId;
   readonly bridge: OseroApiBridgeProtocol;
 };
+
+export type OseroApiEnsoStatusContext = OseroApiStatusContextCommon & {
+  readonly provider: 'enso';
+};
+
+export type OseroApiLifiStatusContext = OseroApiStatusContextCommon & {
+  readonly provider: 'lifi';
+};
+
+export type OseroApiZeroXStatusContext = OseroApiStatusContextCommon & {
+  readonly provider: '0x';
+  /** 0x `quoteId`; returned unchanged when polling cross-chain status. */
+  readonly providerQuoteId: string;
+};
+
+/**
+ * A Status Context tagged with a provider this SDK release does not know.
+ * Unrecognised primitive fields survive decoding and are serialized back on
+ * the next status poll, so a new provider's context round-trips without an
+ * SDK upgrade.
+ */
+export type OseroApiUnknownStatusContext = Readonly<Record<string, unknown>> &
+  OseroApiStatusContextCommon & {
+    readonly provider: OseroApiUnknownQuoteProvider;
+  };
+
+export type OseroApiStatusContext =
+  | OseroApiEnsoStatusContext
+  | OseroApiLifiStatusContext
+  | OseroApiZeroXStatusContext
+  | OseroApiUnknownStatusContext;
+
+export function isOseroApiZeroXStatusContext(
+  context: OseroApiStatusContext,
+): context is OseroApiZeroXStatusContext {
+  return context.provider === '0x';
+}
 
 export type OseroApiEnsoRouteLabel = {
   readonly protocol: string;
@@ -507,6 +552,40 @@ export type OseroApiLifiProviderDetails = {
   readonly steps: readonly OseroApiLifiStep[];
 };
 
+export type OseroApiZeroXRouteEntry = {
+  readonly type: string;
+  readonly source: string;
+};
+
+export type OseroApiZeroXFee = {
+  readonly amount: OseroApiIntegerString;
+  readonly token: Address;
+  readonly type: string;
+};
+
+/**
+ * Fees 0x reports for a quote. `quote.expectedOutput` is already net of every
+ * entry here — never subtract these again when displaying a quote. A
+ * `bridgeNativeFee` is paid through the execution transaction's native
+ * `value` rather than deducted from the source token.
+ */
+export type OseroApiZeroXFees = {
+  readonly integratorFee: OseroApiZeroXFee | null;
+  readonly zeroExFee: OseroApiZeroXFee | null;
+  readonly bridgeNativeFee: OseroApiZeroXFee | null;
+};
+
+export type OseroApiZeroXProviderDetails = {
+  readonly provider: '0x';
+  /** 0x support request id. */
+  readonly zid: string;
+  readonly route: readonly OseroApiZeroXRouteEntry[];
+  readonly fees: OseroApiZeroXFees;
+  readonly gasLimit: OseroApiIntegerString | null;
+  readonly totalNetworkFee: OseroApiIntegerString | null;
+  readonly estimatedTimeSeconds: number | null;
+};
+
 export type OseroApiUnknownProviderDetails = Readonly<Record<string, unknown>> & {
   readonly provider: OseroApiUnknownQuoteProvider;
 };
@@ -514,6 +593,7 @@ export type OseroApiUnknownProviderDetails = Readonly<Record<string, unknown>> &
 export type OseroApiQuoteProviderDetails =
   | OseroApiEnsoProviderDetails
   | OseroApiLifiProviderDetails
+  | OseroApiZeroXProviderDetails
   | OseroApiUnknownProviderDetails;
 
 export function isOseroApiEnsoProviderDetails(
@@ -526,6 +606,12 @@ export function isOseroApiLifiProviderDetails(
   details: OseroApiQuoteProviderDetails,
 ): details is OseroApiLifiProviderDetails {
   return details.provider === 'lifi';
+}
+
+export function isOseroApiZeroXProviderDetails(
+  details: OseroApiQuoteProviderDetails,
+): details is OseroApiZeroXProviderDetails {
+  return details.provider === '0x';
 }
 
 export type OseroApiSwapQuoteResponse = {
@@ -564,6 +650,16 @@ export type OseroApiLifiTransferStatusProviderDetails = {
   readonly substatus: string | null;
 };
 
+export type OseroApiZeroXTransferStatusProviderDetails = {
+  readonly provider: '0x';
+  /** Original 0x top-level status. */
+  readonly status: string;
+  /** Original 0x failure reason, when supplied. */
+  readonly failureReason: string | null;
+  /** Original 0x recovery status, when supplied. */
+  readonly recoveryStatus: string | null;
+};
+
 export type OseroApiUnknownTransferStatusProviderDetails = Readonly<Record<string, unknown>> & {
   readonly provider: OseroApiUnknownQuoteProvider;
 };
@@ -571,6 +667,7 @@ export type OseroApiUnknownTransferStatusProviderDetails = Readonly<Record<strin
 export type OseroApiTransferStatusProviderDetails =
   | OseroApiEnsoTransferStatusProviderDetails
   | OseroApiLifiTransferStatusProviderDetails
+  | OseroApiZeroXTransferStatusProviderDetails
   | OseroApiUnknownTransferStatusProviderDetails;
 
 export function isOseroApiEnsoTransferStatusProviderDetails(
@@ -585,6 +682,90 @@ export function isOseroApiLifiTransferStatusProviderDetails(
   return details.provider === 'lifi';
 }
 
+export function isOseroApiZeroXTransferStatusProviderDetails(
+  details: OseroApiTransferStatusProviderDetails,
+): details is OseroApiZeroXTransferStatusProviderDetails {
+  return details.provider === '0x';
+}
+
+/**
+ * Normalized recovery lifecycle:
+ *
+ * - `pending` — automatic recovery is under way; keep polling with backoff.
+ * - `completed` — funds were recovered; show chain, token, and settled amount.
+ * - `action-required` — present the deadline and the Recovery Action.
+ * - `not-required` — funds never left, or are already available.
+ * - `unavailable` — stop automated recovery and direct the user to support.
+ */
+export type OseroApiRecoveryState =
+  | 'pending'
+  | 'completed'
+  | 'action-required'
+  | 'not-required'
+  | 'unavailable';
+
+export type OseroApiRecoveryReason =
+  | 'expired'
+  | 'cancelled'
+  | 'out-of-gas'
+  | 'provider-failure'
+  | 'unknown';
+
+/**
+ * Intentionally sender-free: a recovery transaction may be submitted by any
+ * caller, so the SDK never infers the original wallet as its sender. Use
+ * {@link prepareRecoveryExecutionPlan} to bind a submitter and obtain a plan
+ * a wallet adapter can broadcast.
+ */
+export type OseroApiRecoveryTransaction = {
+  readonly chainId: OseroApiChainId;
+  readonly recipient: Address;
+  readonly calldata: Hex;
+  readonly value: OseroApiIntegerString;
+  readonly gasLimit: OseroApiIntegerString | null;
+};
+
+export type OseroApiRecoveryAction = {
+  readonly transaction: OseroApiRecoveryTransaction;
+};
+
+export type OseroApiRecoveryContext = {
+  readonly state: OseroApiRecoveryState;
+  readonly reason: OseroApiRecoveryReason;
+  /** Chain where recovered funds are or will be delivered. */
+  readonly chainId: OseroApiChainId | null;
+  /** Recovery token address; it may differ from the original source token. */
+  readonly tokenAddress: Address | null;
+  /** Expected recovered token base units. */
+  readonly amount: OseroApiIntegerString | null;
+  /** Actual recovered token base units after settlement. */
+  readonly settledAmount: OseroApiIntegerString | null;
+  readonly estimatedTimeSeconds: number | null;
+  /** UTC ISO-8601 timestamp for manual action, when one exists. */
+  readonly deadline: string | null;
+  readonly action: OseroApiRecoveryAction | null;
+};
+
+/**
+ * The one Recovery Context shape that authorizes a wallet transaction.
+ *
+ * The wire type keeps `state` and `action` independent because that is what the
+ * API publishes, which leaves combinations like a `pending` recovery still
+ * carrying stale calldata, or an `action-required` one with no action, type-valid
+ * on the wire. Narrowing to this type before building a plan is what makes those
+ * combinations unrepresentable on the executable path.
+ */
+export type OseroApiActionableRecovery = OseroApiRecoveryContext & {
+  readonly state: 'action-required';
+  readonly action: OseroApiRecoveryAction;
+};
+
+export function isOseroApiActionableRecovery(
+  context: OseroApiRecoveryContext | null,
+): context is OseroApiActionableRecovery {
+  return context !== null && context.state === 'action-required' && context.action !== null;
+}
+
 export type OseroApiTransferStatus = {
   readonly provider: OseroApiQuoteProvider;
   readonly state: OseroApiTransferState;
@@ -594,6 +775,11 @@ export type OseroApiTransferStatus = {
   readonly sourceTransactionHash: Hex;
   readonly destinationTransactionHash: Hex | null;
   readonly error: string | null;
+  /**
+   * Normalized recovery guidance. Inspect it at `state: 'failed'` instead of
+   * treating every failure as terminal.
+   */
+  readonly recoveryContext: OseroApiRecoveryContext | null;
   readonly providerDetails: OseroApiTransferStatusProviderDetails;
 };
 
@@ -601,6 +787,12 @@ export type WaitForSwapCompletionOptions = OseroApiRequestOptions & {
   readonly pollingIntervalMs?: number;
   readonly timeoutMs?: number;
   readonly onStatus?: (status: OseroApiTransferStatus) => void | Promise<void>;
+  /**
+   * Keep polling a failed transfer while its Recovery Context is still
+   * `pending`, so the returned status reflects the settled recovery outcome.
+   * Defaults to `false`, which returns the first failed status.
+   */
+  readonly waitForRecovery?: boolean;
 };
 
 type HostedSwapProgressDetails = {
@@ -1041,6 +1233,12 @@ export class OseroApiClient {
     if (options.onStatus !== undefined && typeof options.onStatus !== 'function') {
       return errAsync(ValidationError.forField('onStatus', 'onStatus must be a function'));
     }
+    if (options.waitForRecovery !== undefined && typeof options.waitForRecovery !== 'boolean') {
+      return errAsync(
+        ValidationError.forField('waitForRecovery', 'waitForRecovery must be a boolean'),
+      );
+    }
+    const waitForRecovery = options.waitForRecovery ?? false;
 
     const wait = async (): Promise<Result<OseroApiTransferStatus, OseroApiClientError>> => {
       const startedAt = Date.now();
@@ -1095,7 +1293,15 @@ export class OseroApiClient {
           }
         }
 
-        if (status.value.state === 'completed' || status.value.state === 'failed') {
+        if (status.value.state === 'completed') {
+          return ok(status.value);
+        }
+        // A failed transfer whose recovery is still running is not settled yet:
+        // opting into `waitForRecovery` keeps polling until it resolves.
+        if (
+          status.value.state === 'failed' &&
+          !(waitForRecovery && status.value.recoveryContext?.state === 'pending')
+        ) {
           return ok(status.value);
         }
 
@@ -1361,6 +1567,86 @@ export class OseroApiClient {
     };
     return new ResultAsync(request());
   }
+}
+
+/**
+ * Turns a Recovery Action into a wallet-agnostic Execution Plan.
+ *
+ * A Recovery Transaction is deliberately sender-free, so the caller names the
+ * `submitter` that will sign it — any address may, and binding the original
+ * wallet by default would be a guess. The recipient, calldata, value, and gas
+ * limit are carried through unchanged; nonce and fee pricing stay the wallet's
+ * job. A non-null `deadline` becomes the plan's quote expiry, so adapters
+ * refuse to broadcast a recovery whose window has already closed.
+ *
+ * Only a `failed` transfer whose recovery is `action-required` authorizes a
+ * submission. Every other state is the API saying no wallet action is wanted —
+ * automatic recovery is running, already settled, was never needed, or is
+ * unavailable — so a stale or malformed response that still carries calldata is
+ * rejected here rather than turned into a signable plan.
+ */
+export function prepareRecoveryExecutionPlan(
+  status: OseroApiTransferStatus,
+  submitter: Address,
+): Result<ExecutionPlan, ValidationError> {
+  if (typeof status !== 'object' || status === null) {
+    return err(ValidationError.forField('status', 'status must be a Transfer Status'));
+  }
+  if (status.state !== 'failed') {
+    return err(
+      ValidationError.forField(
+        'status.state',
+        `transfer is ${status.state}; only a failed transfer can be recovered`,
+      ),
+    );
+  }
+  const recovery = status.recoveryContext;
+  if (recovery === null || recovery === undefined) {
+    return err(
+      ValidationError.forField(
+        'status.recoveryContext',
+        'this Transfer Status carries no Recovery Context',
+      ),
+    );
+  }
+  if (!isOseroApiActionableRecovery(recovery)) {
+    return err(
+      ValidationError.forField(
+        'status.recoveryContext',
+        recovery.action === null
+          ? `recovery is ${recovery.state}; there is no Recovery Action to submit`
+          : `recovery is ${recovery.state}, not action-required; its Recovery Action must not be submitted`,
+      ),
+    );
+  }
+  if (typeof submitter !== 'string' || !isAddress(submitter)) {
+    return err(ValidationError.forField('submitter', 'submitter must be an EVM address'));
+  }
+
+  const { transaction } = recovery.action;
+  const step = createTransactionRequest({
+    id: 'recover-transfer',
+    chainId: transaction.chainId,
+    from: submitter,
+    to: transaction.recipient,
+    data: transaction.calldata,
+    value: BigInt(transaction.value),
+    operation: 'RECOVER_CROSS_CHAIN_TRANSFER',
+    ...(transaction.gasLimit === null || BigInt(transaction.gasLimit) === 0n
+      ? {}
+      : {
+          estimatedGas: {
+            gas: BigInt(transaction.gasLimit),
+            source: 'hosted-api',
+          },
+        }),
+  });
+  if (step.isErr()) return err(step.error);
+  return createExecutionPlan({
+    steps: [step.value],
+    ...(recovery.deadline === null ? {} : { quoteExpiresAt: recovery.deadline }),
+    metadata: { source: 'hosted-api' },
+  });
 }
 
 function isAbortFailure(cause: unknown, signal: AbortSignal | undefined): boolean {
@@ -1665,6 +1951,27 @@ function encodeSwapStatusRequest(
     destinationChainId: String(destinationChainId),
     bridge,
   });
+  const context = request.statusContext as Readonly<Record<string, unknown>>;
+  for (const field of quoteProviderCodec(provider)?.statusQueryFields ?? []) {
+    const required = context[field];
+    if (typeof required !== 'string' || required.trim().length === 0) {
+      return err(
+        ValidationError.forField(
+          `statusContext.${field}`,
+          `a ${provider} Status Context must carry the ${field} it was issued with`,
+        ),
+      );
+    }
+    search.set(field, required);
+  }
+  // The API is the authority on what a Status Context contains, so any field a
+  // newer provider adds is echoed back verbatim rather than dropped.
+  for (const [key, value] of Object.entries(request.statusContext)) {
+    if (search.has(key)) continue;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      search.set(key, String(value));
+    }
+  }
   return ok(`swap/status/${request.sourceTransactionHash}?${search.toString()}`);
 }
 
@@ -1754,6 +2061,12 @@ function decodeTransferStatus(
         decodeHash,
       ),
       error: nullableField(root, 'error', '$.error', decodeNonEmptyString),
+      recoveryContext: nullableField(
+        root,
+        'recoveryContext',
+        '$.recoveryContext',
+        decodeRecoveryContext,
+      ),
       providerDetails: decodeTransferStatusProviderDetails(
         requiredField(root, 'providerDetails', '$.providerDetails'),
         '$.providerDetails',
@@ -2202,13 +2515,82 @@ function decodeRefreshContext(value: unknown, path: string): OseroApiRefreshCont
   };
 }
 
+type StatusContextCommon = {
+  readonly sourceChainId: OseroApiChainId;
+  readonly destinationChainId: OseroApiChainId;
+  readonly bridge: OseroApiBridgeProtocol;
+};
+
+/**
+ * Everything provider-specific about decoding a response and encoding the next
+ * status poll, gathered per provider.
+ *
+ * The registry below is typed as a total `Record` over
+ * {@link OseroApiKnownQuoteProvider} on purpose: adding a provider to that union
+ * fails to compile until each of these is supplied. The alternative — a
+ * conditional at every decode and encode site — lets a new provider ship with
+ * one site silently unimplemented, which is exactly how a Status Context field
+ * goes missing from a status query.
+ */
+type QuoteProviderCodec = {
+  readonly decodeStatusContext: (
+    record: Record<string, unknown>,
+    common: StatusContextCommon,
+    path: string,
+  ) => OseroApiEnsoStatusContext | OseroApiLifiStatusContext | OseroApiZeroXStatusContext;
+  readonly decodeQuoteDetails: (
+    record: Record<string, unknown>,
+    path: string,
+  ) => OseroApiEnsoProviderDetails | OseroApiLifiProviderDetails | OseroApiZeroXProviderDetails;
+  readonly decodeTransferStatusDetails: (
+    record: Record<string, unknown>,
+    path: string,
+  ) =>
+    | OseroApiEnsoTransferStatusProviderDetails
+    | OseroApiLifiTransferStatusProviderDetails
+    | OseroApiZeroXTransferStatusProviderDetails;
+  /**
+   * Status Context fields beyond the common four that must reach
+   * `GET /v1/swap/status/:txHash` for this provider.
+   */
+  readonly statusQueryFields: readonly string[];
+};
+
+const QUOTE_PROVIDER_CODECS: Readonly<Record<OseroApiKnownQuoteProvider, QuoteProviderCodec>> = {
+  enso: {
+    decodeStatusContext: (_record, common) => ({ provider: 'enso', ...common }),
+    decodeQuoteDetails: decodeEnsoProviderDetails,
+    decodeTransferStatusDetails: decodeEnsoTransferStatusDetails,
+    statusQueryFields: [],
+  },
+  lifi: {
+    decodeStatusContext: (_record, common) => ({ provider: 'lifi', ...common }),
+    decodeQuoteDetails: decodeLifiProviderDetails,
+    decodeTransferStatusDetails: decodeLifiTransferStatusDetails,
+    statusQueryFields: [],
+  },
+  '0x': {
+    decodeStatusContext: (record, common, path) => ({
+      provider: '0x',
+      ...common,
+      providerQuoteId: nonEmptyStringField(record, 'providerQuoteId', `${path}.providerQuoteId`),
+    }),
+    decodeQuoteDetails: decodeZeroXProviderDetails,
+    decodeTransferStatusDetails: decodeZeroXTransferStatusDetails,
+    statusQueryFields: ['providerQuoteId'],
+  },
+};
+
+function quoteProviderCodec(provider: string): QuoteProviderCodec | undefined {
+  return Object.hasOwn(QUOTE_PROVIDER_CODECS, provider)
+    ? QUOTE_PROVIDER_CODECS[provider as OseroApiKnownQuoteProvider]
+    : undefined;
+}
+
 function decodeStatusContext(value: unknown, path: string): OseroApiStatusContext {
   const record = asRecord(value, path);
-  return {
-    provider: decodeQuoteProvider(
-      requiredField(record, 'provider', `${path}.provider`),
-      `${path}.provider`,
-    ),
+  const provider = nonEmptyStringField(record, 'provider', `${path}.provider`);
+  const common = {
     sourceChainId: positiveChainIdField(record, 'sourceChainId', `${path}.sourceChainId`),
     destinationChainId: positiveChainIdField(
       record,
@@ -2217,6 +2599,9 @@ function decodeStatusContext(value: unknown, path: string): OseroApiStatusContex
     ),
     bridge: nonEmptyStringField(record, 'bridge', `${path}.bridge`),
   };
+  const codec = quoteProviderCodec(provider);
+  if (codec !== undefined) return codec.decodeStatusContext(record, common, path);
+  return { ...record, provider: provider as OseroApiUnknownQuoteProvider, ...common };
 }
 
 function decodeQuoteProvider(value: unknown, path: string): OseroApiQuoteProvider {
@@ -2226,9 +2611,65 @@ function decodeQuoteProvider(value: unknown, path: string): OseroApiQuoteProvide
 function decodeQuoteProviderDetails(value: unknown, path: string): OseroApiQuoteProviderDetails {
   const record = asRecord(value, path);
   const provider = nonEmptyStringField(record, 'provider', `${path}.provider`);
-  if (provider === 'enso') return decodeEnsoProviderDetails(record, path);
-  if (provider === 'lifi') return decodeLifiProviderDetails(record, path);
+  const codec = quoteProviderCodec(provider);
+  if (codec !== undefined) return codec.decodeQuoteDetails(record, path);
   return { ...record, provider: provider as OseroApiUnknownQuoteProvider };
+}
+
+function decodeZeroXProviderDetails(
+  record: Record<string, unknown>,
+  path: string,
+): OseroApiZeroXProviderDetails {
+  return {
+    provider: '0x',
+    zid: nonEmptyStringField(record, 'zid', `${path}.zid`),
+    route: arrayField(record, 'route', `${path}.route`, decodeZeroXRouteEntry),
+    fees: decodeZeroXFees(requiredField(record, 'fees', `${path}.fees`), `${path}.fees`),
+    gasLimit: nullableField(record, 'gasLimit', `${path}.gasLimit`, decodeUint256String),
+    totalNetworkFee: nullableField(
+      record,
+      'totalNetworkFee',
+      `${path}.totalNetworkFee`,
+      decodeUint256String,
+    ),
+    estimatedTimeSeconds: nullableField(
+      record,
+      'estimatedTimeSeconds',
+      `${path}.estimatedTimeSeconds`,
+      decodeNonNegativeNumber,
+    ),
+  };
+}
+
+function decodeZeroXRouteEntry(value: unknown, path: string): OseroApiZeroXRouteEntry {
+  const record = asRecord(value, path);
+  return {
+    type: nonEmptyStringField(record, 'type', `${path}.type`),
+    source: nonEmptyStringField(record, 'source', `${path}.source`),
+  };
+}
+
+function decodeZeroXFees(value: unknown, path: string): OseroApiZeroXFees {
+  const record = asRecord(value, path);
+  return {
+    integratorFee: nullableField(record, 'integratorFee', `${path}.integratorFee`, decodeZeroXFee),
+    zeroExFee: nullableField(record, 'zeroExFee', `${path}.zeroExFee`, decodeZeroXFee),
+    bridgeNativeFee: nullableField(
+      record,
+      'bridgeNativeFee',
+      `${path}.bridgeNativeFee`,
+      decodeZeroXFee,
+    ),
+  };
+}
+
+function decodeZeroXFee(value: unknown, path: string): OseroApiZeroXFee {
+  const record = asRecord(value, path);
+  return {
+    amount: uint256StringField(record, 'amount', `${path}.amount`),
+    token: addressField(record, 'token', `${path}.token`, true),
+    type: nonEmptyStringField(record, 'type', `${path}.type`),
+  };
 }
 
 function decodeEnsoProviderDetails(
@@ -2352,20 +2793,146 @@ function decodeTransferStatusProviderDetails(
 ): OseroApiTransferStatusProviderDetails {
   const record = asRecord(value, path);
   const provider = nonEmptyStringField(record, 'provider', `${path}.provider`);
-  if (provider === 'enso') {
-    return {
-      provider,
-      status: nonEmptyStringField(record, 'status', `${path}.status`),
-    };
-  }
-  if (provider === 'lifi') {
-    return {
-      provider,
-      status: nonEmptyStringField(record, 'status', `${path}.status`),
-      substatus: nullableField(record, 'substatus', `${path}.substatus`, decodeNonEmptyString),
-    };
-  }
+  const codec = quoteProviderCodec(provider);
+  if (codec !== undefined) return codec.decodeTransferStatusDetails(record, path);
   return { ...record, provider: provider as OseroApiUnknownQuoteProvider };
+}
+
+function decodeEnsoTransferStatusDetails(
+  record: Record<string, unknown>,
+  path: string,
+): OseroApiEnsoTransferStatusProviderDetails {
+  return {
+    provider: 'enso',
+    status: nonEmptyStringField(record, 'status', `${path}.status`),
+  };
+}
+
+function decodeLifiTransferStatusDetails(
+  record: Record<string, unknown>,
+  path: string,
+): OseroApiLifiTransferStatusProviderDetails {
+  return {
+    provider: 'lifi',
+    status: nonEmptyStringField(record, 'status', `${path}.status`),
+    substatus: nullableField(record, 'substatus', `${path}.substatus`, decodeNonEmptyString),
+  };
+}
+
+function decodeZeroXTransferStatusDetails(
+  record: Record<string, unknown>,
+  path: string,
+): OseroApiZeroXTransferStatusProviderDetails {
+  return {
+    provider: '0x',
+    status: nonEmptyStringField(record, 'status', `${path}.status`),
+    failureReason: nullableField(
+      record,
+      'failureReason',
+      `${path}.failureReason`,
+      decodeNonEmptyString,
+    ),
+    recoveryStatus: nullableField(
+      record,
+      'recoveryStatus',
+      `${path}.recoveryStatus`,
+      decodeNonEmptyString,
+    ),
+  };
+}
+
+function decodeRecoveryContext(value: unknown, path: string): OseroApiRecoveryContext {
+  const record = asRecord(value, path);
+  return {
+    state: decodeRecoveryState(requiredField(record, 'state', `${path}.state`), `${path}.state`),
+    reason: decodeRecoveryReason(
+      requiredField(record, 'reason', `${path}.reason`),
+      `${path}.reason`,
+    ),
+    chainId: nullableField(record, 'chainId', `${path}.chainId`, decodePositiveChainId),
+    tokenAddress: nullableField(
+      record,
+      'tokenAddress',
+      `${path}.tokenAddress`,
+      decodeNonZeroAddress,
+    ),
+    amount: nullableField(record, 'amount', `${path}.amount`, decodeUint256String),
+    settledAmount: nullableField(
+      record,
+      'settledAmount',
+      `${path}.settledAmount`,
+      decodeUint256String,
+    ),
+    estimatedTimeSeconds: nullableField(
+      record,
+      'estimatedTimeSeconds',
+      `${path}.estimatedTimeSeconds`,
+      decodeNonNegativeNumber,
+    ),
+    deadline: nullableField(record, 'deadline', `${path}.deadline`, decodeTimestamp),
+    action: nullableField(record, 'action', `${path}.action`, decodeRecoveryAction),
+  };
+}
+
+function decodeRecoveryState(value: unknown, path: string): OseroApiRecoveryState {
+  const state = decodeNonEmptyString(value, path);
+  if (
+    state !== 'pending' &&
+    state !== 'completed' &&
+    state !== 'action-required' &&
+    state !== 'not-required' &&
+    state !== 'unavailable'
+  ) {
+    throw new DecodeError(
+      `${path} must be pending, completed, action-required, not-required, or unavailable`,
+    );
+  }
+  return state;
+}
+
+function decodeRecoveryReason(value: unknown, path: string): OseroApiRecoveryReason {
+  const reason = decodeNonEmptyString(value, path);
+  if (
+    reason !== 'expired' &&
+    reason !== 'cancelled' &&
+    reason !== 'out-of-gas' &&
+    reason !== 'provider-failure' &&
+    reason !== 'unknown'
+  ) {
+    throw new DecodeError(
+      `${path} must be expired, cancelled, out-of-gas, provider-failure, or unknown`,
+    );
+  }
+  return reason;
+}
+
+function decodeRecoveryAction(value: unknown, path: string): OseroApiRecoveryAction {
+  const record = asRecord(value, path);
+  return {
+    transaction: decodeRecoveryTransaction(
+      requiredField(record, 'transaction', `${path}.transaction`),
+      `${path}.transaction`,
+    ),
+  };
+}
+
+/**
+ * A Recovery Transaction carries no `sender`: 0x recovery transactions may be
+ * submitted by any caller, and inventing one here would silently commit the
+ * original wallet.
+ */
+function decodeRecoveryTransaction(value: unknown, path: string): OseroApiRecoveryTransaction {
+  const record = asRecord(value, path);
+  if ('sender' in record) {
+    throw new DecodeError(`${path} must not carry a sender`);
+  }
+  return {
+    chainId: positiveChainIdField(record, 'chainId', `${path}.chainId`),
+    recipient: addressField(record, 'recipient', `${path}.recipient`),
+    calldata: calldataField(record, 'calldata', `${path}.calldata`),
+    value: uint256StringField(record, 'value', `${path}.value`),
+    gasLimit: nullableField(record, 'gasLimit', `${path}.gasLimit`, decodeUint256String),
+  };
 }
 
 function assertTransferStatusInvariants(
@@ -2501,11 +3068,19 @@ function addressField(
   path: string,
   allowZero = false,
 ): Address {
-  const value = stringField(record, field, path);
-  if (!isAddress(value) || (!allowZero && /^0x0{40}$/i.test(value))) {
+  return decodeAddress(requiredField(record, field, path), path, allowZero);
+}
+
+function decodeAddress(value: unknown, path: string, allowZero = false): Address {
+  const text = decodeString(value, path);
+  if (!isAddress(text) || (!allowZero && /^0x0{40}$/i.test(text))) {
     throw new DecodeError(`${path} must be a non-zero EVM address`);
   }
-  return value as Address;
+  return text as Address;
+}
+
+function decodeNonZeroAddress(value: unknown, path: string): Address {
+  return decodeAddress(value, path);
 }
 
 function calldataField(record: Record<string, unknown>, field: string, path: string): Hex {
@@ -2572,11 +3147,15 @@ function decimalStringField(record: Record<string, unknown>, field: string, path
 }
 
 function timestampField(record: Record<string, unknown>, field: string, path: string): string {
-  const value = stringField(record, field, path);
-  if (validateQuoteExpiry(value, path).isErr()) {
+  return decodeTimestamp(requiredField(record, field, path), path);
+}
+
+function decodeTimestamp(value: unknown, path: string): string {
+  const text = decodeString(value, path);
+  if (validateQuoteExpiry(text, path).isErr()) {
     throw new DecodeError(`${path} must be a valid UTC instant`);
   }
-  return value;
+  return text;
 }
 
 /**

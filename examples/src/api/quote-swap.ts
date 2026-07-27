@@ -1,5 +1,10 @@
 import { parseSlippage, referral, type ExecutionPlanHandler, type Referral } from '@osero/client';
-import { oseroApiAmount, OseroApiClient, type OseroApiApprovalRequired } from '@osero/client/api';
+import {
+  isOseroApiZeroXProviderDetails,
+  oseroApiAmount,
+  OseroApiClient,
+  type OseroApiApprovalRequired,
+} from '@osero/client/api';
 import { createPublicClient, http, isAddress, parseUnits } from 'viem';
 import { mainnet } from 'viem/chains';
 
@@ -73,6 +78,14 @@ async function main() {
   console.log(`amount out: ${quote.quote.expectedOutput.formatted} USDS`);
   console.log(`provider:   ${quote.provider}`);
   console.log(`bridge:     ${quote.routeSummary.bridge ?? 'none'}`);
+  if (isOseroApiZeroXProviderDetails(quote.providerDetails)) {
+    const { fees, zid } = quote.providerDetails;
+    // Reporting only: the amount out above is already net of every fee here.
+    console.log(`0x zid:     ${zid}`);
+    console.log(`0x fees:    integrator=${fees.integratorFee?.amount ?? 'none'}`);
+    console.log(`            zeroEx=${fees.zeroExFee?.amount ?? 'none'}`);
+    console.log(`            bridgeNative=${fees.bridgeNativeFee?.amount ?? 'none'}`);
+  }
   console.log(`state:      ${workflow.value.state}`);
   console.log(`tx count:   ${walletExecutionPlan.steps.length}`);
   console.log(describePlan(walletExecutionPlan));

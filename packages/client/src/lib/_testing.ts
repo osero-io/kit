@@ -2,7 +2,11 @@ import { getAddress } from 'viem';
 import type { Mock } from 'vitest';
 import { vi } from 'vitest';
 
-import type { OseroApiTransferState, OseroApiTransferStatus } from './api.js';
+import type {
+  OseroApiRecoveryContext,
+  OseroApiTransferState,
+  OseroApiTransferStatus,
+} from './api.js';
 import { CHAINS, type OseroChainId } from './chains.js';
 import { OseroClient, type OseroPublicClient } from './OseroClient.js';
 import { createExecutionPlan, createTransactionRequest } from './plan.js';
@@ -91,6 +95,7 @@ function transferStatusFixtureBase(state: OseroApiTransferState) {
     sourceTransactionHash: TEST_SOURCE_TRANSACTION_HASH,
     destinationTransactionHash: state === 'completed' ? TEST_DESTINATION_TRANSACTION_HASH : null,
     error: state === 'failed' ? 'bridge failed' : null,
+    recoveryContext: null,
   } as const;
 }
 
@@ -119,6 +124,49 @@ export function lifiTransferStatusFixture(
       status: state === 'completed' ? 'DONE' : 'PENDING',
       substatus: state === 'completed' ? 'COMPLETED' : null,
     },
+  };
+}
+
+export function zeroXTransferStatusFixture(
+  state: OseroApiTransferState = 'completed',
+  recoveryContext: OseroApiRecoveryContext | null = null,
+): OseroApiTransferStatus {
+  return {
+    ...transferStatusFixtureBase(state),
+    provider: '0x',
+    bridge: 'across_v4',
+    recoveryContext,
+    providerDetails: {
+      provider: '0x',
+      status: state === 'completed' ? 'bridge_filled' : 'origin_pending',
+      failureReason: state === 'failed' ? 'internal' : null,
+      recoveryStatus: recoveryContext === null ? null : 'manual_action_required',
+    },
+  };
+}
+
+export function zeroXRecoveryContextFixture(
+  overrides: Partial<OseroApiRecoveryContext> = {},
+): OseroApiRecoveryContext {
+  return {
+    state: 'action-required',
+    reason: 'provider-failure',
+    chainId: 8453,
+    tokenAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    amount: '997500',
+    settledAmount: null,
+    estimatedTimeSeconds: null,
+    deadline: '2030-01-02T00:00:00.000Z',
+    action: {
+      transaction: {
+        chainId: 8453,
+        recipient: '0x0000000000000000000000000000000000000004',
+        calldata: '0x9abc',
+        value: '0',
+        gasLimit: '200000',
+      },
+    },
+    ...overrides,
   };
 }
 
