@@ -1494,7 +1494,7 @@ function resolveFetch(fetchOverride: OseroApiFetch | undefined): OseroApiFetch {
       'fetch',
     );
   }
-  return globalThis.fetch;
+  return globalThis.fetch.bind(globalThis);
 }
 
 /**

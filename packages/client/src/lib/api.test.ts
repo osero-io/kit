@@ -263,6 +263,11 @@ type CapturedRequest = {
   readonly init?: RequestInit;
 };
 
+const receiverAwareFetch: OseroApiFetch = function (this: typeof globalThis): Promise<Response> {
+  if (this !== globalThis) throw new TypeError('Illegal invocation');
+  return Promise.resolve(new Response(JSON.stringify({ assets: [] })));
+};
+
 function fetchSequence(...responses: FetchResponse[]): {
   readonly fetch: OseroApiFetch;
   readonly calls: CapturedRequest[];
@@ -323,6 +328,20 @@ describe('OseroApiClient request boundaries', () => {
     );
     expect(() => OseroApiClient.create({ baseUrl: '/relative' })).toThrow(ConfigurationError);
     expect(() => OseroApiClient.create({ fetch: 1 as never })).toThrow(ConfigurationError);
+  });
+
+  it('calls the global fetch implementation with the global receiver', async () => {
+    vi.stubGlobal('fetch', receiverAwareFetch);
+
+    try {
+      const client = OseroApiClient.create({ apiKey: API_KEY });
+
+      const result = await client.getSupportedAssets();
+
+      expect(result.isOk()).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('tracks the hosted asset and chain vocabulary independently of native action chains', () => {
