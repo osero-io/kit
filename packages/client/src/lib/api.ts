@@ -1316,7 +1316,10 @@ export class OseroApiClient {
         ...(options?.signal === undefined ? {} : { signal: options.signal }),
       };
 
-      const response = await ResultAsync.fromPromise(this.#fetch(url, init), (cause) =>
+      // Hoist before calling: `this.#fetch(...)` passes the client as the
+      // receiver, which browser fetch rejects with "Illegal invocation".
+      const fetchImpl = this.#fetch;
+      const response = await ResultAsync.fromPromise(fetchImpl(url, init), (cause) =>
         isAbortFailure(cause, options?.signal)
           ? CancelError.from(cause)
           : ApiTransportError.from(cause, url.toString(), method),
@@ -1494,7 +1497,7 @@ function resolveFetch(fetchOverride: OseroApiFetch | undefined): OseroApiFetch {
       'fetch',
     );
   }
-  return globalThis.fetch;
+  return globalThis.fetch.bind(globalThis);
 }
 
 /**
