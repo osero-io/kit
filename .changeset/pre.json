@@ -6,6 +6,7 @@
     "@osero/client": "0.8.0"
   },
   "changesets": [
+    "bind-browser-fetch",
     "drive-hosted-approval-refresh",
     "execute-hosted-swap-workflows",
     "flexible-api-swaps",
