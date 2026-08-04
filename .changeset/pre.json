@@ -11,8 +11,11 @@
     "execute-hosted-swap-workflows",
     "flexible-api-swaps",
     "guard-wallet-quote-expiry",
+    "name-slippage-basis-points",
     "poll-normalized-transfer-status",
     "prepare-provider-neutral-quotes",
-    "publish-hosted-v1-surface"
+    "publish-hosted-v1-surface",
+    "quote-before-wallet",
+    "support-zerox-quotes-and-recovery"
   ]
 }

@@ -1,6 +1,6 @@
 {
   "name": "@osero/client",
-  "version": "1.0.0-next.2",
+  "version": "1.0.0-next.3",
   "description": "Production TypeScript SDK for preparing and executing USDC, USDS, and sUSDS swaps",
   "keywords": [
     "defi",
