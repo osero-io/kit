@@ -1835,7 +1835,7 @@ function encodeSwapQuoteRequest(
         ValidationError.forField('slippage', 'slippage must be created with parseSlippage'),
       );
     }
-    const validated = parseSlippage(request.slippage.bps);
+    const validated = parseSlippage({ bps: request.slippage.bps });
     if (validated.isErr()) return err(validated.error);
     slippage = validated.value;
   }
@@ -2420,7 +2420,7 @@ function decodeSwapAmount(value: unknown, path: string): OseroApiSwapAmount {
 function decodeSlippage(value: unknown, path: string): OseroApiSwapSlippage {
   const record = asRecord(value, path);
   const bps = stringField(record, 'bps', `${path}.bps`);
-  if (parseSlippage(bps).isErr()) {
+  if (parseSlippage({ bps }).isErr()) {
     throw new DecodeError(`${path}.bps must be a decimal basis-point value from 0 to 10000`);
   }
   const percent = decimalStringField(record, 'percent', `${path}.percent`);

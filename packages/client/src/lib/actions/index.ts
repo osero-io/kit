@@ -7,6 +7,14 @@ export {
   type PrepareSwapRequest,
 } from './prepareSwap.js';
 export {
+  quoteSwap,
+  type ExactInSwapQuoteRequest,
+  type ExactOutSwapQuoteRequest,
+  type QuoteSwapBaseRequest,
+  type QuoteSwapError,
+  type SwapQuoteRequest,
+} from './quoteSwap.js';
+export {
   simulateExecutionPlan,
   type AllowanceObservation,
   type PlanSimulation,

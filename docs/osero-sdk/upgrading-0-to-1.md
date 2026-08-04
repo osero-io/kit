@@ -44,13 +44,13 @@ const client = OseroClient.create({
 
 ### Defaults are domain values and explicit policies
 
-| 0.x                                           | 1.0                                          |
-| --------------------------------------------- | -------------------------------------------- |
-| `defaultSlippageBps: 25`                      | `defaultSlippage: parseSlippage('25').value` |
-| `defaultReferralCode: 3001n`                  | configured or request-level `referral`       |
-| omitted referral inherited built-in `3000n`   | default is no attribution                    |
-| implicit public RPC                           | `allowPublicRpc: true` opt-in                |
-| executor confirmation hidden in client config | executor `confirmations` option              |
+| 0.x                                           | 1.0                                                   |
+| --------------------------------------------- | ----------------------------------------------------- |
+| `defaultSlippageBps: 25`                      | `defaultSlippage: parseSlippage({ bps: '25' }).value` |
+| `defaultReferralCode: 3001n`                  | configured or request-level `referral`                |
+| omitted referral inherited built-in `3000n`   | default is no attribution                             |
+| implicit public RPC                           | `allowPublicRpc: true` opt-in                         |
+| executor confirmation hidden in client config | executor `confirmations` option                       |
 
 Constructors reject malformed runtime data before it reaches ABI encoding:
 
@@ -59,7 +59,7 @@ import { parseSlippage, referral, tokenAmount } from '@osero/client';
 import { parseUnits } from 'viem';
 
 const amount = tokenAmount('USDC', parseUnits('10', 6));
-const slippage = parseSlippage('25'); // decimal basis-point string
+const slippage = parseSlippage({ bps: '25' }); // explicit decimal basis-point string
 const attribution = referral(3001n); // explicit referral domain value
 
 if (amount.isErr() || slippage.isErr() || attribution.isErr()) {
@@ -71,19 +71,28 @@ Do not cast arbitrary values to branded domain types. Constructors are the runti
 
 If `OseroClient` is configured with `referral`, an omitted request-level referral inherits it; pass `referral: false` to opt out for one request. Prefer request-level referrals when one client prepares routes with different capabilities. Unlike 0.8.0, a route whose ABI cannot carry attribution rejects a configured referral instead of silently ignoring it. For example, Ethereum mainnet USDC → USDS does not support referral attribution.
 
-## Local actions become `prepareSwap`
+## Local actions become `quoteSwap` and `prepareSwap`
 
 0.x exposed separate preview/action functions such as `previewMintUsds`, `mintUsds`, `previewMintSUsds`, `mintSUsds`, `previewRedeemUsds`, `redeemUsds`, `previewRedeemSUsds`, and `redeemSUsds`.
 
-1.0 removes them. Use `prepareSwap` for every supported pair and mode:
+1.0 removes them. Use account-free `quoteSwap` for display and discovery, then `prepareSwap` for an account-bound execution plan:
 
 ```ts
 import { OseroClient, tokenAmount } from '@osero/client';
-import { prepareSwap } from '@osero/client/actions';
+import { prepareSwap, quoteSwap } from '@osero/client/actions';
 import { parseUnits } from 'viem';
 
 const amountIn = tokenAmount('USDC', parseUnits('10', 6));
 if (amountIn.isErr()) throw amountIn.error;
+
+const quoted = await quoteSwap(client, {
+  chainId: 8453,
+  mode: 'exact-in',
+  amountIn: amountIn.value,
+  assetOut: 'sUSDS',
+});
+if (quoted.isErr()) throw quoted.error;
+console.log(quoted.value.expectedAmountOut);
 
 const prepared = await prepareSwap(client, {
   chainId: 8453,
@@ -105,7 +114,7 @@ console.log(prepared.value.route);
 console.log(prepared.value.plan);
 ```
 
-Preparation performs one coherent read pass and returns the quote and its exact execution plan together. Do not recreate the 0.x preview-then-build pattern: that can quote twice against different state.
+`quoteSwap` performs only chain reads and never requires an account, checks allowances, or returns a plan. `prepareSwap` always performs its own coherent read pass and returns a fresh quote with its exact execution plan. Treat an earlier account-free quote as display data, not as plan-bound or guaranteed current.
 
 On PSM3 chains, use this mapping when replacing 0.8.0 action and preview calls:
 
@@ -116,7 +125,7 @@ On PSM3 chains, use this mapping when replacing 0.8.0 action and preview calls:
 | `previewRedeemUsds` / `redeemUsds`   | `amountIn: tokenAmount('USDS', amount).value`, `assetOut: 'USDC'`  |
 | `previewRedeemSUsds` / `redeemSUsds` | `amountIn: tokenAmount('sUSDS', amount).value`, `assetOut: 'USDC'` |
 
-Rename `sender` to `account`; `receiver` remains optional and still defaults to that account. The v1 plan is bound to `account`, even when output goes to a different receiver. Rename request-level `slippageBps` to constructed `slippage`, and `referralCode` to constructed `referral`. The old preview result was a bare `bigint`; read `expectedAmountOut.raw` from the successful exact-input prepared quote when raw units are needed.
+Rename `sender` to `account`; `receiver` remains optional and still defaults to that account. The v1 plan is bound to `account`, even when output goes to a different receiver. Rename request-level `slippageBps` to constructed `slippage`, and `referralCode` to constructed `referral`. The old preview result was a bare `bigint`; read `expectedAmountOut.raw` from a successful account-free or prepared exact-input quote when raw units are needed.
 
 Ethereum mainnet has two important differences:
 
@@ -374,7 +383,7 @@ import { oseroApiAmount } from '@osero/client/api';
 import { parseUnits } from 'viem';
 
 const amount = oseroApiAmount(parseUnits('1', 6));
-const slippage = parseSlippage('50'); // basis points: 50 bps = 0.5%
+const slippage = parseSlippage({ bps: '50' }); // 50 bps = 0.5%
 const attribution = referral(3001n);
 if (amount.isErr() || slippage.isErr() || attribution.isErr()) {
   throw new Error('invalid quote input');
@@ -396,7 +405,7 @@ Request field changes:
 | --------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `OseroApiToSusdsQuoteRequest` / `OseroApiFromSusdsQuoteRequest` | `OseroApiSwapQuoteRequest`                                                |
 | `amount`: `bigint` or `OseroApiIntegerString`                   | `amount: OseroApiInputAmount`; create with `oseroApiAmount(bigint).value` |
-| `slippage: string` in percent                                   | `slippage: parseSlippage(bpsString).value`                                |
+| `slippage: string` in percent                                   | `slippage: parseSlippage({ bps: bpsString }).value`                       |
 | `referralCode: number`                                          | `referral: referral(BigInt(code)).value`                                  |
 | only counter asset ↔ sUSDS pairs                                | any well-formed `OseroApiAssetRef`; the API decides support               |
 

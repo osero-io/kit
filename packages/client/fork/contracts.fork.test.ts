@@ -171,7 +171,7 @@ describe(`pinned ${capability.name} fork at block ${pinnedBlock}`, () => {
       } as Partial<Record<OseroChainId, OseroPublicClient>>;
       const client = OseroClient.create({ publicClients });
       const input = tokenAmount('USDC', 1_000_000n);
-      const slippage = parseSlippage('5');
+      const slippage = parseSlippage({ bps: '5' });
       if (input.isErr() || slippage.isErr()) throw new Error('fork test input failed');
       const prepared = await prepareSwap(client, {
         chainId,

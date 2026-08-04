@@ -1,5 +1,5 @@
-import { OseroClient, type PreparedSwapQuote } from '@osero/client';
-import { prepareSwap } from '@osero/client/actions';
+import { OseroClient, type PreparedSwapQuote, type SwapQuote } from '@osero/client';
+import { prepareSwap, quoteSwap } from '@osero/client/actions';
 import { http, parseUnits } from 'viem';
 
 import { optionalRpcUrl } from '../shared/env.js';
@@ -9,7 +9,7 @@ const ACCOUNT = '0x1111111111111111111111111111111111111111' as const;
 const BASE = 8453 as const;
 const MAINNET = 1 as const;
 
-function printPrepared(quote: PreparedSwapQuote): void {
+function printQuote(quote: SwapQuote): void {
   if (quote.mode === 'exact-in') {
     console.log(
       `expected: ${formatToken(quote.expectedAmountOut.raw, quote.assetOut === 'USDC' ? 6 : 18, quote.assetOut)}`,
@@ -20,6 +20,10 @@ function printPrepared(quote: PreparedSwapQuote): void {
     console.log(`maximum raw input:  ${quote.maximumAmountIn.raw}`);
   }
   console.log(`quoted at block ${quote.quotedAt.blockNumber}`);
+}
+
+function printPrepared(quote: PreparedSwapQuote): void {
+  printQuote(quote);
   console.log(describePlan(quote.plan));
 }
 
@@ -30,6 +34,16 @@ async function main() {
       [MAINNET]: http(optionalRpcUrl(MAINNET)),
     },
   });
+
+  banner('Base quote before wallet connection: USDC → USDS');
+  const quoted = await quoteSwap(client, {
+    chainId: BASE,
+    mode: 'exact-in',
+    amountIn: requireTokenAmount('USDC', parseUnits('100', 6)),
+    assetOut: 'USDS',
+  });
+  if (quoted.isErr()) throw quoted.error;
+  printQuote(quoted.value);
 
   banner('Base exact-in: USDC → USDS');
   const usdcToUsds = await prepareSwap(client, {

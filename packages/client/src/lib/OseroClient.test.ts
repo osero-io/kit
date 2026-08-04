@@ -3,7 +3,7 @@ import { ConfigurationError, UnsupportedChainError } from './errors.js';
 import { OseroClient } from './OseroClient.js';
 
 function configuredDefaults() {
-  const slippage = parseSlippage('25');
+  const slippage = parseSlippage({ bps: '25' });
   const referralValue = referral(3001n);
   if (slippage.isErr() || referralValue.isErr()) throw new Error('test input failed');
   return { slippage: slippage.value, referral: referralValue.value };

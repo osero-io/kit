@@ -38,6 +38,7 @@ export {
   type ApprovalPolicy,
   type Referral,
   type Slippage,
+  type SlippageInput,
   type TokenAmount,
 } from './lib/domain.js';
 export {
@@ -96,6 +97,8 @@ export type {
   ApprovalAuthorization,
   ConfirmationOptions,
   ConfirmedTransaction,
+  ExactInSwapQuote,
+  ExactOutSwapQuote,
   ExecutionPlan,
   ExecutionPlanHandler,
   ExecutionPlanMetadata,
@@ -111,6 +114,10 @@ export type {
   ProgressHandler,
   QuoteExpiry,
   SendWithError,
+  SwapQuote,
+  SwapQuoteCommon,
+  SwapRoute,
+  SwapSlippageProtection,
   TransactionConfirmation,
   TransactionRequest,
   TransactionResult,

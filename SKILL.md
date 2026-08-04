@@ -337,7 +337,7 @@ const api = OseroApiClient.create({
   publicClientProvider: (chainId) => publicClients[chainId],
 });
 const amount = oseroApiAmount(parseUnits('1', 6));
-const slippage = parseSlippage('50');
+const slippage = parseSlippage({ bps: '50' });
 if (amount.isErr() || slippage.isErr()) throw new Error('invalid input');
 
 const workflow = await api.getSwapQuote({

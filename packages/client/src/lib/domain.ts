@@ -11,29 +11,43 @@ export type Slippage = {
   readonly [slippageBrand]: true;
 };
 
+export type SlippageInput = {
+  readonly bps: string;
+};
+
 export const DEFAULT_SLIPPAGE: Slippage = Object.freeze({
   bps: '5',
   [slippageBrand]: true as const,
 });
 
-export function parseSlippage(value: string): Result<Slippage, ValidationError> {
-  if (typeof value !== 'string' || !SLIPPAGE_PATTERN.test(value)) {
+export function parseSlippage(input: SlippageInput): Result<Slippage, ValidationError> {
+  if (typeof input !== 'object' || input === null) {
     return err(
       ValidationError.forField(
         'slippage',
-        'slippage must be a non-negative decimal basis-point string without exponent notation',
+        'slippage must specify basis points as an object with a bps string',
       ),
     );
   }
 
-  const [whole = '0', fraction = ''] = value.split('.');
+  const { bps } = input;
+  if (typeof bps !== 'string' || !SLIPPAGE_PATTERN.test(bps)) {
+    return err(
+      ValidationError.forField(
+        'slippage.bps',
+        'slippage.bps must be a non-negative decimal string without exponent notation',
+      ),
+    );
+  }
+
+  const [whole = '0', fraction = ''] = bps.split('.');
   const scale = 10n ** BigInt(fraction.length);
   const units = BigInt(whole) * scale + BigInt(fraction || '0');
   if (units > 10_000n * scale) {
-    return err(ValidationError.forField('slippage', 'slippage must not exceed 10000 bps'));
+    return err(ValidationError.forField('slippage.bps', 'slippage.bps must not exceed 10000'));
   }
 
-  return ok(Object.freeze({ bps: value, [slippageBrand]: true as const }));
+  return ok(Object.freeze({ bps, [slippageBrand]: true as const }));
 }
 
 export function slippageRatio(slippage: Slippage): {

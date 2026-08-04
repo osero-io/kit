@@ -199,24 +199,33 @@ export type ExecutionPlanHandler = (
   plan: ExecutionPlan,
 ) => ResultAsync<TransactionResult, SendWithError>;
 
-export type PreparedSwapRoute = {
+export type SwapRoute = {
   readonly chainId: OseroChainId;
   readonly protocol: ProtocolKind;
   readonly assetIn: TokenSymbol;
   readonly assetOut: TokenSymbol;
   readonly mode: SwapMode;
+};
+
+export type PreparedSwapRoute = SwapRoute & {
   readonly steps: readonly OperationType[];
 };
 
-export type PreparedSwapQuoteCommon<AssetIn extends TokenSymbol, AssetOut extends TokenSymbol> = {
+export type SwapSlippageProtection = {
+  readonly bound: 'minimum-output' | 'maximum-input';
+  readonly enforcedBy: 'calldata' | 'allowance' | 'none';
+};
+
+export type SwapQuoteCommon<
+  AssetIn extends TokenSymbol,
+  AssetOut extends TokenSymbol,
+  Route extends SwapRoute = SwapRoute,
+> = {
   readonly assetIn: AssetIn;
   readonly assetOut: AssetOut;
   readonly slippage: Slippage;
-  readonly route: PreparedSwapRoute;
-  readonly slippageProtection: {
-    readonly bound: 'minimum-output' | 'maximum-input';
-    readonly enforcedBy: 'calldata' | 'allowance' | 'none';
-  };
+  readonly route: Route;
+  readonly slippageProtection: SwapSlippageProtection;
   readonly quotedAt: {
     readonly blockNumber: bigint;
   };
@@ -225,6 +234,37 @@ export type PreparedSwapQuoteCommon<AssetIn extends TokenSymbol, AssetOut extend
     readonly tin?: bigint;
     readonly tout?: bigint;
   };
+};
+
+export type ExactInSwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = SwapQuoteCommon<AssetIn, AssetOut> & {
+  readonly mode: 'exact-in';
+  readonly amountIn: TokenAmount<AssetIn>;
+  readonly expectedAmountOut: TokenAmount<AssetOut>;
+  readonly minimumAmountOut: TokenAmount<AssetOut>;
+};
+
+export type ExactOutSwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = SwapQuoteCommon<AssetIn, AssetOut> & {
+  readonly mode: 'exact-out';
+  readonly amountOut: TokenAmount<AssetOut>;
+  readonly expectedAmountIn: TokenAmount<AssetIn>;
+  readonly maximumAmountIn: TokenAmount<AssetIn>;
+};
+
+export type SwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = ExactInSwapQuote<AssetIn, AssetOut> | ExactOutSwapQuote<AssetIn, AssetOut>;
+
+export type PreparedSwapQuoteCommon<
+  AssetIn extends TokenSymbol,
+  AssetOut extends TokenSymbol,
+> = SwapQuoteCommon<AssetIn, AssetOut, PreparedSwapRoute> & {
   readonly plan: ExecutionPlan;
 };
 

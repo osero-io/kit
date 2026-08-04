@@ -43,7 +43,7 @@ async function main() {
     ...(baseUrl === undefined ? {} : { baseUrl }),
   });
   const amount = oseroApiAmount(AMOUNT_USDC);
-  const slippage = parseSlippage('50');
+  const slippage = parseSlippage({ bps: '50' });
   if (amount.isErr() || slippage.isErr()) throw new Error('quote input failed validation');
   const attribution = optionalReferral();
 

@@ -11,7 +11,7 @@ import {
 } from './math.js';
 
 function slippage(value: string): Slippage {
-  const result = parseSlippage(value);
+  const result = parseSlippage({ bps: value });
   if (result.isErr()) throw result.error;
   return result.value;
 }
