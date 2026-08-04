@@ -78,6 +78,8 @@
 - Make amounts, slippage, referrals, approval policy, account, and chain binding explicit.
   Referral attribution and public RPC fallback now default to disabled; exact allowance-aware
   approval is the default authorization policy.
+- Require slippage constructors to name their unit explicitly as
+  `parseSlippage({ bps: value })`; the legacy unitless string input is rejected.
 - Replace nested plan variants with deterministic step IDs, plan identity, canonical
   serialization, confirmed-prefix recovery, progress callbacks, and executor capability
   requirements.
@@ -87,6 +89,12 @@
 - Split the intentional public surface across root, `/actions`, `/api`, `/contracts`, `/viem`,
   `/ethers`, and `/privy`. Legacy action functions and internal flattening/type-guard helpers are
   no longer exported.
+
+### Minor Changes
+
+- Add account-free `quoteSwap` for read-only local route economics. It returns the same block-pinned
+  amounts, fees, route, and slippage-protection details used by preparation without reading
+  allowances, constructing calldata, or returning an execution plan.
 
 ### Security and Reliability
 

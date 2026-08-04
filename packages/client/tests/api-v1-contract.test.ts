@@ -37,7 +37,7 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
       });
     };
     const amount = oseroApiAmount(1_000_000_000_000_000_000n);
-    const slippage = parseSlippage('5');
+    const slippage = parseSlippage({ bps: '5' });
     const attribution = referral(3001n);
     if (amount.isErr() || slippage.isErr() || attribution.isErr()) {
       throw new Error('contract request fixture is invalid');
@@ -131,7 +131,7 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
         headers: { 'content-type': 'application/json' },
       });
     const amount = oseroApiAmount(1_000_000_000_000_000_000n);
-    const slippage = parseSlippage('5');
+    const slippage = parseSlippage({ bps: '5' });
     const attribution = referral(3001n);
     if (amount.isErr() || slippage.isErr() || attribution.isErr()) {
       throw new Error('contract request fixture is invalid');
@@ -217,7 +217,7 @@ describe.skipIf(contractRoot === undefined)('deterministic SDK HTTP contract', (
       readContract: async () => 0n,
     } as unknown as PublicClient;
     const inputAmount = oseroApiAmount(1_000_000n);
-    const slippage = parseSlippage('50');
+    const slippage = parseSlippage({ bps: '50' });
     const attribution = referral(3001n);
     if (inputAmount.isErr() || slippage.isErr() || attribution.isErr()) {
       throw new Error('contract request fixture is invalid');

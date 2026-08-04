@@ -5,9 +5,10 @@ Runnable v1 examples for local swap preparation, hosted quotes, and viem/ethers/
 Examples use explicit transports and the plan-first API:
 
 1. construct `TokenAmount`, `Slippage`, and optional `Referral` values;
-2. call `prepareSwap` once;
-3. inspect the rich quote and flat `ExecutionPlan.steps`;
-4. pass the plan to one executor adapter.
+2. optionally call `quoteSwap` before a wallet is connected;
+3. call `prepareSwap` once an account is available;
+4. inspect the rich quote and flat `ExecutionPlan.steps`;
+5. pass the plan to one executor adapter.
 
 ## Setup
 
@@ -30,8 +31,9 @@ OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-swap
 
 ### `dry-run:inspect-plan`
 
-Prepares and prints:
+Quotes, prepares, and prints:
 
+- an account-free Base USDC → USDS exact-input quote;
 - Base USDC → USDS exact input;
 - Base USDS → sUSDS direct vault route;
 - Base USDC → USDS exact output with an upward-rounded maximum input;

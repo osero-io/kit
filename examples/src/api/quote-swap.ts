@@ -51,7 +51,7 @@ async function main() {
   const fromAddress = optionalEnv('OSERO_API_FROM_ADDRESS') ?? DEFAULT_FROM_ADDRESS;
   if (!isAddress(fromAddress)) throw new Error('OSERO_API_FROM_ADDRESS must be an EVM address');
   const amount = oseroApiAmount(parseUnits('1', 6));
-  const slippage = parseSlippage('50');
+  const slippage = parseSlippage({ bps: '50' });
   if (amount.isErr() || slippage.isErr()) throw new Error('quote input failed validation');
   const attribution = optionalReferral();
 

@@ -5,14 +5,21 @@ describe('domain value constructors', () => {
   it.each(['-1', '1e2', '.5', '10000.1', '', ' 5'])(
     'rejects malformed or out-of-range slippage %j',
     (value) => {
-      const result = parseSlippage(value);
+      const result = parseSlippage({ bps: value });
       expect(result.isErr()).toBe(true);
       if (result.isErr()) expect(result.error).toBeInstanceOf(ValidationError);
     },
   );
 
+  it('rejects the legacy unitless slippage input', () => {
+    const result = parseSlippage('25' as never);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ValidationError);
+  });
+
   it('preserves decimal basis-point precision in the branded value', () => {
-    const result = parseSlippage('0.125');
+    const result = parseSlippage({ bps: '0.125' });
 
     expect(result.isOk()).toBe(true);
     if (result.isOk()) expect(result.value.bps).toBe('0.125');

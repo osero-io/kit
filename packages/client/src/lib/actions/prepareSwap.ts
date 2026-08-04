@@ -1,18 +1,11 @@
 import { encodeFunctionData, type Address, type Hex } from 'viem';
 
 import { erc4626Abi } from '../abis/erc4626.js';
-import { litePsmAbi } from '../abis/litePsm.js';
 import { psm3Abi } from '../abis/psm3.js';
 import { usdsPsmWrapperAbi } from '../abis/usdsPsmWrapper.js';
 import { prepareAllowance } from '../allowance.js';
+import { CHAIN_CAPABILITIES, type OseroChainId, type TokenSymbol } from '../capabilities.js';
 import {
-  CHAIN_CAPABILITIES,
-  type OseroChainId,
-  type RouteCapability,
-  type TokenSymbol,
-} from '../capabilities.js';
-import {
-  parseSlippage,
   referral as createReferral,
   type ApprovalPolicy,
   type Referral,
@@ -27,18 +20,10 @@ import {
   type ConfigurationError,
   type InsufficientAllowanceError,
 } from '../errors.js';
-import {
-  applySlippageDown,
-  applySlippageUp,
-  usdcFromUsdsViaBuyGem,
-  usdsFromUsdcViaSellGem,
-  usdsNeededForUsdcViaBuyGem,
-} from '../math.js';
-import type { OseroClient, OseroPublicClient } from '../OseroClient.js';
+import type { OseroClient } from '../OseroClient.js';
 import { createExecutionPlan, createTransactionRequest } from '../plan.js';
 import { referralCodeForRoute, resolveReferral } from '../referrals.js';
 import { err, errAsync, ok, ResultAsync, type Result } from '../result.js';
-import { isTokenSymbol } from '../tokens.js';
 import type {
   ExecutionPlan,
   PreparedExactInSwapQuote,
@@ -46,7 +31,13 @@ import type {
   PreparedSwapQuote,
   TransactionRequest,
 } from '../types.js';
-import { validateAddress, validatePositiveUint256 } from '../validation.js';
+import { validateAddress } from '../validation.js';
+import {
+  evaluateSwapQuote,
+  resolveSwapQuoteRequest,
+  type ResolvedSwapQuoteRequest,
+  type SwapQuoteEvaluation,
+} from './quoteSwap.js';
 
 export type PrepareSwapBaseRequest = {
   readonly chainId: OseroChainId;
@@ -109,117 +100,56 @@ export function prepareSwap(
   if (publicClient.isErr()) return errAsync(publicClient.error);
 
   const preparation = async (): Promise<Result<PreparedSwapQuote, PrepareSwapError>> => {
-    const block = await rpc(
-      publicClient.value.getBlockNumber(),
-      'getBlockNumber',
-      resolved.value.chainId,
+    const block = await ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
+      RpcError.from({
+        cause,
+        operation: 'getBlockNumber',
+        chainId: resolved.value.chainId,
+      }),
     );
     if (block.isErr()) return err(block.error);
 
+    const evaluation = await evaluateSwapQuote(publicClient.value, resolved.value, block.value);
+    if (evaluation.isErr()) return err(evaluation.error);
+
     if (resolved.value.protocol === 'psm3') {
-      return preparePsm3Swap(client, publicClient.value, resolved.value, block.value);
+      return preparePsm3Swap(client, resolved.value, block.value, evaluation.value);
     }
-    return prepareEthereumSwap(client, publicClient.value, resolved.value, block.value);
+    return prepareEthereumSwap(client, resolved.value, block.value, evaluation.value);
   };
 
   return new ResultAsync(preparation());
 }
 
-type ResolvedRequest = {
-  readonly chainId: OseroChainId;
-  readonly protocol: 'ethereum-lite-psm' | 'psm3';
+type ResolvedRequest = ResolvedSwapQuoteRequest & {
   readonly account: Address;
   readonly receiver: Address;
-  readonly assetIn: TokenSymbol;
-  readonly assetOut: TokenSymbol;
-  readonly mode: 'exact-in' | 'exact-out';
-  readonly amount: bigint;
-  readonly slippage: Slippage;
   readonly referral: Referral;
   readonly referralCode: bigint;
   readonly approvalPolicy: ApprovalPolicy;
-  readonly route: RouteCapability;
 };
 
 function validateRequest(
   client: OseroClient,
   request: PrepareSwapRequest,
 ): Result<ResolvedRequest, ValidationError | UnsupportedChainError> {
-  if (typeof request !== 'object' || request === null) {
-    return err(ValidationError.forField('request', 'request must be an object'));
-  }
-  if (!Number.isSafeInteger(request.chainId) || !(request.chainId in CHAIN_CAPABILITIES)) {
-    return err(new UnsupportedChainError(request.chainId));
-  }
-  const chainId = request.chainId as OseroChainId;
-  const capability = CHAIN_CAPABILITIES[chainId];
+  const quoted = resolveSwapQuoteRequest(client, request);
+  if (quoted.isErr()) return err(quoted.error);
+
   const account = validateAddress(request.account, 'account');
   if (account.isErr()) return err(account.error);
   const receiver = validateAddress(request.receiver ?? request.account, 'receiver');
   if (receiver.isErr()) return err(receiver.error);
-
-  let assetIn: unknown;
-  let assetOut: unknown;
-  let amountValue: unknown;
-  if (request.mode === 'exact-in') {
-    if (typeof request.amountIn !== 'object' || request.amountIn === null) {
-      return err(ValidationError.forField('amountIn', 'amountIn must be a token amount'));
-    }
-    assetIn = request.amountIn.symbol;
-    assetOut = request.assetOut;
-    amountValue = request.amountIn.raw;
-  } else if (request.mode === 'exact-out') {
-    if (typeof request.amountOut !== 'object' || request.amountOut === null) {
-      return err(ValidationError.forField('amountOut', 'amountOut must be a token amount'));
-    }
-    assetIn = request.assetIn;
-    assetOut = request.amountOut.symbol;
-    amountValue = request.amountOut.raw;
-  } else {
-    return err(ValidationError.forField('mode', 'mode must be exact-in or exact-out'));
-  }
-
-  if (typeof assetIn !== 'string' || !isTokenSymbol(assetIn)) {
-    return err(ValidationError.forField('assetIn', 'assetIn must be USDC, USDS, or sUSDS'));
-  }
-  if (typeof assetOut !== 'string' || !isTokenSymbol(assetOut)) {
-    return err(ValidationError.forField('assetOut', 'assetOut must be USDC, USDS, or sUSDS'));
-  }
-  if (assetIn === assetOut) {
-    return err(ValidationError.forField('assetOut', 'assetIn and assetOut must differ'));
-  }
-  const amount = validatePositiveUint256(
-    amountValue,
-    request.mode === 'exact-in' ? 'amountIn.raw' : 'amountOut.raw',
-  );
-  if (amount.isErr()) return err(amount.error);
-
-  const configuredSlippage = request.slippage ?? client.defaults.slippage;
-  if (typeof configuredSlippage !== 'object' || configuredSlippage === null) {
-    return err(ValidationError.forField('slippage', 'slippage must be created with parseSlippage'));
-  }
-  const slippage = parseSlippage(configuredSlippage.bps);
-  if (slippage.isErr()) return err(slippage.error);
 
   const configuredReferral = resolveReferral(request, client.defaults.referral);
   if (configuredReferral !== false) {
     const validatedReferral = createReferral(configuredReferral.code);
     if (validatedReferral.isErr()) return err(validatedReferral.error);
   }
-
-  const route = capability.routes.find(
-    (candidate) => candidate.assetIn === assetIn && candidate.assetOut === assetOut,
-  );
-  if (route === undefined || (request.mode === 'exact-in' ? !route.exactIn : !route.exactOut)) {
-    return err(
-      ValidationError.forField(
-        'route',
-        `${request.mode} ${assetIn} to ${assetOut} is not supported on chain ${chainId}`,
-      ),
-    );
-  }
   const referralCapability =
-    request.mode === 'exact-in' ? route.exactInReferral : route.exactOutReferral;
+    request.mode === 'exact-in'
+      ? quoted.value.route.exactInReferral
+      : quoted.value.route.exactOutReferral;
   const referralCode = referralCodeForRoute(configuredReferral, referralCapability);
   if (referralCode.isErr()) return err(referralCode.error);
 
@@ -230,8 +160,7 @@ function validateRequest(
     );
   }
 
-  const protection = protectionFor(capability.protocol, request.mode, assetIn, assetOut);
-  if (protection === 'none' && request.allowUnprotectedSlippage !== true) {
+  if (quoted.value.slippageEnforcedBy === 'none' && request.allowUnprotectedSlippage !== true) {
     return err(
       ValidationError.forField(
         'allowUnprotectedSlippage',
@@ -241,48 +170,13 @@ function validateRequest(
   }
 
   return ok({
-    chainId,
-    protocol: capability.protocol,
+    ...quoted.value,
     account: account.value,
     receiver: receiver.value,
-    assetIn,
-    assetOut,
-    mode: request.mode,
-    amount: amount.value,
-    slippage: slippage.value,
     referral: configuredReferral,
     referralCode: referralCode.value,
     approvalPolicy,
-    route,
   });
-}
-
-function protectionFor(
-  protocol: ResolvedRequest['protocol'],
-  mode: ResolvedRequest['mode'],
-  assetIn: TokenSymbol,
-  assetOut: TokenSymbol,
-): 'calldata' | 'allowance' | 'none' {
-  if (protocol === 'psm3') return 'calldata';
-  if (mode === 'exact-out' && assetIn === 'USDS' && (assetOut === 'USDC' || assetOut === 'sUSDS')) {
-    return 'allowance';
-  }
-  if (mode === 'exact-in' && assetIn === 'sUSDS' && assetOut === 'USDC') {
-    return 'calldata';
-  }
-  return 'none';
-}
-
-function rpc<T>(
-  promise: Promise<T>,
-  operation: string,
-  chainId: number,
-  contract?: Address,
-  functionName?: string,
-): ResultAsync<T, RpcError> {
-  return ResultAsync.fromPromise(promise, (cause) =>
-    RpcError.from({ cause, operation, chainId, contract, functionName }),
-  );
 }
 
 function encoded(factory: () => Hex): Result<Hex, UnexpectedError> {
@@ -308,38 +202,20 @@ function localPlan(
 
 async function preparePsm3Swap(
   client: OseroClient,
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
   blockNumber: bigint,
+  evaluation: SwapQuoteEvaluation,
 ): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const capability = CHAIN_CAPABILITIES[request.chainId];
   const tokenIn = capability.tokens[request.assetIn];
   const tokenOut = capability.tokens[request.assetOut];
   const psm = capability.contracts.psm;
-  const quote = await rpc(
-    publicClient.readContract({
-      address: psm,
-      abi: psm3Abi,
-      functionName: request.mode === 'exact-in' ? 'previewSwapExactIn' : 'previewSwapExactOut',
-      args:
-        request.mode === 'exact-in'
-          ? [tokenIn.address, tokenOut.address, request.amount]
-          : [tokenIn.address, tokenOut.address, request.amount],
-      blockNumber,
-    }),
-    'readContract',
-    request.chainId,
-    psm,
-    request.mode === 'exact-in' ? 'previewSwapExactIn' : 'previewSwapExactOut',
-  );
-  if (quote.isErr()) return err(quote.error);
-
-  const requiredInput =
-    request.mode === 'exact-in' ? request.amount : applySlippageUp(quote.value, request.slippage);
+  const quote = evaluation.quote;
+  const requiredInput = quote.mode === 'exact-in' ? quote.amountIn.raw : quote.maximumAmountIn.raw;
   const boundedOutput =
-    request.mode === 'exact-in' ? applySlippageDown(quote.value, request.slippage) : request.amount;
+    quote.mode === 'exact-in' ? quote.minimumAmountOut.raw : quote.amountOut.raw;
   const call = encoded(() =>
-    request.mode === 'exact-in'
+    quote.mode === 'exact-in'
       ? encodeFunctionData({
           abi: psm3Abi,
           functionName: 'swapExactIn',
@@ -373,7 +249,7 @@ async function preparePsm3Swap(
     from: request.account,
     to: psm,
     data: call.value,
-    operation: request.mode === 'exact-in' ? 'SWAP_EXACT_IN' : 'SWAP_EXACT_OUT',
+    operation: quote.mode === 'exact-in' ? 'SWAP_EXACT_IN' : 'SWAP_EXACT_OUT',
   });
   if (main.isErr()) return err(main.error);
 
@@ -392,69 +268,33 @@ async function preparePsm3Swap(
   const plan = localPlan(steps, [allowance.value.snapshot]);
   if (plan.isErr()) return err(plan.error);
 
-  const common = {
-    assetIn: request.assetIn,
-    assetOut: request.assetOut,
-    slippage: request.slippage,
-    route: {
-      chainId: request.chainId,
-      protocol: capability.protocol,
-      assetIn: request.assetIn,
-      assetOut: request.assetOut,
-      mode: request.mode,
-      steps: plan.value.steps.map((step) => step.operation),
-    },
-    slippageProtection: {
-      bound: request.mode === 'exact-in' ? ('minimum-output' as const) : ('maximum-input' as const),
-      enforcedBy: 'calldata' as const,
-    },
-    quotedAt: { blockNumber },
-    protocolFee: { kind: 'none' as const },
-    plan: plan.value,
-  };
-
-  if (request.mode === 'exact-in') {
-    return ok({
-      ...common,
-      mode: 'exact-in',
-      amountIn: { symbol: request.assetIn, raw: request.amount },
-      expectedAmountOut: { symbol: request.assetOut, raw: quote.value },
-      minimumAmountOut: { symbol: request.assetOut, raw: boundedOutput },
-    });
-  }
-  return ok({
-    ...common,
-    mode: 'exact-out',
-    amountOut: { symbol: request.assetOut, raw: request.amount },
-    expectedAmountIn: { symbol: request.assetIn, raw: quote.value },
-    maximumAmountIn: { symbol: request.assetIn, raw: requiredInput },
-  });
+  return ok(withExecutionPlan(quote, plan.value));
 }
 
 async function prepareEthereumSwap(
   client: OseroClient,
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
   blockNumber: bigint,
+  evaluation: SwapQuoteEvaluation,
 ): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const key = `${request.mode}:${request.assetIn}:${request.assetOut}`;
   switch (key) {
     case 'exact-in:USDC:USDS':
-      return prepareMainnetUsdcToUsds(client, publicClient, request, blockNumber);
+      return prepareMainnetUsdcToUsds(client, request, blockNumber, evaluation);
     case 'exact-in:USDC:sUSDS':
-      return prepareMainnetUsdcToSUsds(client, publicClient, request, blockNumber);
+      return prepareMainnetUsdcToSUsds(client, request, blockNumber, evaluation);
     case 'exact-in:USDS:sUSDS':
-      return prepareMainnetUsdsToSUsds(client, publicClient, request, blockNumber);
+      return prepareMainnetUsdsToSUsds(client, request, blockNumber, evaluation);
     case 'exact-out:USDS:sUSDS':
-      return prepareMainnetUsdsToSUsdsExactOut(client, publicClient, request, blockNumber);
+      return prepareMainnetUsdsToSUsdsExactOut(client, request, blockNumber, evaluation);
     case 'exact-in:sUSDS:USDS':
-      return prepareMainnetSUsdsToUsds(publicClient, request, blockNumber);
+      return prepareMainnetSUsdsToUsds(request, evaluation);
     case 'exact-out:sUSDS:USDS':
-      return prepareMainnetSUsdsToUsdsExactOut(publicClient, request, blockNumber);
+      return prepareMainnetSUsdsToUsdsExactOut(request, evaluation);
     case 'exact-out:USDS:USDC':
-      return prepareMainnetUsdsToUsdcExactOut(client, publicClient, request, blockNumber);
+      return prepareMainnetUsdsToUsdcExactOut(client, request, blockNumber, evaluation);
     case 'exact-in:sUSDS:USDC':
-      return prepareMainnetSUsdsToUsdc(client, publicClient, request, blockNumber);
+      return prepareMainnetSUsdsToUsdc(client, request, blockNumber, evaluation);
     default:
       return err(UnexpectedError.from(new Error(`Unhandled verified mainnet route ${key}`)));
   }
@@ -462,29 +302,13 @@ async function prepareEthereumSwap(
 
 async function prepareMainnetUsdcToUsds(
   client: OseroClient,
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
   blockNumber: bigint,
-): Promise<Result<PreparedExactInSwapQuote, PrepareSwapError>> {
+  evaluation: SwapQuoteEvaluation,
+): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const capability = CHAIN_CAPABILITIES[1];
   const { USDC } = capability.tokens;
-  const { psm, litePsm } = capability.contracts;
-  if (litePsm === undefined) return err(UnexpectedError.from(new Error('Missing Lite PSM')));
-  const tin = await rpc(
-    publicClient.readContract({
-      address: litePsm,
-      abi: litePsmAbi,
-      functionName: 'tin',
-      blockNumber,
-    }),
-    'readContract',
-    1,
-    litePsm,
-    'tin',
-  );
-  if (tin.isErr()) return err(tin.error);
-  const expected = usdsFromUsdcViaSellGem(request.amount, tin.value);
-  const minimum = applySlippageDown(expected, request.slippage);
+  const { psm } = capability.contracts;
   const data = encoded(() =>
     encodeFunctionData({
       abi: usdsPsmWrapperAbi,
@@ -518,53 +342,22 @@ async function prepareMainnetUsdcToUsds(
     [allowance.value.snapshot],
   );
   if (plan.isErr()) return err(plan.error);
-  return ok(
-    exactInQuote(request, plan.value, blockNumber, expected, minimum, {
-      kind: 'lite-psm',
-      tin: tin.value,
-    }),
-  );
+  return ok(withExecutionPlan(evaluation.quote, plan.value));
 }
 
 async function prepareMainnetUsdcToSUsds(
   client: OseroClient,
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
   blockNumber: bigint,
-): Promise<Result<PreparedExactInSwapQuote, PrepareSwapError>> {
+  evaluation: SwapQuoteEvaluation,
+): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const capability = CHAIN_CAPABILITIES[1];
   const { USDC, USDS, sUSDS } = capability.tokens;
-  const { psm, litePsm } = capability.contracts;
-  if (litePsm === undefined) return err(UnexpectedError.from(new Error('Missing Lite PSM')));
-  const tin = await rpc(
-    publicClient.readContract({
-      address: litePsm,
-      abi: litePsmAbi,
-      functionName: 'tin',
-      blockNumber,
-    }),
-    'readContract',
-    1,
-    litePsm,
-    'tin',
-  );
-  if (tin.isErr()) return err(tin.error);
-  const usdsOut = usdsFromUsdcViaSellGem(request.amount, tin.value);
-  const shares = await rpc(
-    publicClient.readContract({
-      address: sUSDS.address,
-      abi: erc4626Abi,
-      functionName: 'previewDeposit',
-      args: [usdsOut],
-      blockNumber,
-    }),
-    'readContract',
-    1,
-    sUSDS.address,
-    'previewDeposit',
-  );
-  if (shares.isErr()) return err(shares.error);
-  const minimum = applySlippageDown(shares.value, request.slippage);
+  const { psm } = capability.contracts;
+  const usdsOut = evaluation.intermediateUsdsAmount;
+  if (usdsOut === undefined) {
+    return err(UnexpectedError.from(new Error('Missing quoted intermediate USDS amount')));
+  }
   const sellData = encoded(() =>
     encodeFunctionData({
       abi: usdsPsmWrapperAbi,
@@ -638,37 +431,17 @@ async function prepareMainnetUsdcToSUsds(
   ];
   const plan = localPlan(steps, [usdcAllowance.value.snapshot, usdsAllowance.value.snapshot]);
   if (plan.isErr()) return err(plan.error);
-  return ok(
-    exactInQuote(request, plan.value, blockNumber, shares.value, minimum, {
-      kind: 'lite-psm',
-      tin: tin.value,
-    }),
-  );
+  return ok(withExecutionPlan(evaluation.quote, plan.value));
 }
 
 async function prepareMainnetUsdsToSUsds(
   client: OseroClient,
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
   blockNumber: bigint,
-): Promise<Result<PreparedExactInSwapQuote, PrepareSwapError>> {
+  evaluation: SwapQuoteEvaluation,
+): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const capability = CHAIN_CAPABILITIES[1];
   const { USDS, sUSDS } = capability.tokens;
-  const shares = await rpc(
-    publicClient.readContract({
-      address: sUSDS.address,
-      abi: erc4626Abi,
-      functionName: 'previewDeposit',
-      args: [request.amount],
-      blockNumber,
-    }),
-    'readContract',
-    1,
-    sUSDS.address,
-    'previewDeposit',
-  );
-  if (shares.isErr()) return err(shares.error);
-  const minimum = applySlippageDown(shares.value, request.slippage);
   const data = encoded(() =>
     request.referral === false
       ? encodeFunctionData({
@@ -708,32 +481,21 @@ async function prepareMainnetUsdsToSUsds(
     [allowance.value.snapshot],
   );
   if (plan.isErr()) return err(plan.error);
-  return ok(exactInQuote(request, plan.value, blockNumber, shares.value, minimum));
+  return ok(withExecutionPlan(evaluation.quote, plan.value));
 }
 
 async function prepareMainnetUsdsToSUsdsExactOut(
   client: OseroClient,
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
   blockNumber: bigint,
-): Promise<Result<PreparedExactOutSwapQuote, PrepareSwapError>> {
+  evaluation: SwapQuoteEvaluation,
+): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const capability = CHAIN_CAPABILITIES[1];
   const { USDS, sUSDS } = capability.tokens;
-  const assets = await rpc(
-    publicClient.readContract({
-      address: sUSDS.address,
-      abi: erc4626Abi,
-      functionName: 'previewMint',
-      args: [request.amount],
-      blockNumber,
-    }),
-    'readContract',
-    1,
-    sUSDS.address,
-    'previewMint',
-  );
-  if (assets.isErr()) return err(assets.error);
-  const maximum = applySlippageUp(assets.value, request.slippage);
+  const quote = evaluation.quote;
+  if (quote.mode !== 'exact-out') {
+    return err(UnexpectedError.from(new Error('Expected an exact-output quote')));
+  }
   const data = encoded(() =>
     encodeFunctionData({
       abi: erc4626Abi,
@@ -757,7 +519,7 @@ async function prepareMainnetUsdsToSUsdsExactOut(
     token: USDS.address,
     owner: request.account,
     spender: sUSDS.address,
-    requiredAmount: maximum,
+    requiredAmount: quote.maximumAmountIn.raw,
     policy: request.approvalPolicy,
     blockNumber,
     enforceSpendingCap: true,
@@ -768,30 +530,14 @@ async function prepareMainnetUsdsToSUsdsExactOut(
     [allowance.value.snapshot],
   );
   if (plan.isErr()) return err(plan.error);
-  return ok(exactOutQuote(request, plan.value, blockNumber, assets.value, maximum));
+  return ok(withExecutionPlan(quote, plan.value));
 }
 
 async function prepareMainnetSUsdsToUsds(
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
-  blockNumber: bigint,
-): Promise<Result<PreparedExactInSwapQuote, PrepareSwapError>> {
+  evaluation: SwapQuoteEvaluation,
+): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const sUSDS = CHAIN_CAPABILITIES[1].tokens.sUSDS;
-  const assets = await rpc(
-    publicClient.readContract({
-      address: sUSDS.address,
-      abi: erc4626Abi,
-      functionName: 'previewRedeem',
-      args: [request.amount],
-      blockNumber,
-    }),
-    'readContract',
-    1,
-    sUSDS.address,
-    'previewRedeem',
-  );
-  if (assets.isErr()) return err(assets.error);
-  const minimum = applySlippageDown(assets.value, request.slippage);
   const data = encoded(() =>
     encodeFunctionData({
       abi: erc4626Abi,
@@ -811,30 +557,14 @@ async function prepareMainnetSUsdsToUsds(
   if (main.isErr()) return err(main.error);
   const plan = localPlan([main.value], []);
   if (plan.isErr()) return err(plan.error);
-  return ok(exactInQuote(request, plan.value, blockNumber, assets.value, minimum));
+  return ok(withExecutionPlan(evaluation.quote, plan.value));
 }
 
 async function prepareMainnetSUsdsToUsdsExactOut(
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
-  blockNumber: bigint,
-): Promise<Result<PreparedExactOutSwapQuote, PrepareSwapError>> {
+  evaluation: SwapQuoteEvaluation,
+): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const sUSDS = CHAIN_CAPABILITIES[1].tokens.sUSDS;
-  const shares = await rpc(
-    publicClient.readContract({
-      address: sUSDS.address,
-      abi: erc4626Abi,
-      functionName: 'previewWithdraw',
-      args: [request.amount],
-      blockNumber,
-    }),
-    'readContract',
-    1,
-    sUSDS.address,
-    'previewWithdraw',
-  );
-  if (shares.isErr()) return err(shares.error);
-  const maximum = applySlippageUp(shares.value, request.slippage);
   const data = encoded(() =>
     encodeFunctionData({
       abi: erc4626Abi,
@@ -854,34 +584,22 @@ async function prepareMainnetSUsdsToUsdsExactOut(
   if (main.isErr()) return err(main.error);
   const plan = localPlan([main.value], []);
   if (plan.isErr()) return err(plan.error);
-  return ok(exactOutQuote(request, plan.value, blockNumber, shares.value, maximum));
+  return ok(withExecutionPlan(evaluation.quote, plan.value));
 }
 
 async function prepareMainnetUsdsToUsdcExactOut(
   client: OseroClient,
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
   blockNumber: bigint,
-): Promise<Result<PreparedExactOutSwapQuote, PrepareSwapError>> {
+  evaluation: SwapQuoteEvaluation,
+): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const capability = CHAIN_CAPABILITIES[1];
   const { USDS } = capability.tokens;
-  const { psm, litePsm } = capability.contracts;
-  if (litePsm === undefined) return err(UnexpectedError.from(new Error('Missing Lite PSM')));
-  const tout = await rpc(
-    publicClient.readContract({
-      address: litePsm,
-      abi: litePsmAbi,
-      functionName: 'tout',
-      blockNumber,
-    }),
-    'readContract',
-    1,
-    litePsm,
-    'tout',
-  );
-  if (tout.isErr()) return err(tout.error);
-  const expected = usdsNeededForUsdcViaBuyGem(request.amount, tout.value);
-  const maximum = applySlippageUp(expected, request.slippage);
+  const { psm } = capability.contracts;
+  const quote = evaluation.quote;
+  if (quote.mode !== 'exact-out') {
+    return err(UnexpectedError.from(new Error('Expected an exact-output quote')));
+  }
   const data = encoded(() =>
     encodeFunctionData({
       abi: usdsPsmWrapperAbi,
@@ -905,7 +623,7 @@ async function prepareMainnetUsdsToUsdcExactOut(
     token: USDS.address,
     owner: request.account,
     spender: psm,
-    requiredAmount: maximum,
+    requiredAmount: quote.maximumAmountIn.raw,
     policy: request.approvalPolicy,
     blockNumber,
     enforceSpendingCap: true,
@@ -916,55 +634,26 @@ async function prepareMainnetUsdsToUsdcExactOut(
     [allowance.value.snapshot],
   );
   if (plan.isErr()) return err(plan.error);
-  return ok(
-    exactOutQuote(request, plan.value, blockNumber, expected, maximum, {
-      kind: 'lite-psm',
-      tout: tout.value,
-    }),
-  );
+  return ok(withExecutionPlan(quote, plan.value));
 }
 
 async function prepareMainnetSUsdsToUsdc(
   client: OseroClient,
-  publicClient: OseroPublicClient,
   request: ResolvedRequest,
   blockNumber: bigint,
-): Promise<Result<PreparedExactInSwapQuote, PrepareSwapError>> {
+  evaluation: SwapQuoteEvaluation,
+): Promise<Result<PreparedSwapQuote, PrepareSwapError>> {
   const capability = CHAIN_CAPABILITIES[1];
   const { USDS, sUSDS } = capability.tokens;
-  const { psm, litePsm } = capability.contracts;
-  if (litePsm === undefined) return err(UnexpectedError.from(new Error('Missing Lite PSM')));
-  const [assets, tout] = await Promise.all([
-    rpc(
-      publicClient.readContract({
-        address: sUSDS.address,
-        abi: erc4626Abi,
-        functionName: 'previewRedeem',
-        args: [request.amount],
-        blockNumber,
-      }),
-      'readContract',
-      1,
-      sUSDS.address,
-      'previewRedeem',
-    ),
-    rpc(
-      publicClient.readContract({
-        address: litePsm,
-        abi: litePsmAbi,
-        functionName: 'tout',
-        blockNumber,
-      }),
-      'readContract',
-      1,
-      litePsm,
-      'tout',
-    ),
-  ]);
-  if (assets.isErr()) return err(assets.error);
-  if (tout.isErr()) return err(tout.error);
-  const expected = usdcFromUsdsViaBuyGem(assets.value, tout.value);
-  const minimum = applySlippageDown(expected, request.slippage);
+  const { psm } = capability.contracts;
+  const quote = evaluation.quote;
+  if (quote.mode !== 'exact-in') {
+    return err(UnexpectedError.from(new Error('Expected an exact-input quote')));
+  }
+  const usdsOut = evaluation.intermediateUsdsAmount;
+  if (usdsOut === undefined) {
+    return err(UnexpectedError.from(new Error('Missing quoted intermediate USDS amount')));
+  }
   const redeemData = encoded(() =>
     encodeFunctionData({
       abi: erc4626Abi,
@@ -977,7 +666,7 @@ async function prepareMainnetSUsdsToUsdc(
     encodeFunctionData({
       abi: usdsPsmWrapperAbi,
       functionName: 'buyGem',
-      args: [request.receiver, minimum],
+      args: [request.receiver, quote.minimumAmountOut.raw],
     }),
   );
   if (buyData.isErr()) return err(buyData.error);
@@ -1005,7 +694,7 @@ async function prepareMainnetSUsdsToUsdc(
     token: USDS.address,
     owner: request.account,
     spender: psm,
-    requiredAmount: assets.value,
+    requiredAmount: usdsOut,
     policy: request.approvalPolicy,
     blockNumber,
     enforceSpendingCap: true,
@@ -1016,90 +705,19 @@ async function prepareMainnetSUsdsToUsdc(
     [allowance.value.snapshot],
   );
   if (plan.isErr()) return err(plan.error);
-  return ok(
-    exactInQuote(request, plan.value, blockNumber, expected, minimum, {
-      kind: 'lite-psm',
-      tout: tout.value,
-    }),
-  );
+  return ok(withExecutionPlan(quote, plan.value));
 }
 
-function exactInQuote(
-  request: ResolvedRequest,
+function withExecutionPlan(
+  quote: SwapQuoteEvaluation['quote'],
   plan: ExecutionPlan,
-  blockNumber: bigint,
-  expected: bigint,
-  minimum: bigint,
-  protocolFee: {
-    readonly kind: 'none' | 'lite-psm';
-    readonly tin?: bigint;
-    readonly tout?: bigint;
-  } = {
-    kind: 'none',
-  },
-): PreparedExactInSwapQuote {
-  return {
-    mode: 'exact-in',
-    assetIn: request.assetIn,
-    assetOut: request.assetOut,
-    amountIn: { symbol: request.assetIn, raw: request.amount },
-    expectedAmountOut: { symbol: request.assetOut, raw: expected },
-    minimumAmountOut: { symbol: request.assetOut, raw: minimum },
-    slippage: request.slippage,
-    route: {
-      chainId: request.chainId,
-      protocol: request.protocol,
-      assetIn: request.assetIn,
-      assetOut: request.assetOut,
-      mode: 'exact-in',
-      steps: plan.steps.map((step) => step.operation),
-    },
-    slippageProtection: {
-      bound: 'minimum-output',
-      enforcedBy: protectionFor(request.protocol, request.mode, request.assetIn, request.assetOut),
-    },
-    quotedAt: { blockNumber },
-    protocolFee,
-    plan,
+): PreparedSwapQuote {
+  const route = {
+    ...quote.route,
+    steps: plan.steps.map((step) => step.operation),
   };
-}
-
-function exactOutQuote(
-  request: ResolvedRequest,
-  plan: ExecutionPlan,
-  blockNumber: bigint,
-  expected: bigint,
-  maximum: bigint,
-  protocolFee: {
-    readonly kind: 'none' | 'lite-psm';
-    readonly tin?: bigint;
-    readonly tout?: bigint;
-  } = {
-    kind: 'none',
-  },
-): PreparedExactOutSwapQuote {
-  return {
-    mode: 'exact-out',
-    assetIn: request.assetIn,
-    assetOut: request.assetOut,
-    amountOut: { symbol: request.assetOut, raw: request.amount },
-    expectedAmountIn: { symbol: request.assetIn, raw: expected },
-    maximumAmountIn: { symbol: request.assetIn, raw: maximum },
-    slippage: request.slippage,
-    route: {
-      chainId: request.chainId,
-      protocol: request.protocol,
-      assetIn: request.assetIn,
-      assetOut: request.assetOut,
-      mode: 'exact-out',
-      steps: plan.steps.map((step) => step.operation),
-    },
-    slippageProtection: {
-      bound: 'maximum-input',
-      enforcedBy: protectionFor(request.protocol, request.mode, request.assetIn, request.assetOut),
-    },
-    quotedAt: { blockNumber },
-    protocolFee,
-    plan,
-  };
+  if (quote.mode === 'exact-in') {
+    return { ...quote, route, plan };
+  }
+  return { ...quote, route, plan };
 }

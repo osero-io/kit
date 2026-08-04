@@ -23,7 +23,7 @@ describe('resolveConfig', () => {
   });
 
   it('accepts branded slippage and referral values', () => {
-    const slippage = parseSlippage('25.5');
+    const slippage = parseSlippage({ bps: '25.5' });
     const referralValue = referral(3001n);
     if (slippage.isErr() || referralValue.isErr()) throw new Error('test input failed');
 

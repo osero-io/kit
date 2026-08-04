@@ -64,7 +64,7 @@ export function resolveConfig(config: ClientConfig): ResolvedClientConfig {
       'defaultSlippage',
     );
   }
-  const validatedSlippage = parseSlippage(defaultSlippage.bps);
+  const validatedSlippage = parseSlippage({ bps: defaultSlippage.bps });
   if (validatedSlippage.isErr()) {
     throw new ConfigurationError(validatedSlippage.error.message, 'defaultSlippage', {
       cause: validatedSlippage.error,

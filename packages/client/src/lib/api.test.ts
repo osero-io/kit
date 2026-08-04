@@ -511,7 +511,7 @@ describe('OseroApiClient request boundaries', () => {
   });
 
   it('serializes branded amount, slippage, referral, and address-form assets exactly', async () => {
-    const slippage = parseSlippage('12.5');
+    const slippage = parseSlippage({ bps: '12.5' });
     const referralResult = referral(3001n);
     if (slippage.isErr() || referralResult.isErr()) throw new Error('test input failed');
     const transport = fetchSequence({ body: sameChainQuoteForAmount('1000000') });

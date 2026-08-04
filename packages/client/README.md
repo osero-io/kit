@@ -2,12 +2,13 @@
 
 Production TypeScript SDK for preparing, inspecting, simulating, and executing USDC, USDS, and sUSDS swaps through the deployed Sky/Spark liquidity routes supported by Osero.
 
-The v1 API separates four responsibilities:
+The v1 API separates five responsibilities:
 
 1. `OseroClient` owns explicit read transports and safe policy defaults.
-2. `prepareSwap` reads a quote once and returns a rich quote bound to an immutable execution plan.
-3. An executor adapter (`/viem`, `/ethers`, or `/privy`) preflights and executes that plan.
-4. The hosted API client (`/api`) decodes untrusted responses, verifies transaction integrity, and prepares allowance-aware plans.
+2. `quoteSwap` returns account-free swap economics from a coherent block snapshot.
+3. `prepareSwap` reads a fresh quote and binds it to an immutable, account-specific execution plan.
+4. An executor adapter (`/viem`, `/ethers`, or `/privy`) preflights and executes that plan.
+5. The hosted API client (`/api`) decodes untrusted responses, verifies transaction integrity, and prepares allowance-aware plans.
 
 Every operational API returns `Result` or `ResultAsync`. Invalid runtime input, RPC failures, wallet mismatch, transaction failure, and completion timeout are values—not thrown exceptions. Constructors may throw `ConfigurationError` for invalid static configuration.
 
@@ -38,7 +39,7 @@ Requirements:
 | Import path               | Purpose                                                                    |
 | ------------------------- | -------------------------------------------------------------------------- |
 | `@osero/client`           | Client, domain values, plans, errors, chain/token discovery, balances, APY |
-| `@osero/client/actions`   | `prepareSwap` and `simulateExecutionPlan`                                  |
+| `@osero/client/actions`   | `quoteSwap`, `prepareSwap`, and `simulateExecutionPlan`                    |
 | `@osero/client/api`       | Hosted API client and hosted wire/domain types                             |
 | `@osero/client/contracts` | Supported contract ABIs and protocol addresses                             |
 | `@osero/client/viem`      | viem executor                                                              |
@@ -73,6 +74,36 @@ Safe defaults:
 - public RPC fallback: disabled
 - executor confirmations: one, configured per executor call
 
+## Quote before wallet connection
+
+`quoteSwap` needs a read transport, not an account. It returns economics, route and slippage-protection details, protocol fee inputs, and the quote block without constructing calldata, reading allowances, or returning an execution plan.
+
+```ts
+import { OseroClient, tokenAmount } from '@osero/client';
+import { quoteSwap } from '@osero/client/actions';
+import { http, parseUnits } from 'viem';
+
+const client = OseroClient.create({
+  transports: { 8453: http(process.env.BASE_RPC_URL) },
+});
+const amountIn = tokenAmount('USDC', parseUnits('100', 6));
+if (amountIn.isErr()) throw amountIn.error;
+
+const quoted = await quoteSwap(client, {
+  chainId: 8453,
+  mode: 'exact-in',
+  amountIn: amountIn.value,
+  assetOut: 'sUSDS',
+});
+
+if (quoted.isOk()) {
+  console.log(quoted.value.expectedAmountOut);
+  console.log(quoted.value.minimumAmountOut);
+}
+```
+
+Call `prepareSwap` after an account is available. Preparation deliberately reads a fresh quote so its allowance decisions, calldata, bounds, and plan share one current block snapshot; it does not upgrade a potentially stale account-free quote.
+
 ## Prepare an exact-input swap
 
 Amounts carry their token symbol. Slippage and referrals are also constructed values, which prevents ambiguous raw numbers from crossing public boundaries.
@@ -86,7 +117,7 @@ const client = OseroClient.create({
   transports: { 8453: http(process.env.BASE_RPC_URL) },
 });
 const amountIn = tokenAmount('USDC', parseUnits('100', 6));
-const slippage = parseSlippage('25'); // 25 bps = 0.25%
+const slippage = parseSlippage({ bps: '25' }); // 25 bps = 0.25%
 
 if (amountIn.isErr() || slippage.isErr()) {
   throw new Error('static application input is invalid');
@@ -297,7 +328,7 @@ const api = OseroApiClient.create({
   },
 });
 const amount = oseroApiAmount(parseUnits('1', 6));
-const slippage = parseSlippage('50');
+const slippage = parseSlippage({ bps: '50' });
 if (amount.isErr() || slippage.isErr()) throw new Error('invalid input');
 
 const quote = await api.getSwapQuote({

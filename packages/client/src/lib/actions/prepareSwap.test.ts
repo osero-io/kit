@@ -68,7 +68,7 @@ function amount<Symbol extends TokenSymbol>(symbol: Symbol, raw = 1_000_000n): T
 }
 
 function slippage(value = '5') {
-  const result = parseSlippage(value);
+  const result = parseSlippage({ bps: value });
   if (result.isErr()) throw result.error;
   return result.value;
 }
