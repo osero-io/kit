@@ -113,8 +113,8 @@ importers:
   packages/client:
     dependencies:
       '@privy-io/node':
-        specifier: ^0.19.0
-        version: 0.19.0(viem@2.48.11(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@6.0.6)(zod@3.25.76))
+        specifier: ^0.19.0 || ^0.28.0
+        version: 0.28.0(viem@2.48.11(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@6.0.6)(zod@3.25.76))
       ethers:
         specifier: ^6.14.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
@@ -1585,26 +1585,6 @@ packages:
 
   '@pinojs/redact@0.4.0':
     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
-
-  '@privy-io/node@0.19.0':
-    resolution: {integrity: sha512-de51HuKSZkDLBQCPsYpwexOfaHx5/3jSqCAen0+/39Rb9RRwHxztQ2LnaYGMrufd2f9BNiSKveuyYU9BT1eBeg==}
-    peerDependencies:
-      '@solana/kit': ^5.1.0
-      '@x402/evm': ^2.3.0
-      '@x402/fetch': ^2.3.0
-      '@x402/svm': ^2.3.0
-      viem: ^2.24.1
-    peerDependenciesMeta:
-      '@solana/kit':
-        optional: true
-      '@x402/evm':
-        optional: true
-      '@x402/fetch':
-        optional: true
-      '@x402/svm':
-        optional: true
-      viem:
-        optional: true
 
   '@privy-io/node@0.28.0':
     resolution: {integrity: sha512-UrHxYmMCAPeTt2PDvZ4aYXP6syejTYhRmpqODCqj7QY4b4LPTTjdhYqdCsPb2MXEfbvROw9kJJ1NudSSRdJeNw==}
@@ -5685,20 +5665,6 @@ snapshots:
       typescript: 5.9.3
 
   '@pinojs/redact@0.4.0': {}
-
-  '@privy-io/node@0.19.0(viem@2.48.11(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@6.0.6)(zod@3.25.76))':
-    dependencies:
-      '@hpke/chacha20poly1305': 1.8.0
-      '@hpke/core': 1.9.0
-      '@noble/curves': 1.9.7
-      '@noble/hashes': 1.8.0
-      '@scure/base': 1.2.6
-      canonicalize: 2.1.0
-      jose: 6.2.3
-      lru-cache: 11.5.1
-      svix: 1.95.1
-    optionalDependencies:
-      viem: 2.48.11(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@6.0.6)(zod@3.25.76)
 
   '@privy-io/node@0.28.0(viem@2.48.11(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@6.0.6)(zod@3.25.76))':
     dependencies:
