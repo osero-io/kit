@@ -21,6 +21,7 @@
   ],
   "rules": {
     "no-console": "off",
+    "no-underscore-dangle": "off",
     "no-unused-vars": "off",
     "typescript/no-unused-vars": [
       "error",
@@ -35,7 +36,8 @@
       "rules": {
         "typescript/no-explicit-any": "off",
         "typescript/no-non-null-assertion": "off",
-        "unicorn/no-array-sort": "off"
+        "unicorn/no-array-sort": "off",
+        "vitest/no-conditional-expect": "off"
       }
     }
   ]
