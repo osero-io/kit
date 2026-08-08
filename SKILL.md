@@ -966,10 +966,7 @@ import {
 ```ts
 // Returned by actions before handoff to sendWith:
 type ActionError =
-  | ValidationError
-  | UnsupportedChainError
-  | InsufficientBalanceError
-  | UnexpectedError;
+  ValidationError | UnsupportedChainError | InsufficientBalanceError | UnexpectedError;
 
 // Returned by sendWith:
 type SendWithError = CancelError | SigningError | TransactionError | UnexpectedError;
