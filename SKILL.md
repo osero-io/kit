@@ -1089,10 +1089,7 @@ import {
 ```ts
 // Returned by actions before handoff to sendWith:
 type ActionError =
-  | ValidationError
-  | UnsupportedChainError
-  | InsufficientBalanceError
-  | UnexpectedError;
+  ValidationError | UnsupportedChainError | InsufficientBalanceError | UnexpectedError;
 
 // Returned by sendWith:
 type SendWithError = CancelError | SigningError | TransactionError | UnexpectedError;
@@ -1112,10 +1109,7 @@ type OseroApiClientError =
 
 // executeSwap also returns wallet and bounded-lifecycle failures:
 type ExecuteSwapError =
-  | OseroApiClientError
-  | SendWithError
-  | ApprovalLimitError
-  | QuoteRefreshLimitError;
+  OseroApiClientError | SendWithError | ApprovalLimitError | QuoteRefreshLimitError;
 ```
 
 Each action also exports a per-action alias:
