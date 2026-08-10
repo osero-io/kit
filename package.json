@@ -33,7 +33,7 @@
     "oxfmt": "^0.61.0",
     "oxlint": "^1.60.0",
     "tslib": "^2.3.0",
-    "typescript": "~5.9.2",
+    "typescript": "~6.0.3",
     "verdaccio": "^6.3.2",
     "vite": "^8.0.0",
     "vitest": "~4.1.0"
