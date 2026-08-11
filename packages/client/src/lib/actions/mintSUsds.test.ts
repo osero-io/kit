@@ -1,11 +1,18 @@
-import { decodeFunctionData, parseUnits } from 'viem';
+import {
+  decodeFunctionData,
+  encodeAbiParameters,
+  encodeEventTopics,
+  parseUnits,
+  type TransactionReceipt,
+} from 'viem';
 
+import { erc20Abi } from '../abis/erc20.js';
 import { erc4626Abi } from '../abis/erc4626.js';
 import { psm3Abi } from '../abis/psm3.js';
 import { usdsPsmWrapperAbi } from '../abis/usdsPsmWrapper.js';
 import { PSM_ADDRESSES } from '../addresses.js';
-import { UnsupportedChainError, ValidationError } from '../errors.js';
-import { usdsFromUsdcViaSellGem } from '../math.js';
+import { UnexpectedError, UnsupportedChainError, ValidationError } from '../errors.js';
+import { applySlippage, usdsFromUsdcViaSellGem } from '../math.js';
 import { OseroClient } from '../OseroClient.js';
 import { getToken } from '../tokens.js';
 import { installMockPublicClient } from './_testing.js';
@@ -13,6 +20,29 @@ import { mintSUsds, previewMintSUsds } from './mintSUsds.js';
 
 const SENDER = '0x1111111111111111111111111111111111111111' as const;
 const RECEIVER = '0x2222222222222222222222222222222222222222' as const;
+const SELL_GEM_TX_HASH =
+  '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+
+function makeUsdsTransferReceipt(args: { readonly amount: bigint }): TransactionReceipt {
+  const topics = encodeEventTopics({
+    abi: erc20Abi,
+    eventName: 'Transfer',
+    args: {
+      from: PSM_ADDRESSES[1].psm,
+      to: SENDER,
+    },
+  });
+
+  return {
+    logs: [
+      {
+        address: getToken(1, 'USDS').address,
+        topics,
+        data: encodeAbiParameters([{ type: 'uint256', name: 'value' }], [args.amount]),
+      },
+    ],
+  } as unknown as TransactionReceipt;
+}
 
 describe('mintSUsds', () => {
   it('rejects an unsupported chain', async () => {
@@ -195,21 +225,23 @@ describe('mintSUsds', () => {
       expect(sellGem.args?.[0]).toBe(SENDER);
       expect(sellGem.args?.[1]).toBe(amount);
 
-      // Phase 2 — approve USDS + deposit(usdsOut, SENDER)
+      // Phase 2 — approve USDS + deposit(usdsToDeposit, SENDER)
       const usdsOut = usdsFromUsdcViaSellGem(amount, tin);
+      const usdsToDeposit = applySlippage(usdsOut, 5);
       const phase2 = plan.steps[1]!;
       expect(phase2.__typename).toBe('Erc20ApprovalRequired');
       if (phase2.__typename !== 'Erc20ApprovalRequired') return;
       expect(phase2.approvals[0]!.token).toBe(getToken(1, 'USDS').address);
       expect(phase2.approvals[0]!.spender).toBe(getToken(1, 'sUSDS').address);
-      expect(phase2.approvals[0]!.amount).toBe(usdsOut);
+      expect(phase2.approvals[0]!.amount).toBe(usdsToDeposit);
+      expect(phase2.refresh).toBeTypeOf('function');
 
       const deposit = decodeFunctionData({
         abi: erc4626Abi,
         data: phase2.originalTransaction.data,
       });
       expect(deposit.functionName).toBe('deposit');
-      expect(deposit.args?.[0]).toBe(usdsOut);
+      expect(deposit.args?.[0]).toBe(usdsToDeposit);
       expect(deposit.args?.[1]).toBe(SENDER); // default receiver
       expect(deposit.args).toHaveLength(3);
       expect(deposit.args?.[2]).toBe(3000); // SDK default referral
@@ -356,7 +388,7 @@ describe('mintSUsds', () => {
       expect(depositArgs).toHaveLength(2);
     });
 
-    it('accounts for a non-zero tin when computing usdsOut', async () => {
+    it('applies default slippage to the mainnet intermediate USDS deposit amount', async () => {
       const client = OseroClient.create();
       const amount = parseUnits('1000', 6);
       const tin = 10n ** 16n; // 1%
@@ -376,7 +408,117 @@ describe('mintSUsds', () => {
       if (phase2.__typename !== 'Erc20ApprovalRequired') return;
 
       const expectedUsdsOut = usdsFromUsdcViaSellGem(amount, tin);
-      expect(phase2.approvals[0]!.amount).toBe(expectedUsdsOut);
+      const expectedDepositAmount = applySlippage(expectedUsdsOut, 5);
+      expect(phase2.approvals[0]!.amount).toBe(expectedDepositAmount);
+
+      const depositArgs = decodeFunctionData({
+        abi: erc4626Abi,
+        data: phase2.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(depositArgs[0]).toBe(expectedDepositAmount);
+    });
+
+    it('respects explicit slippageBps for the mainnet intermediate USDS deposit amount', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 5 });
+      const amount = parseUnits('1000', 6);
+      const tin = 0n;
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return tin;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 1,
+        amount,
+        sender: SENDER,
+        slippageBps: 50,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+      const phase2 = result.value.steps[1]!;
+      if (phase2.__typename !== 'Erc20ApprovalRequired') return;
+
+      const expectedUsdsOut = usdsFromUsdcViaSellGem(amount, tin);
+      const expectedDepositAmount = applySlippage(expectedUsdsOut, 50);
+      expect(phase2.approvals[0]!.amount).toBe(expectedDepositAmount);
+
+      const depositArgs = decodeFunctionData({
+        abi: erc4626Abi,
+        data: phase2.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(depositArgs[0]).toBe(expectedDepositAmount);
+    });
+
+    it('refreshes phase 2 from the confirmed sellGem receipt', async () => {
+      const client = OseroClient.create();
+      const amount = parseUnits('1000', 6);
+      const planTimeTin = 0n;
+      const actualUsdsOut = parseUnits('999.75', 18);
+      const mock = installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return planTimeTin;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+      Object.assign(mock, {
+        getTransactionReceipt: async () => makeUsdsTransferReceipt({ amount: actualUsdsOut }),
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 1,
+        amount,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+      const phase2 = result.value.steps[1]!;
+      if (phase2.__typename !== 'Erc20ApprovalRequired') return;
+
+      const refreshed = await phase2.refresh!({
+        previousTxHash: SELL_GEM_TX_HASH,
+      });
+
+      expect(refreshed.isOk()).toBe(true);
+      if (!refreshed.isOk()) return;
+      expect(refreshed.value.approvals[0]!.amount).toBe(actualUsdsOut);
+      const depositArgs = decodeFunctionData({
+        abi: erc4626Abi,
+        data: refreshed.value.originalTransaction.data,
+      }).args as readonly unknown[];
+      expect(depositArgs[0]).toBe(actualUsdsOut);
+    });
+
+    it('returns UnexpectedError when the sellGem receipt has no USDS transfer to sender', async () => {
+      const client = OseroClient.create();
+      const amount = parseUnits('1000', 6);
+      const mock = installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tin') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+      Object.assign(mock, {
+        getTransactionReceipt: async () =>
+          ({
+            logs: [],
+          }) as unknown as TransactionReceipt,
+      });
+
+      const result = await mintSUsds(client, {
+        chainId: 1,
+        amount,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+      const phase2 = result.value.steps[1]!;
+      if (phase2.__typename !== 'Erc20ApprovalRequired') return;
+
+      const refreshed = await phase2.refresh!({
+        previousTxHash: SELL_GEM_TX_HASH,
+      });
+
+      expect(refreshed.isErr()).toBe(true);
+      if (refreshed.isErr()) {
+        expect(refreshed.error).toBeInstanceOf(UnexpectedError);
+        expect(refreshed.error.message).toContain('Could not find the USDS Transfer event');
+      }
     });
   });
 
