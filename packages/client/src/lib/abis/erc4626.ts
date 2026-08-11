@@ -5,6 +5,17 @@
  */
 export const erc4626Abi = [
   {
+    type: 'event',
+    name: 'Withdraw',
+    inputs: [
+      { name: 'sender', type: 'address', indexed: true },
+      { name: 'receiver', type: 'address', indexed: true },
+      { name: 'owner', type: 'address', indexed: true },
+      { name: 'assets', type: 'uint256', indexed: false },
+      { name: 'shares', type: 'uint256', indexed: false },
+    ],
+  },
+  {
     type: 'function',
     name: 'asset',
     stateMutability: 'view',

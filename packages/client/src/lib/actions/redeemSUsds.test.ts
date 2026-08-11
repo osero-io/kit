@@ -1,17 +1,59 @@
-import { decodeFunctionData, parseUnits } from 'viem';
+import {
+  decodeFunctionData,
+  encodeAbiParameters,
+  encodeEventTopics,
+  parseUnits,
+  type TransactionReceipt,
+} from 'viem';
 
 import { erc4626Abi } from '../abis/erc4626.js';
 import { psm3Abi } from '../abis/psm3.js';
 import { usdsPsmWrapperAbi } from '../abis/usdsPsmWrapper.js';
+import { runExecutionPlan, type SingleTxExecutor } from '../adapters.js';
 import { PSM_ADDRESSES } from '../addresses.js';
-import { UnsupportedChainError, ValidationError } from '../errors.js';
+import { UnexpectedError, UnsupportedChainError, ValidationError } from '../errors.js';
 import { usdcFromUsdsViaBuyGem } from '../math.js';
 import { OseroClient } from '../OseroClient.js';
+import { okAsync } from '../result.js';
 import { getToken } from '../tokens.js';
+import type { TransactionRequest } from '../types.js';
 import { installMockPublicClient } from './_testing.js';
 import { previewRedeemSUsds, redeemSUsds } from './redeemSUsds.js';
 
 const SENDER = '0x1111111111111111111111111111111111111111' as const;
+const REDEEM_TX_HASH =
+  '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
+
+function makeSusdsWithdrawReceipt(args: {
+  readonly shares: bigint;
+  readonly assets: bigint;
+}): TransactionReceipt {
+  const topics = encodeEventTopics({
+    abi: erc4626Abi,
+    eventName: 'Withdraw',
+    args: {
+      sender: SENDER,
+      receiver: SENDER,
+      owner: SENDER,
+    },
+  });
+
+  return {
+    logs: [
+      {
+        address: getToken(1, 'sUSDS').address,
+        topics,
+        data: encodeAbiParameters(
+          [
+            { type: 'uint256', name: 'assets' },
+            { type: 'uint256', name: 'shares' },
+          ],
+          [args.assets, args.shares],
+        ),
+      },
+    ],
+  } as unknown as TransactionReceipt;
+}
 
 describe('redeemSUsds', () => {
   it('rejects an unsupported chain', async () => {
@@ -186,6 +228,212 @@ describe('redeemSUsds', () => {
       expect(buyGem.functionName).toBe('buyGem');
       const expectedGemAmt = (usdcFromUsdsViaBuyGem(usdsOut, tout) * 9995n) / 10_000n;
       expect(buyGem.args?.[1]).toBe(expectedGemAmt);
+    });
+
+    it('refreshes phase 2 from the confirmed redeem receipt and live tout', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 5 });
+      const shares = parseUnits('1000', 18);
+      const planTimeUsdsOut = parseUnits('1005', 18);
+      const actualUsdsOut = parseUnits('1006', 18);
+      const planTimeTout = 0n;
+      const liveTout = 10n ** 16n;
+      let toutReads = 0;
+
+      const mock = installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'previewRedeem') return planTimeUsdsOut;
+        if (functionName === 'tout') {
+          toutReads += 1;
+          return toutReads === 1 ? planTimeTout : liveTout;
+        }
+        throw new Error(`unexpected read ${functionName}`);
+      });
+      const receiptHashes: `0x${string}`[] = [];
+      Object.assign(mock, {
+        getTransactionReceipt: async ({ hash }: { readonly hash: `0x${string}` }) => {
+          receiptHashes.push(hash);
+          return makeSusdsWithdrawReceipt({
+            shares,
+            assets: actualUsdsOut,
+          });
+        },
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 1,
+        amount: shares,
+        sender: SENDER,
+      });
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+      const phase2 = result.value.steps[1];
+      if (phase2?.__typename !== 'Erc20ApprovalRequired') return;
+
+      expect(phase2.approvals[0]!.amount).toBe(planTimeUsdsOut);
+      expect(phase2.refresh).toBeTypeOf('function');
+      const refreshed = await phase2.refresh!({
+        previousTxHash: REDEEM_TX_HASH,
+      });
+
+      expect(refreshed.isOk()).toBe(true);
+      if (!refreshed.isOk()) return;
+      expect(receiptHashes).toEqual([REDEEM_TX_HASH]);
+      expect(refreshed.value.approvals[0]!.amount).toBe(actualUsdsOut);
+
+      const buyGem = decodeFunctionData({
+        abi: usdsPsmWrapperAbi,
+        data: refreshed.value.originalTransaction.data,
+      });
+      expect(buyGem.functionName).toBe('buyGem');
+      const expectedGemAmt = (usdcFromUsdsViaBuyGem(actualUsdsOut, liveTout) * 9995n) / 10_000n;
+      expect(buyGem.args?.[1]).toBe(expectedGemAmt);
+    });
+
+    it('uses a lower live tout when refreshing phase 2', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 5 });
+      const shares = parseUnits('1000', 18);
+      const usdsOut = parseUnits('1005', 18);
+      const planTimeTout = 10n ** 16n;
+      const liveTout = 0n;
+      let toutReads = 0;
+
+      const mock = installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'previewRedeem') return usdsOut;
+        if (functionName === 'tout') {
+          toutReads += 1;
+          return toutReads === 1 ? planTimeTout : liveTout;
+        }
+        throw new Error(`unexpected read ${functionName}`);
+      });
+      Object.assign(mock, {
+        getTransactionReceipt: async () =>
+          makeSusdsWithdrawReceipt({
+            shares,
+            assets: usdsOut,
+          }),
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 1,
+        amount: shares,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+      const phase2 = result.value.steps[1];
+      if (phase2?.__typename !== 'Erc20ApprovalRequired') return;
+
+      const refreshed = await phase2.refresh!({
+        previousTxHash: REDEEM_TX_HASH,
+      });
+
+      expect(refreshed.isOk()).toBe(true);
+      if (!refreshed.isOk()) return;
+      const buyGem = decodeFunctionData({
+        abi: usdsPsmWrapperAbi,
+        data: refreshed.value.originalTransaction.data,
+      });
+      const expectedGemAmt = (usdcFromUsdsViaBuyGem(usdsOut, liveTout) * 9995n) / 10_000n;
+      expect(buyGem.args?.[1]).toBe(expectedGemAmt);
+    });
+
+    it('executes refreshed phase 2 instead of the stale fallback calldata', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 0 });
+      const shares = parseUnits('1000', 18);
+      const usdsOut = parseUnits('1000', 18);
+      const planTimeTout = 0n;
+      const liveTout = 10n ** 16n;
+      let toutReads = 0;
+
+      const mock = installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'previewRedeem') return usdsOut;
+        if (functionName === 'tout') {
+          toutReads += 1;
+          return toutReads === 1 ? planTimeTout : liveTout;
+        }
+        throw new Error(`unexpected read ${functionName}`);
+      });
+      Object.assign(mock, {
+        getTransactionReceipt: async () =>
+          makeSusdsWithdrawReceipt({
+            shares,
+            assets: usdsOut,
+          }),
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 1,
+        amount: shares,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+
+      const fallbackPhase2 =
+        result.value.__typename === 'MultiStepExecution' ? result.value.steps[1] : undefined;
+      if (fallbackPhase2?.__typename !== 'Erc20ApprovalRequired') return;
+      const fallbackGemAmt = decodeFunctionData({
+        abi: usdsPsmWrapperAbi,
+        data: fallbackPhase2.originalTransaction.data,
+      }).args?.[1];
+
+      const calls: TransactionRequest[] = [];
+      const executor: SingleTxExecutor = (tx) => {
+        calls.push(tx);
+        const hash =
+          calls.length === 1
+            ? REDEEM_TX_HASH
+            : (`0x${calls.length.toString().padStart(64, '0')}` as `0x${string}`);
+        return okAsync(hash);
+      };
+
+      const execution = await runExecutionPlan(result.value, executor);
+
+      expect(execution.isOk()).toBe(true);
+      expect(calls).toHaveLength(3);
+      const executedBuyGem = decodeFunctionData({
+        abi: usdsPsmWrapperAbi,
+        data: calls[2]!.data,
+      });
+      const refreshedGemAmt = executedBuyGem.args?.[1];
+      expect(refreshedGemAmt).toBe(usdcFromUsdsViaBuyGem(usdsOut, liveTout));
+      expect(refreshedGemAmt).not.toBe(fallbackGemAmt);
+    });
+
+    it('returns UnexpectedError when the redeem receipt has no matching Withdraw log', async () => {
+      const client = OseroClient.create();
+      const shares = parseUnits('1000', 18);
+      const usdsOut = parseUnits('1005', 18);
+      const mock = installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'previewRedeem') return usdsOut;
+        if (functionName === 'tout') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+      Object.assign(mock, {
+        getTransactionReceipt: async () =>
+          ({
+            logs: [],
+          }) as unknown as TransactionReceipt,
+      });
+
+      const result = await redeemSUsds(client, {
+        chainId: 1,
+        amount: shares,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+      if (result.value.__typename !== 'MultiStepExecution') return;
+      const phase2 = result.value.steps[1];
+      if (phase2?.__typename !== 'Erc20ApprovalRequired') return;
+
+      const refreshed = await phase2.refresh!({
+        previousTxHash: REDEEM_TX_HASH,
+      });
+
+      expect(refreshed.isErr()).toBe(true);
+      if (refreshed.isErr()) {
+        expect(refreshed.error).toBeInstanceOf(UnexpectedError);
+        expect(refreshed.error.message).toContain('Could not find the sUSDS Withdraw event');
+      }
     });
   });
 
