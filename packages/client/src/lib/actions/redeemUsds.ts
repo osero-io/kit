@@ -3,7 +3,7 @@ import { type Address, encodeFunctionData } from 'viem';
 import { litePsmAbi } from '../abis/litePsm.js';
 import { psm3Abi } from '../abis/psm3.js';
 import { usdsPsmWrapperAbi } from '../abis/usdsPsmWrapper.js';
-import { PSM_ADDRESSES } from '../addresses.js';
+import { ensurePsmTargetHasCode, resolvePsmAddresses } from '../addresses.js';
 import { type ChainMetadata, getChain } from '../chains.js';
 import { UnexpectedError, UnsupportedChainError, ValidationError } from '../errors.js';
 import { applySlippage, usdcFromUsdsViaBuyGem } from '../math.js';
@@ -11,7 +11,7 @@ import type { OseroClient } from '../OseroClient.js';
 import { makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
 import { errAsync, ResultAsync } from '../result.js';
-import { getToken } from '../tokens.js';
+import { resolveToken } from '../tokens.js';
 import type { Erc20ApprovalRequired } from '../types.js';
 
 /**
@@ -168,8 +168,8 @@ function buildMainnetPlan(
   request: RedeemUsdsRequest,
   receiver: Address,
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
-  const usds = getToken(chain.chainId, 'USDS');
-  const psmAddresses = PSM_ADDRESSES[chain.chainId];
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
+  const psmAddresses = resolvePsmAddresses(client.config, chain.chainId);
   const wrapperAddress = psmAddresses.psm;
   const litePsmAddress = psmAddresses.litePsm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
@@ -182,39 +182,41 @@ function buildMainnetPlan(
     );
   }
 
-  return quoteMainnetRedeemUsds(client, chain, request.amount, litePsmAddress).map(
-    (baseGemAmt): Erc20ApprovalRequired => {
-      // Exact-in from the caller's point of view: the caller is
-      // willing to spend up to `request.amount` USDS. We back out
-      // `gemAmt` (USDC out, 6-dec) from the wrapper's exact-out
-      // formula, then reduce it by `slippageBps` so that a small
-      // `tout` bump between plan and execution still leaves the
-      // approval large enough to cover the pulled USDS.
-      const gemAmt = applySlippage(baseGemAmt, slippageBps);
+  return ensurePsmTargetHasCode(client, chain.chainId, wrapperAddress).andThen(() =>
+    quoteMainnetRedeemUsds(client, chain, request.amount, litePsmAddress).map(
+      (baseGemAmt): Erc20ApprovalRequired => {
+        // Exact-in from the caller's point of view: the caller is
+        // willing to spend up to `request.amount` USDS. We back out
+        // `gemAmt` (USDC out, 6-dec) from the wrapper's exact-out
+        // formula, then reduce it by `slippageBps` so that a small
+        // `tout` bump between plan and execution still leaves the
+        // approval large enough to cover the pulled USDS.
+        const gemAmt = applySlippage(baseGemAmt, slippageBps);
 
-      const buyGemData = encodeFunctionData({
-        abi: usdsPsmWrapperAbi,
-        functionName: 'buyGem',
-        args: [receiver, gemAmt],
-      });
+        const buyGemData = encodeFunctionData({
+          abi: usdsPsmWrapperAbi,
+          functionName: 'buyGem',
+          args: [receiver, gemAmt],
+        });
 
-      const mainTransaction = makeTransactionRequest({
-        chainId: chain.chainId,
-        from: request.sender,
-        to: wrapperAddress,
-        data: buyGemData,
-        operation: 'REDEEM_USDS_FOR_USDC',
-      });
+        const mainTransaction = makeTransactionRequest({
+          chainId: chain.chainId,
+          from: request.sender,
+          to: wrapperAddress,
+          data: buyGemData,
+          operation: 'REDEEM_USDS_FOR_USDC',
+        });
 
-      return makeSingleApprovalPlan({
-        chainId: chain.chainId,
-        from: request.sender,
-        token: usds.address,
-        spender: wrapperAddress,
-        amount: request.amount,
-        mainTransaction,
-      });
-    },
+        return makeSingleApprovalPlan({
+          chainId: chain.chainId,
+          from: request.sender,
+          token: usds.address,
+          spender: wrapperAddress,
+          amount: request.amount,
+          mainTransaction,
+        });
+      },
+    ),
   );
 }
 
@@ -225,44 +227,48 @@ function buildL2Plan(
   receiver: Address,
   referralCode: bigint,
 ): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
-  const usdc = getToken(chain.chainId, 'USDC');
-  const usds = getToken(chain.chainId, 'USDS');
-  const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
+  const psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
-  return quoteL2RedeemUsds(client, chain, request.amount).map((quote): Erc20ApprovalRequired => {
-    const minAmountOut = applySlippage(quote, slippageBps);
+  return ensurePsmTargetHasCode(client, chain.chainId, psmAddress).andThen(() =>
+    quoteL2RedeemUsds(client, chain, request.amount, psmAddress).map(
+      (quote): Erc20ApprovalRequired => {
+        const minAmountOut = applySlippage(quote, slippageBps);
 
-    const swapData = encodeFunctionData({
-      abi: psm3Abi,
-      functionName: 'swapExactIn',
-      args: [usds.address, usdc.address, request.amount, minAmountOut, receiver, referralCode],
-    });
+        const swapData = encodeFunctionData({
+          abi: psm3Abi,
+          functionName: 'swapExactIn',
+          args: [usds.address, usdc.address, request.amount, minAmountOut, receiver, referralCode],
+        });
 
-    const mainTransaction = makeTransactionRequest({
-      chainId: chain.chainId,
-      from: request.sender,
-      to: psmAddress,
-      data: swapData,
-      operation: 'REDEEM_USDS_FOR_USDC',
-    });
+        const mainTransaction = makeTransactionRequest({
+          chainId: chain.chainId,
+          from: request.sender,
+          to: psmAddress,
+          data: swapData,
+          operation: 'REDEEM_USDS_FOR_USDC',
+        });
 
-    return makeSingleApprovalPlan({
-      chainId: chain.chainId,
-      from: request.sender,
-      token: usds.address,
-      spender: psmAddress,
-      amount: request.amount,
-      mainTransaction,
-    });
-  });
+        return makeSingleApprovalPlan({
+          chainId: chain.chainId,
+          from: request.sender,
+          token: usds.address,
+          spender: psmAddress,
+          amount: request.amount,
+          mainTransaction,
+        });
+      },
+    ),
+  );
 }
 
 function quoteMainnetRedeemUsds(
   client: OseroClient,
   chain: ChainMetadata,
   amount: bigint,
-  litePsmAddress = PSM_ADDRESSES[chain.chainId].litePsm,
+  litePsmAddress = resolvePsmAddresses(client.config, chain.chainId).litePsm,
 ): ResultAsync<bigint, UnexpectedError> {
   if (!litePsmAddress) {
     return errAsync(
@@ -274,24 +280,26 @@ function quoteMainnetRedeemUsds(
 
   const publicClient = client.getPublicClient(chain.chainId);
 
-  return ResultAsync.fromPromise(
-    publicClient.readContract({
-      address: litePsmAddress,
-      abi: litePsmAbi,
-      functionName: 'tout',
-    }),
-    (err) => UnexpectedError.from(err),
-  ).map((tout) => usdcFromUsdsViaBuyGem(amount, tout));
+  return ensurePsmTargetHasCode(client, chain.chainId, litePsmAddress, 'Lite PSM').andThen(() =>
+    ResultAsync.fromPromise(
+      publicClient.readContract({
+        address: litePsmAddress,
+        abi: litePsmAbi,
+        functionName: 'tout',
+      }),
+      (err) => UnexpectedError.from(err),
+    ).map((tout) => usdcFromUsdsViaBuyGem(amount, tout)),
+  );
 }
 
 function quoteL2RedeemUsds(
   client: OseroClient,
   chain: ChainMetadata,
   amount: bigint,
+  psmAddress = resolvePsmAddresses(client.config, chain.chainId).psm,
 ): ResultAsync<bigint, UnexpectedError> {
-  const usdc = getToken(chain.chainId, 'USDC');
-  const usds = getToken(chain.chainId, 'USDS');
-  const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
+  const usdc = resolveToken(client.config, chain.chainId, 'USDC');
+  const usds = resolveToken(client.config, chain.chainId, 'USDS');
   const publicClient = client.getPublicClient(chain.chainId);
 
   return ResultAsync.fromPromise(

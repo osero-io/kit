@@ -17,6 +17,8 @@ export type MockReadRouter = (args: {
   readonly args?: readonly unknown[];
 }) => unknown;
 
+type MockGetCode = (args: { readonly address: `0x${string}` }) => Promise<`0x${string}`>;
+
 /**
  * Install a fake viem public client onto the given OseroClient for a
  * specific chain. Returns the fake so tests can inspect call
@@ -28,7 +30,7 @@ export function installMockPublicClient(
   client: OseroClient,
   chainId: OseroChainId,
   router: MockReadRouter,
-): { readContract: ReturnType<typeof vi.fn> } {
+): { readContract: ReturnType<typeof vi.fn>; getCode: ReturnType<typeof vi.fn> } {
   // Wrap the router in an async function so that synchronous throws
   // inside the router turn into rejected promises. Without this, a
   // `throw` in the router escapes up the stack and crashes the caller
@@ -37,6 +39,7 @@ export function installMockPublicClient(
     readContract: vi.fn<(args: Parameters<MockReadRouter>[0]) => Promise<unknown>>(async (args) =>
       router(args),
     ),
+    getCode: vi.fn<MockGetCode>(async () => '0x1' as const),
   };
   // Cast through `unknown` because the mock only implements the
   // subset of viem's PublicClient surface that actions actually use.

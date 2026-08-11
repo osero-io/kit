@@ -6,6 +6,7 @@ import { DEFAULT_REFERRAL_CODE, resolveReferralCode, validateReferralCode } from
 function makeResolvedConfig(overrides: Partial<ResolvedClientConfig> = {}): ResolvedClientConfig {
   return {
     transports: {},
+    addressOverrides: {},
     defaultSlippageBps: 5,
     confirmations: 1,
     defaultReferralCode: DEFAULT_REFERRAL_CODE,

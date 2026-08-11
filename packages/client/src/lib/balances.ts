@@ -5,7 +5,7 @@ import { getChain } from './chains.js';
 import { UnexpectedError, UnsupportedChainError } from './errors.js';
 import type { OseroClient } from './OseroClient.js';
 import { ResultAsync, errAsync } from './result.js';
-import { getToken, type TokenSymbol } from './tokens.js';
+import { resolveToken, type TokenSymbol } from './tokens.js';
 
 export type GetTokenBalanceRequest = {
   readonly chainId: number;
@@ -27,7 +27,7 @@ export type TokenBalances = {
 export type GetTokenBalanceError = UnsupportedChainError | UnexpectedError;
 
 /**
- * Read a wallet's balance for one canonical Osero token on a supported chain.
+ * Read a wallet's balance for one configured Osero token on a supported chain.
  */
 export function getTokenBalance(
   client: OseroClient,
@@ -38,7 +38,7 @@ export function getTokenBalance(
     return errAsync(new UnsupportedChainError(request.chainId));
   }
 
-  const token = getToken(chain.chainId, request.token);
+  const token = resolveToken(client.config, chain.chainId, request.token);
   const publicClient = client.getPublicClient(chain.chainId);
 
   return ResultAsync.fromPromise(

@@ -1,7 +1,9 @@
-import type { Transport } from 'viem';
+import { getAddress, type Address, type Transport } from 'viem';
 
+import type { PsmAddressOverrides } from './addresses.js';
 import type { OseroChainId } from './chains.js';
 import { DEFAULT_REFERRAL_CODE } from './referrals.js';
+import type { TokenAddressOverrides, TokenSymbol } from './tokens.js';
 
 /**
  * Configuration options accepted by {@link OseroClient.create}.
@@ -30,6 +32,27 @@ export type ClientConfig = {
    * ```
    */
   readonly transports?: Partial<Record<OseroChainId, Transport>>;
+
+  /**
+   * Optional PSM contract address overrides keyed by chain ID. Use this
+   * when a chain migrates to a new PSM deployment before the SDK's
+   * built-in address table has been updated.
+   *
+   * Omitted fields fall back to the SDK defaults, so callers can
+   * override only the address that changed. Addresses are validated
+   * and checksummed when the client is created.
+   */
+  readonly addressOverrides?: PsmAddressOverrides;
+
+  /**
+   * Optional USDC / USDS / sUSDS address overrides keyed by chain ID.
+   * This is an escape hatch for contract migrations before the SDK's
+   * built-in token registry has been updated.
+   *
+   * Omitted symbols fall back to the SDK defaults. Addresses are
+   * validated and checksummed when the client is created.
+   */
+  readonly tokenOverrides?: TokenAddressOverrides;
 
   /**
    * Default slippage tolerance, in basis points, applied by actions
@@ -64,13 +87,17 @@ export type ClientConfig = {
 };
 
 /**
- * The fully-resolved shape of {@link ClientConfig}. Every optional
- * field has been filled in with its default.
+ * The resolved shape of {@link ClientConfig}. Values returned by
+ * {@link resolveConfig} include normalized override maps; those maps
+ * stay optional in the exported type so adding them does not break
+ * callers that type their own resolved config objects.
  *
  * @internal
  */
 export type ResolvedClientConfig = {
   readonly transports: Partial<Record<OseroChainId, Transport>>;
+  readonly addressOverrides?: PsmAddressOverrides;
+  readonly tokenOverrides?: TokenAddressOverrides;
   readonly defaultSlippageBps: number;
   readonly confirmations: number;
   readonly defaultReferralCode: bigint | undefined;
@@ -85,8 +112,62 @@ export function resolveConfig(config: ClientConfig): ResolvedClientConfig {
 
   return {
     transports: config.transports ?? {},
+    addressOverrides: normalizePsmAddressOverrides(config.addressOverrides),
+    tokenOverrides: normalizeTokenAddressOverrides(config.tokenOverrides),
     defaultSlippageBps: config.defaultSlippageBps ?? 5,
     confirmations: config.confirmations ?? 1,
     defaultReferralCode,
   };
+}
+
+function normalizeAddress(address: Address): Address {
+  return getAddress(address) as Address;
+}
+
+function normalizePsmAddressOverrides(
+  overrides: PsmAddressOverrides | undefined,
+): PsmAddressOverrides {
+  const resolved: Partial<Record<OseroChainId, NonNullable<PsmAddressOverrides[OseroChainId]>>> =
+    {};
+
+  for (const [rawChainId, chainOverrides] of Object.entries(overrides ?? {})) {
+    const chainId = Number(rawChainId) as OseroChainId;
+    const normalized: { psm?: Address; litePsm?: Address } = {};
+
+    if (chainOverrides.psm !== undefined) {
+      normalized.psm = normalizeAddress(chainOverrides.psm);
+    }
+    if (chainOverrides.litePsm !== undefined) {
+      normalized.litePsm = normalizeAddress(chainOverrides.litePsm);
+    }
+
+    resolved[chainId] = normalized;
+  }
+
+  return resolved;
+}
+
+const TOKEN_SYMBOLS = ['USDC', 'USDS', 'sUSDS'] as const satisfies readonly TokenSymbol[];
+
+function normalizeTokenAddressOverrides(
+  overrides: TokenAddressOverrides | undefined,
+): TokenAddressOverrides {
+  const resolved: Partial<Record<OseroChainId, NonNullable<TokenAddressOverrides[OseroChainId]>>> =
+    {};
+
+  for (const [rawChainId, chainOverrides] of Object.entries(overrides ?? {})) {
+    const chainId = Number(rawChainId) as OseroChainId;
+    const normalized: NonNullable<TokenAddressOverrides[OseroChainId]> = {};
+
+    for (const symbol of TOKEN_SYMBOLS) {
+      const address = chainOverrides[symbol];
+      if (address !== undefined) {
+        normalized[symbol] = normalizeAddress(address);
+      }
+    }
+
+    resolved[chainId] = normalized;
+  }
+
+  return resolved;
 }

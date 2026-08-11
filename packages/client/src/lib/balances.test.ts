@@ -11,6 +11,7 @@ import { OseroClient } from './OseroClient.js';
 import { getToken } from './tokens.js';
 
 const ACCOUNT = '0x1111111111111111111111111111111111111111' as const;
+const USDS_OVERRIDE = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const;
 
 describe('balance helpers', () => {
   it('reads the requested token balance', async () => {
@@ -27,6 +28,32 @@ describe('balance helpers', () => {
       chainId: 8453,
       account: ACCOUNT,
       token: 'USDS',
+    });
+
+    expect(mock.readContract).toHaveBeenCalledOnce();
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value).toBe(balance);
+    }
+  });
+
+  it('uses configured token address overrides for balance reads', async () => {
+    const client = OseroClient.create({
+      tokenOverrides: {
+        8453: { USDS: USDS_OVERRIDE },
+      },
+    });
+    const balance = 42n;
+    const mock = installMockPublicClient(client, 8453, ({ address, functionName, args }) => {
+      expect(address).toBe(client.config.tokenOverrides?.[8453]?.USDS);
+      expect(functionName).toBe('balanceOf');
+      expect(args).toEqual([ACCOUNT]);
+      return balance;
+    });
+
+    const result = await getUsdsBalance(client, {
+      chainId: 8453,
+      account: ACCOUNT,
     });
 
     expect(mock.readContract).toHaveBeenCalledOnce();

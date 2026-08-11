@@ -49,7 +49,7 @@ Never throw from an action path. Errors are typed classes in `src/lib/errors.ts`
 
 ### Chain/token registry
 
-`src/lib/chains.ts` (`SUPPORTED_CHAIN_IDS`, `CHAINS`, `isSupportedChainId`), `src/lib/tokens.ts`, and `src/lib/addresses.ts` are the single source of truth — any new chain requires updating all three plus the `PSM_ADDRESSES` entry (and a `litePsm` entry if mainnet-style). `isMainnet` is semantic (only chain ID 1) because it switches the action flow, not a geographic flag.
+`src/lib/chains.ts` (`SUPPORTED_CHAIN_IDS`, `CHAINS`, `isSupportedChainId`), `src/lib/tokens.ts`, and `src/lib/addresses.ts` are the canonical defaults — any new chain requires updating all three plus the `PSM_ADDRESSES` entry (and a `litePsm` entry if mainnet-style). `ClientConfig.addressOverrides` and `ClientConfig.tokenOverrides` are runtime escape hatches for contract migrations before the SDK is updated; action code should resolve through `resolvePsmAddresses` / `resolveToken` instead of reading the raw registries directly. `isMainnet` is semantic (only chain ID 1) because it switches the action flow, not a geographic flag.
 
 ## Code style
 

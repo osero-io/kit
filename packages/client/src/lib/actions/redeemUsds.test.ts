@@ -11,6 +11,9 @@ import { installMockPublicClient } from './_testing.js';
 import { previewRedeemUsds, redeemUsds } from './redeemUsds.js';
 
 const SENDER = '0x1111111111111111111111111111111111111111' as const;
+const PSM_OVERRIDE = '0x3333333333333333333333333333333333333333' as const;
+const LITE_PSM_OVERRIDE = '0x4444444444444444444444444444444444444444' as const;
+const USDS_OVERRIDE = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' as const;
 
 describe('redeemUsds', () => {
   it('rejects an unsupported chain', async () => {
@@ -168,6 +171,43 @@ describe('redeemUsds', () => {
       expect(main.args?.[0]).toBe(SENDER);
       expect(main.args?.[1]).toBe(expectedGemAmt);
       expect(plan.originalTransaction.operation).toBe('REDEEM_USDS_FOR_USDC');
+    });
+
+    it('uses configured PSM, Lite PSM, and USDS overrides throughout the mainnet plan', async () => {
+      const client = OseroClient.create({
+        defaultSlippageBps: 5,
+        addressOverrides: {
+          1: {
+            psm: PSM_OVERRIDE,
+            litePsm: LITE_PSM_OVERRIDE,
+          },
+        },
+        tokenOverrides: {
+          1: {
+            USDS: USDS_OVERRIDE,
+          },
+        },
+      });
+      const tout = 0n;
+      const mock = installMockPublicClient(client, 1, ({ address, functionName }) => {
+        expect(address).toBe(LITE_PSM_OVERRIDE);
+        if (functionName === 'tout') return tout;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const amount = parseUnits('1000', 18);
+      const result = await redeemUsds(client, {
+        chainId: 1,
+        amount,
+        sender: SENDER,
+      });
+      if (!result.isOk()) throw result.error;
+
+      expect(mock.getCode).toHaveBeenCalledWith({ address: PSM_OVERRIDE });
+      expect(mock.getCode).toHaveBeenCalledWith({ address: LITE_PSM_OVERRIDE });
+      expect(result.value.approvals[0]!.token).toBe(client.config.tokenOverrides?.[1]?.USDS);
+      expect(result.value.approvals[0]!.spender).toBe(PSM_OVERRIDE);
+      expect(result.value.originalTransaction.to).toBe(PSM_OVERRIDE);
     });
   });
 

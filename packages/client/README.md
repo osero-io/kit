@@ -207,7 +207,7 @@ type Request = {
 
 ## Balance helpers
 
-`@osero/client` also exposes read-only helpers for canonical token
+`@osero/client` also exposes read-only helpers for configured token
 balances so callers can stick with the SDK's chain registry and public
 client wiring instead of dropping down to raw ERC-20 reads.
 
@@ -224,7 +224,7 @@ import {
 Choose the helper that matches the job:
 
 - `getTokenBalance(client, { chainId, account, token })` reads one of
-  the three canonical symbols: `USDC`, `USDS`, or `sUSDS`
+  the three configured symbols: `USDC`, `USDS`, or `sUSDS`
 - `getTokenBalances(client, { chainId, account })` returns all three
   balances in one keyed result object
 - `getUsdcBalance`, `getUsdsBalance`, and `getSUsdsBalance` keep the
@@ -450,7 +450,8 @@ Plans come in three shapes:
 ## Supported chains & contracts
 
 All addresses live in the source tree in `src/lib/addresses.ts` and
-`src/lib/tokens.ts`, and are re-exported from the package root:
+`src/lib/tokens.ts`, and are re-exported from the package root. These
+registries are the SDK defaults.
 
 ```ts
 import { SUPPORTED_CHAIN_IDS, CHAINS, PSM_ADDRESSES, getToken } from '@osero/client';
@@ -458,6 +459,33 @@ import { SUPPORTED_CHAIN_IDS, CHAINS, PSM_ADDRESSES, getToken } from '@osero/cli
 console.log(PSM_ADDRESSES[8453].psm); // Spark PSM3 on Base
 console.log(getToken(1, 'sUSDS').address); // sUSDS on mainnet
 ```
+
+When Spark or Sky migrates a contract before this package is updated,
+configure per-chain overrides at client creation time:
+
+```ts
+const client = OseroClient.create({
+  addressOverrides: {
+    8453: { psm: '0x3333333333333333333333333333333333333333' },
+    1: { litePsm: '0x4444444444444444444444444444444444444444' },
+  },
+  tokenOverrides: {
+    8453: {
+      USDC: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      USDS: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      sUSDS: '0xcccccccccccccccccccccccccccccccccccccccc',
+    },
+  },
+});
+```
+
+Omitted fields keep using the SDK defaults. Overrides are normalized
+with viem's `getAddress`, so invalid addresses are rejected when the
+client is created. Before returning plans or previews that depend on a
+configured PSM, Lite PSM, or sUSDS vault target, the SDK performs
+`eth_getCode` checks and returns an `UnexpectedError` if the target has
+no deployed bytecode. Those checks add one or more read RPCs to affected
+calls.
 
 ## Building & testing
 

@@ -17,7 +17,7 @@ export {
 } from './lib/adapters.js';
 
 // Addresses -------------------------------------------------------------
-export { PSM_ADDRESSES, type PsmAddresses } from './lib/addresses.js';
+export { PSM_ADDRESSES, type PsmAddresses, type PsmAddressOverrides } from './lib/addresses.js';
 
 // APY / SSR -------------------------------------------------------------
 export {
@@ -179,7 +179,13 @@ export {
 } from './lib/result.js';
 
 // Tokens ----------------------------------------------------------------
-export { getToken, listTokens, type Token, type TokenSymbol } from './lib/tokens.js';
+export {
+  getToken,
+  listTokens,
+  type Token,
+  type TokenAddressOverrides,
+  type TokenSymbol,
+} from './lib/tokens.js';
 
 // Core types ------------------------------------------------------------
 export type {
