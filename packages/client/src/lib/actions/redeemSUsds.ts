@@ -11,9 +11,11 @@ import { applySlippage, usdcFromUsdsViaBuyGem } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from '../plan.js';
 import { resolveReferralCode, validateReferralCode } from '../referrals.js';
-import { errAsync, ResultAsync } from '../result.js';
+import { errAsync, okAsync, ResultAsync } from '../result.js';
 import { getToken } from '../tokens.js';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '../types.js';
+
+const ZERO_USDC_OUTPUT_ERROR = 'amount too small: would produce 0 USDC output';
 
 /**
  * Parameters accepted by {@link redeemSUsds}.
@@ -161,7 +163,7 @@ function buildMainnetPlan(
   chain: ChainMetadata,
   request: RedeemSUsdsRequest,
   receiver: Address,
-): ResultAsync<MultiStepExecution, UnexpectedError> {
+): ResultAsync<MultiStepExecution, ValidationError | UnexpectedError> {
   const usds = getToken(chain.chainId, 'USDS');
   const susds = getToken(chain.chainId, 'sUSDS');
   const psmAddresses = PSM_ADDRESSES[chain.chainId];
@@ -177,8 +179,16 @@ function buildMainnetPlan(
     );
   }
 
-  return readMainnetRedeemSUsdsQuoteInputs(client, chain, request.amount, litePsmAddress).map(
-    ({ usdsOut, tout }): MultiStepExecution => {
+  return readMainnetRedeemSUsdsQuoteInputs(client, chain, request.amount, litePsmAddress).andThen(
+    ({ usdsOut, tout }) => {
+      // Compute the phase 2 output before building the plan so dust
+      // redemptions cannot return a zero-output `buyGem`.
+      const baseGemAmt = usdcFromUsdsViaBuyGem(usdsOut, tout);
+      const gemAmt = applySlippage(baseGemAmt, slippageBps);
+      if (gemAmt === 0n) {
+        return errAsync(ValidationError.forField('amount', ZERO_USDC_OUTPUT_ERROR));
+      }
+
       // Phase 1 — sUSDS.redeem(shares, sender, sender).
       // Sender is both owner and receiver of the USDS, so no
       // allowance is needed. The vault burns `shares` from `sender`
@@ -195,13 +205,6 @@ function buildMainnetPlan(
         data: redeemData,
         operation: 'REDEEM_SUSDS_FOR_USDS',
       });
-
-      // Phase 2 — approve USDS to the wrapper, then buyGem. The
-      // `gemAmt` is computed from `usdsOut` and current `tout`, then
-      // reduced by `slippageBps` to leave headroom for tout
-      // fluctuations.
-      const baseGemAmt = usdcFromUsdsViaBuyGem(usdsOut, tout);
-      const gemAmt = applySlippage(baseGemAmt, slippageBps);
 
       const buyGemData = encodeFunctionData({
         abi: usdsPsmWrapperAbi,
@@ -224,7 +227,7 @@ function buildMainnetPlan(
         mainTransaction: buyGemTx,
       });
 
-      return makeMultiStepPlan([redeemTx, phase2]);
+      return okAsync(makeMultiStepPlan([redeemTx, phase2]));
     },
   );
 }
@@ -235,14 +238,17 @@ function buildL2Plan(
   request: RedeemSUsdsRequest,
   receiver: Address,
   referralCode: bigint,
-): ResultAsync<Erc20ApprovalRequired, UnexpectedError> {
+): ResultAsync<Erc20ApprovalRequired, ValidationError | UnexpectedError> {
   const usdc = getToken(chain.chainId, 'USDC');
   const susds = getToken(chain.chainId, 'sUSDS');
   const psmAddress = PSM_ADDRESSES[chain.chainId].psm;
   const slippageBps = request.slippageBps ?? client.config.defaultSlippageBps;
 
-  return quoteL2RedeemSUsds(client, chain, request.amount).map((quote): Erc20ApprovalRequired => {
+  return quoteL2RedeemSUsds(client, chain, request.amount).andThen((quote) => {
     const minAmountOut = applySlippage(quote, slippageBps);
+    if (minAmountOut === 0n) {
+      return errAsync(ValidationError.forField('amount', ZERO_USDC_OUTPUT_ERROR));
+    }
 
     const swapData = encodeFunctionData({
       abi: psm3Abi,
@@ -258,14 +264,16 @@ function buildL2Plan(
       operation: 'REDEEM_SUSDS_FOR_USDC',
     });
 
-    return makeSingleApprovalPlan({
-      chainId: chain.chainId,
-      from: request.sender,
-      token: susds.address,
-      spender: psmAddress,
-      amount: request.amount,
-      mainTransaction,
-    });
+    return okAsync(
+      makeSingleApprovalPlan({
+        chainId: chain.chainId,
+        from: request.sender,
+        token: susds.address,
+        spender: psmAddress,
+        amount: request.amount,
+        mainTransaction,
+      }),
+    );
   });
 }
 

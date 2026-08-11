@@ -133,6 +133,51 @@ describe('redeemUsds', () => {
   });
 
   describe('mainnet (chain 1)', () => {
+    it('rejects a mainnet redemption that would buy 0 USDC', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 0 });
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tout') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemUsds(client, {
+        chainId: 1,
+        amount: 1n,
+        sender: SENDER,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+        expect(result.error).toMatchObject({
+          context: { field: 'amount' },
+          message: 'amount too small: would produce 0 USDC output',
+        });
+      }
+    });
+
+    it('allows the smallest mainnet redemption that buys 1 USDC atom', async () => {
+      const client = OseroClient.create({ defaultSlippageBps: 0 });
+      installMockPublicClient(client, 1, ({ functionName }) => {
+        if (functionName === 'tout') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemUsds(client, {
+        chainId: 1,
+        amount: 1_000_000_000_000n,
+        sender: SENDER,
+      });
+
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      const main = decodeFunctionData({
+        abi: usdsPsmWrapperAbi,
+        data: result.value.originalTransaction.data,
+      });
+      expect(main.args?.[1]).toBe(1n);
+    });
+
     it('builds an Erc20ApprovalRequired via UsdsPsmWrapper.buyGem', async () => {
       const client = OseroClient.create({ defaultSlippageBps: 5 });
       const tout = 0n;
@@ -172,6 +217,29 @@ describe('redeemUsds', () => {
   });
 
   describe('L2 (chain 42161, Arbitrum)', () => {
+    it('rejects an L2 redemption whose slippage-adjusted minimum output is 0 USDC', async () => {
+      const client = OseroClient.create();
+      installMockPublicClient(client, 42161, ({ functionName }) => {
+        if (functionName === 'previewSwapExactIn') return 0n;
+        throw new Error(`unexpected read ${functionName}`);
+      });
+
+      const result = await redeemUsds(client, {
+        chainId: 42161,
+        amount: 1n,
+        sender: SENDER,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+        expect(result.error).toMatchObject({
+          context: { field: 'amount' },
+          message: 'amount too small: would produce 0 USDC output',
+        });
+      }
+    });
+
     it('builds an Erc20ApprovalRequired via PSM3.swapExactIn(USDS, USDC)', async () => {
       const client = OseroClient.create({ defaultSlippageBps: 5 });
       const quote = 999_500_000n; // 6-dec USDC
