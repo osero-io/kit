@@ -1,7 +1,13 @@
 import { isError, type Signer, type TransactionResponse } from 'ethers';
 
 import { type SingleTxExecutor, runExecutionPlan } from './lib/adapters.js';
-import { CancelError, SigningError, TransactionError, UnexpectedError } from './lib/errors.js';
+import {
+  CancelError,
+  ReceiptPollingError,
+  SigningError,
+  TransactionError,
+  UnexpectedError,
+} from './lib/errors.js';
 import { errAsync, okAsync, ResultAsync } from './lib/result.js';
 import type {
   ExecutionPlan,
@@ -78,13 +84,19 @@ function sendSingleTransaction(
         mapSendError,
       ),
     )
-    .andThen((response: TransactionResponse) =>
-      ResultAsync.fromPromise(response.wait(confirmations), (err) =>
-        UnexpectedError.from(err),
+    .andThen((response: TransactionResponse) => {
+      const txHash = response.hash as `0x${string}`;
+      return ResultAsync.fromPromise(response.wait(confirmations), (err) =>
+        ReceiptPollingError.forTransaction(err, { txHash }),
       ).andThen((receipt) => {
         if (!receipt) {
           return errAsync(
-            UnexpectedError.from(new Error(`ethers wait() returned null for tx ${response.hash}`)),
+            ReceiptPollingError.forTransaction(
+              new Error(`ethers wait() returned null for tx ${response.hash}`),
+              {
+                txHash,
+              },
+            ),
           );
         }
         if (receipt.status === 0) {
@@ -95,8 +107,8 @@ function sendSingleTransaction(
           );
         }
         return okAsync(receipt.hash as `0x${string}`);
-      }),
-    );
+      });
+    });
 }
 
 function buildExecutor(signer: Signer, confirmations: number): SingleTxExecutor {

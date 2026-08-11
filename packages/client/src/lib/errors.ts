@@ -211,16 +211,46 @@ function extractApiErrorMetadata(body: unknown): {
  * Raised for any error that does not fit the other, more specific
  * categories — typically an RPC failure, a network timeout, or an
  * unforeseen runtime exception. Always wraps the underlying error in
- * {@link Error.cause | cause}.
+ * {@link Error.cause | cause}. When the error happens after a transaction
+ * has been broadcast, {@link UnexpectedError.txHash} may contain its hash.
  */
 export class UnexpectedError extends OseroError {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly txHash?: Hex;
+
+  constructor(message: string, options?: ErrorOptions & { readonly txHash?: Hex }) {
     super(message, options);
     this.name = 'UnexpectedError';
+    this.txHash = options?.txHash;
   }
 
-  static from(cause: unknown): UnexpectedError {
-    if (cause instanceof UnexpectedError) return cause;
-    return new UnexpectedError(extractMessage(cause, 'An unexpected error occurred'), { cause });
+  static from(cause: unknown, options?: { readonly txHash?: Hex }): UnexpectedError {
+    if (cause instanceof UnexpectedError && !options?.txHash) return cause;
+    return new UnexpectedError(extractMessage(cause, 'An unexpected error occurred'), {
+      ...options,
+      cause,
+    });
+  }
+}
+
+/**
+ * Raised when a transaction was broadcast successfully but the adapter
+ * could not obtain a usable receipt for it. The transaction may still
+ * be pending or mined later; callers can use {@link ReceiptPollingError.txHash}
+ * to continue tracking it.
+ */
+export class ReceiptPollingError extends UnexpectedError {
+  declare readonly txHash: Hex;
+
+  constructor(message: string, options: ErrorOptions & { readonly txHash: Hex }) {
+    super(message, options);
+    this.name = 'ReceiptPollingError';
+  }
+
+  static forTransaction(cause: unknown, options: { readonly txHash: Hex }): ReceiptPollingError {
+    if (cause instanceof ReceiptPollingError) return cause;
+    return new ReceiptPollingError(extractMessage(cause, 'Failed to poll transaction receipt'), {
+      ...options,
+      cause,
+    });
   }
 }
