@@ -1,5 +1,12 @@
 export { chain, listChains } from './chains.js';
 export {
+  depositSUsds,
+  previewDepositSUsds,
+  type DepositSUsdsError,
+  type DepositSUsdsRequest,
+  type PreviewDepositSUsdsRequest,
+} from './depositSUsds.js';
+export {
   mintSUsds,
   previewMintSUsds,
   type MintSUsdsError,
