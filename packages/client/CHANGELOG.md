@@ -1,5 +1,16 @@
 # @osero/client
 
+## 1.0.0-next.4
+
+### Minor Changes
+
+- 32d4137: Add an opt-in EIP-5792 wallet adapter.
+
+  The adapter submits pending execution-plan steps as one atomic call batch when the wallet supports
+  it and falls back to sequential viem execution by default. `prepareSwap({ execution: 'atomic-batch' })`
+  marks the plan so a capable wallet must send every pending step in one bundle. Mainnet USDC to sUSDS
+  then sizes the USDS approval and deposit as the 1:1 scaled USDC amount.
+
 ## 1.0.0-next.3
 
 ### Major Changes
@@ -15,6 +26,7 @@
   and the 0x Cross-Chain API, so it reports a single tag either way, and its
   allowance requirements arrive as ordinary Approval Steps bound to the returned
   spender.
+
   - `isOseroApiZeroXProviderDetails` narrows quote Provider Details to the 0x
     support id, curated route, gas and network-fee estimates, and the
     `integratorFee` / `zeroExFee` / `bridgeNativeFee` breakdown.
