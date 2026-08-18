@@ -7,7 +7,7 @@ The v1 API separates five responsibilities:
 1. `OseroClient` owns explicit read transports and safe policy defaults.
 2. `quoteSwap` returns account-free swap economics from a coherent block snapshot.
 3. `prepareSwap` reads a fresh quote and binds it to an immutable, account-specific execution plan.
-4. An executor adapter (`/viem`, `/ethers`, or `/privy`) preflights and executes that plan.
+4. An executor adapter (`/viem`, `/eip5792`, `/ethers`, or `/privy`) preflights and executes that plan.
 5. The hosted API client (`/api`) decodes untrusted responses, verifies transaction integrity, and prepares allowance-aware plans.
 
 Every operational API returns `Result` or `ResultAsync`. Invalid runtime input, RPC failures, wallet mismatch, transaction failure, and completion timeout are values—not thrown exceptions. Constructors may throw `ConfigurationError` for invalid static configuration.
@@ -30,7 +30,7 @@ Requirements:
 
 - Node.js 20 or newer
 - ESM
-- viem `>=2.21.22 <3`
+- viem `>=2.28.0 <3`
 - ethers v6 for `@osero/client/ethers`
 - `@privy-io/node` v0.19 for `@osero/client/privy`
 
@@ -43,6 +43,7 @@ Requirements:
 | `@osero/client/api`       | Hosted API client and hosted wire/domain types                             |
 | `@osero/client/contracts` | Supported contract ABIs and protocol addresses                             |
 | `@osero/client/viem`      | viem executor                                                              |
+| `@osero/client/eip5792`   | EIP-5792 atomic batch executor with sequential fallback                    |
 | `@osero/client/ethers`    | ethers v6 executor                                                         |
 | `@osero/client/privy`     | Privy server-wallet executor                                               |
 

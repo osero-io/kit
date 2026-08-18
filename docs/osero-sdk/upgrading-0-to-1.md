@@ -7,7 +7,7 @@ This guide uses `0.8.0`, the last 0.x release, as its starting point. The hosted
 Upgrade the package and runtime together:
 
 ```sh
-pnpm add @osero/client@^1.0.0 viem@'>=2.21.22 <3'
+pnpm add @osero/client@^1.0.0 viem@'>=2.28.0 <3'
 ```
 
 Version 1 requires Node.js 20 or newer and ESM. Install `ethers@^6.14.0` or `@privy-io/node@^0.19.0` only when using that adapter.
@@ -242,6 +242,22 @@ const result = await sendWith(walletClient, prepared.value.plan, {
   onProgress: persistProgress,
 });
 ```
+
+### EIP-5792 atomic batches
+
+Import the opt-in EIP-5792 adapter to submit all pending plan steps through one
+`wallet_sendCalls` request when the connected wallet supports atomic batches:
+
+```ts
+import { sendWith } from '@osero/client/eip5792';
+
+const result = await sendWith(walletClient, prepared.value.plan, {
+  confirmations: 2,
+});
+```
+
+The adapter falls back to the viem executor when capability discovery is unavailable or reports
+no atomic support. Set `fallbackToSequential: false` when the application must not fall back.
 
 ### ethers
 
