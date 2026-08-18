@@ -5,6 +5,7 @@
     "./actions": "./dist/lib/actions/index.d.ts",
     "./api": "./dist/api.d.ts",
     "./contracts": "./dist/contracts.d.ts",
+    "./eip5792": "./dist/eip5792.d.ts",
     "./ethers": "./dist/ethers.d.ts",
     "./privy": "./dist/privy.d.ts",
     "./viem": "./dist/viem.d.ts"
@@ -12,6 +13,7 @@
   "declarations": {
     "dist/api.d.ts": "a44094280f7e5114e8d866b6c3b56e6b65022c3281b37ce3f02fe42ed8d11df2",
     "dist/contracts.d.ts": "4d18b93841011fabd29d4c64e31bac87e9f9122f0624a52f398bcf88efe7dacb",
+    "dist/eip5792.d.ts": "4670d3e8557f632c1d7b3787de0b06ab21432eb769a2fd8ad59a14ce8078088c",
     "dist/ethers.d.ts": "8c8261fa887b612f72e23ff8cdf4fa8a4754e3243221e090f64c80b04c73854f",
     "dist/index.d.ts": "f589a98e4540ea97ec1604cb2c043852e5c9cbf4bdb0b250650032bd5acbeda1",
     "dist/lib/abis/erc20.d.ts": "9438041e33188a0b4a7c34bd3d749b206e6de1bb50e9906ad4f65b46f9d2bb1e",

@@ -11,6 +11,7 @@ const expectedEntrypoints = {
   './actions': './dist/lib/actions/index.d.ts',
   './api': './dist/api.d.ts',
   './contracts': './dist/contracts.d.ts',
+  './eip5792': './dist/eip5792.d.ts',
   './ethers': './dist/ethers.d.ts',
   './privy': './dist/privy.d.ts',
   './viem': './dist/viem.d.ts',
