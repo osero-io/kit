@@ -24,7 +24,7 @@
     "dist/lib/abis/ssr.d.ts": "3e8f32c24706e71c73e8f6617f8ca0f452e6d60c2751cea380d68f6c5f188bc7",
     "dist/lib/abis/usdsPsmWrapper.d.ts": "5434dd1cacc1f8494ccfcc14aa70612511b7e2489df3214e99400c325b007b88",
     "dist/lib/actions/index.d.ts": "7c0704ef67f799f4f777044b5647967fba4e8d6cf4e7c3671b046604e3a07c0e",
-    "dist/lib/actions/prepareSwap.d.ts": "dfcdb6c75cd8cf469bd9c6722e44f93adfdaa7bf0c2ae9e58f291394611e98f6",
+    "dist/lib/actions/prepareSwap.d.ts": "129ba2152caf12115e2a82e700238d4189de76cf612dc87d8dfa68797cf91f9d",
     "dist/lib/actions/quoteSwap.d.ts": "0e53aa33a034161ff9b1d7b481eab790bec082d9ddca20731a4863653a1fa4b1",
     "dist/lib/adapters.d.ts": "7e979afb51d19a8cada82952093748d8426da0d2f4bccb66bba89748aa44909c",
     "dist/lib/addresses.d.ts": "029395ff4e9aca2abd9bd0de7f009359015e247351fb757ad2082d0d114abd93",

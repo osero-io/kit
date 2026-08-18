@@ -9,6 +9,7 @@
     "api:quote-swap": "tsx src/api/quote-swap.ts",
     "dry-run:inspect-plan": "tsx src/dry-run/inspect-plan.ts",
     "dry-run:susds-apy": "tsx src/dry-run/susds-apy.ts",
+    "eip5792:mint-susds-mainnet": "tsx src/eip5792/mint-susds-mainnet.ts",
     "viem:mint-usds": "tsx src/viem/mint-usds.ts",
     "viem:mint-susds-mainnet": "tsx src/viem/mint-susds-mainnet.ts",
     "viem:redeem-susds": "tsx src/viem/redeem-susds.ts",
