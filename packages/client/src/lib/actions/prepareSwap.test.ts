@@ -391,7 +391,7 @@ describe('approval policy', () => {
     expect(result.isErr()).toBe(true);
     if (result.isErr()) {
       expect(result.error).toBeInstanceOf(ValidationError);
-      expect(result.error.field).toBe('execution');
+      if (result.error instanceof ValidationError) expect(result.error.field).toBe('execution');
     }
   });
 
