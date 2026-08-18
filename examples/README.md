@@ -63,6 +63,14 @@ pnpm --filter @osero/examples viem:roundtrip
 - `viem:redeem-susds`: prepare, inspect, and execute Base sUSDS → USDC.
 - `viem:roundtrip`: Base USDC → sUSDS → USDC, using the observed share balance for leg two.
 
+## EIP-5792
+
+```bash
+pnpm --filter @osero/examples eip5792:mint-susds-mainnet
+```
+
+- `eip5792:mint-susds-mainnet`: mainnet USDC → sUSDS as one atomic wallet batch. `prepareSwap` sets `execution: 'atomic-batch'` so the USDS approval and deposit use the 1:1 scaled USDC amount. The wallet must support EIP-5792 atomic calls; the example does not fall back to sequential sends.
+
 ## ethers
 
 ```bash

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const workspaceRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = fileURLToPath(new URL('../packages/client/', import.meta.url));
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-const consumerViemVersion = process.env['OSERO_CONSUMER_VIEM_VERSION'] ?? '2.21.22';
+const consumerViemVersion = process.env['OSERO_CONSUMER_VIEM_VERSION'] ?? '2.28.0';
 
 function run(args, cwd, environment = {}) {
   const result = spawnSync(pnpm, args, {
@@ -63,6 +63,7 @@ try {
     'dist/api.js',
     'dist/contracts.js',
     'dist/viem.js',
+    'dist/eip5792.js',
     'dist/ethers.js',
     'dist/privy.js',
     'src/index.ts',
@@ -70,6 +71,7 @@ try {
     'src/api.ts',
     'src/contracts.ts',
     'src/viem.ts',
+    'src/eip5792.ts',
     'src/ethers.ts',
     'src/privy.ts',
   ];
@@ -106,6 +108,7 @@ try {
     './actions',
     './api',
     './contracts',
+    './eip5792',
     './ethers',
     './package.json',
     './privy',
@@ -165,6 +168,7 @@ await import('@osero/client/actions');
 await import('@osero/client/api');
 await import('@osero/client/contracts');
 await import('@osero/client/viem');
+await import('@osero/client/eip5792');
 if (typeof root.OseroClient !== 'function') throw new Error('root runtime export missing');
 for (const subpath of ['ethers', 'privy']) {
   const peer = subpath === 'ethers' ? 'ethers' : '@privy-io/node';
@@ -208,7 +212,8 @@ import { prepareSwap, simulateExecutionPlan } from '@osero/client/actions';
 import { OseroApiClient } from '@osero/client/api';
 import { erc20Abi, PSM_ADDRESSES } from '@osero/client/contracts';
 import { sendWith } from '@osero/client/viem';
-void [OseroClient, parseSlippage, tokenAmount, prepareSwap, simulateExecutionPlan, OseroApiClient, erc20Abi, PSM_ADDRESSES, sendWith];
+import { sendWith as sendWithEip5792, supportsAtomicBatch } from '@osero/client/eip5792';
+void [OseroClient, parseSlippage, tokenAmount, prepareSwap, simulateExecutionPlan, OseroApiClient, erc20Abi, PSM_ADDRESSES, sendWith, sendWithEip5792, supportsAtomicBatch];
 const handler: ExecutionPlanHandler | undefined = undefined;
 void handler;
 `,
@@ -248,6 +253,7 @@ void [resolveConfig, flattenExecutionPlan, OseroApiClient, mintUsds];
   import('@osero/client/api'),
   import('@osero/client/contracts'),
   import('@osero/client/viem'),
+  import('@osero/client/eip5792'),
   import('@osero/client/ethers'),
   import('@osero/client/privy'),
 ]);

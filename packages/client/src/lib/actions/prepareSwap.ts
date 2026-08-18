@@ -20,12 +20,14 @@ import {
   type ConfigurationError,
   type InsufficientAllowanceError,
 } from '../errors.js';
+import { USDC_TO_USDS_SCALE } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import { createExecutionPlan, createTransactionRequest } from '../plan.js';
 import { referralCodeForRoute, resolveReferral } from '../referrals.js';
 import { err, errAsync, ok, ResultAsync, type Result } from '../result.js';
 import type {
   ExecutionPlan,
+  ExecutorRequirements,
   PreparedExactInSwapQuote,
   PreparedExactOutSwapQuote,
   PreparedSwapQuote,
@@ -48,6 +50,12 @@ export type PrepareSwapBaseRequest = {
   readonly approvalPolicy?: ApprovalPolicy;
   /** Required for routes whose deployed contracts cannot enforce a slippage bound. */
   readonly allowUnprotectedSlippage?: boolean;
+  /**
+   * Local plans default to sequential execution. `atomic-batch` marks the plan so a
+   * 5792 wallet must submit every pending step in one bundle. Mainnet USDC to sUSDS
+   * then sizes the USDS approval and deposit as the 1:1 scaled USDC amount.
+   */
+  readonly execution?: ExecutorRequirements['execution'];
 };
 
 export type ExactInSwapRequest<
@@ -127,6 +135,7 @@ type ResolvedRequest = ResolvedSwapQuoteRequest & {
   readonly referral: Referral;
   readonly referralCode: bigint;
   readonly approvalPolicy: ApprovalPolicy;
+  readonly execution: ExecutorRequirements['execution'];
 };
 
 function validateRequest(
@@ -159,6 +168,12 @@ function validateRequest(
       ValidationError.forField('approvalPolicy', 'approvalPolicy must be exact, max, or none'),
     );
   }
+  const execution = request.execution ?? 'sequential';
+  if (execution !== 'sequential' && execution !== 'atomic-batch') {
+    return err(
+      ValidationError.forField('execution', 'execution must be sequential or atomic-batch'),
+    );
+  }
 
   if (quoted.value.slippageEnforcedBy === 'none' && request.allowUnprotectedSlippage !== true) {
     return err(
@@ -176,6 +191,7 @@ function validateRequest(
     referral: configuredReferral,
     referralCode: referralCode.value,
     approvalPolicy,
+    execution,
   });
 }
 
@@ -188,16 +204,44 @@ function encoded(factory: () => Hex): Result<Hex, UnexpectedError> {
 }
 
 function localPlan(
+  request: Pick<ResolvedRequest, 'execution'>,
   steps: readonly TransactionRequest[],
   snapshots: readonly NonNullable<ExecutionPlan['metadata']['allowanceSnapshots']>[number][],
 ): Result<ExecutionPlan, ValidationError> {
   return createExecutionPlan({
     steps,
+    requirements: {
+      execution: request.execution,
+      authorization: 'transactions',
+      sponsored: false,
+      chainTransitions: false,
+    },
     metadata: {
       source: 'local',
       allowanceSnapshots: snapshots,
     },
   });
+}
+
+function usdsFromExactInUsdc(
+  request: ResolvedRequest,
+  evaluation: SwapQuoteEvaluation,
+): Result<bigint, ValidationError | UnexpectedError> {
+  if (request.execution === 'atomic-batch') {
+    if (evaluation.quote.protocolFee.tin !== 0n) {
+      return err(
+        ValidationError.forField(
+          'execution',
+          'atomic-batch USDC to sUSDS requires a 1:1 Lite PSM (tin = 0)',
+        ),
+      );
+    }
+    return ok(request.amount * USDC_TO_USDS_SCALE);
+  }
+  if (evaluation.intermediateUsdsAmount === undefined) {
+    return err(UnexpectedError.from(new Error('Missing quoted intermediate USDS amount')));
+  }
+  return ok(evaluation.intermediateUsdsAmount);
 }
 
 async function preparePsm3Swap(
@@ -265,7 +309,7 @@ async function preparePsm3Swap(
   });
   if (allowance.isErr()) return err(allowance.error);
   const steps = allowance.value.approval ? [allowance.value.approval, main.value] : [main.value];
-  const plan = localPlan(steps, [allowance.value.snapshot]);
+  const plan = localPlan(request, steps, [allowance.value.snapshot]);
   if (plan.isErr()) return err(plan.error);
 
   return ok(withExecutionPlan(quote, plan.value));
@@ -338,6 +382,7 @@ async function prepareMainnetUsdcToUsds(
   });
   if (allowance.isErr()) return err(allowance.error);
   const plan = localPlan(
+    request,
     allowance.value.approval ? [allowance.value.approval, main.value] : [main.value],
     [allowance.value.snapshot],
   );
@@ -354,10 +399,8 @@ async function prepareMainnetUsdcToSUsds(
   const capability = CHAIN_CAPABILITIES[1];
   const { USDC, USDS, sUSDS } = capability.tokens;
   const { psm } = capability.contracts;
-  const usdsOut = evaluation.intermediateUsdsAmount;
-  if (usdsOut === undefined) {
-    return err(UnexpectedError.from(new Error('Missing quoted intermediate USDS amount')));
-  }
+  const usdsOut = usdsFromExactInUsdc(request, evaluation);
+  if (usdsOut.isErr()) return err(usdsOut.error);
   const sellData = encoded(() =>
     encodeFunctionData({
       abi: usdsPsmWrapperAbi,
@@ -371,12 +414,12 @@ async function prepareMainnetUsdcToSUsds(
       ? encodeFunctionData({
           abi: erc4626Abi,
           functionName: 'deposit',
-          args: [usdsOut, request.receiver],
+          args: [usdsOut.value, request.receiver],
         })
       : encodeFunctionData({
           abi: erc4626Abi,
           functionName: 'deposit',
-          args: [usdsOut, request.receiver, Number(request.referralCode)],
+          args: [usdsOut.value, request.receiver, Number(request.referralCode)],
         }),
   );
   if (depositData.isErr()) return err(depositData.error);
@@ -416,7 +459,7 @@ async function prepareMainnetUsdcToSUsds(
       token: USDS.address,
       owner: request.account,
       spender: sUSDS.address,
-      requiredAmount: usdsOut,
+      requiredAmount: usdsOut.value,
       policy: request.approvalPolicy,
       blockNumber,
     }),
@@ -429,7 +472,10 @@ async function prepareMainnetUsdcToSUsds(
     ...(usdsAllowance.value.approval ? [usdsAllowance.value.approval] : []),
     deposit.value,
   ];
-  const plan = localPlan(steps, [usdcAllowance.value.snapshot, usdsAllowance.value.snapshot]);
+  const plan = localPlan(request, steps, [
+    usdcAllowance.value.snapshot,
+    usdsAllowance.value.snapshot,
+  ]);
   if (plan.isErr()) return err(plan.error);
   return ok(withExecutionPlan(evaluation.quote, plan.value));
 }
@@ -477,6 +523,7 @@ async function prepareMainnetUsdsToSUsds(
   });
   if (allowance.isErr()) return err(allowance.error);
   const plan = localPlan(
+    request,
     allowance.value.approval ? [allowance.value.approval, main.value] : [main.value],
     [allowance.value.snapshot],
   );
@@ -526,6 +573,7 @@ async function prepareMainnetUsdsToSUsdsExactOut(
   });
   if (allowance.isErr()) return err(allowance.error);
   const plan = localPlan(
+    request,
     allowance.value.approval ? [allowance.value.approval, main.value] : [main.value],
     [allowance.value.snapshot],
   );
@@ -555,7 +603,7 @@ async function prepareMainnetSUsdsToUsds(
     operation: 'REDEEM_SUSDS_FOR_USDS',
   });
   if (main.isErr()) return err(main.error);
-  const plan = localPlan([main.value], []);
+  const plan = localPlan(request, [main.value], []);
   if (plan.isErr()) return err(plan.error);
   return ok(withExecutionPlan(evaluation.quote, plan.value));
 }
@@ -582,7 +630,7 @@ async function prepareMainnetSUsdsToUsdsExactOut(
     operation: 'WITHDRAW_USDS_FROM_SUSDS',
   });
   if (main.isErr()) return err(main.error);
-  const plan = localPlan([main.value], []);
+  const plan = localPlan(request, [main.value], []);
   if (plan.isErr()) return err(plan.error);
   return ok(withExecutionPlan(evaluation.quote, plan.value));
 }
@@ -630,6 +678,7 @@ async function prepareMainnetUsdsToUsdcExactOut(
   });
   if (allowance.isErr()) return err(allowance.error);
   const plan = localPlan(
+    request,
     allowance.value.approval ? [allowance.value.approval, main.value] : [main.value],
     [allowance.value.snapshot],
   );
@@ -701,6 +750,7 @@ async function prepareMainnetSUsdsToUsdc(
   });
   if (allowance.isErr()) return err(allowance.error);
   const plan = localPlan(
+    request,
     [redeem.value, ...(allowance.value.approval ? [allowance.value.approval] : []), buy.value],
     [allowance.value.snapshot],
   );

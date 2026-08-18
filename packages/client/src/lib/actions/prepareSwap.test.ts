@@ -6,7 +6,7 @@ import { psm3Abi } from '../abis/psm3.js';
 import { CHAIN_CAPABILITIES, type OseroChainId, type TokenSymbol } from '../capabilities.js';
 import { parseSlippage, referral, tokenAmount, UINT256_MAX, type TokenAmount } from '../domain.js';
 import { InsufficientAllowanceError, ValidationError } from '../errors.js';
-import { applySlippageDown, applySlippageUp } from '../math.js';
+import { applySlippageDown, applySlippageUp, USDC_TO_USDS_SCALE } from '../math.js';
 import { OseroClient, type OseroPublicClient } from '../OseroClient.js';
 import type { Result } from '../result.js';
 import type { PreparedSwapQuote } from '../types.js';
@@ -27,13 +27,14 @@ type Setup = {
   readonly setAllowance: (allowance: bigint) => void;
 };
 
-function setup(chainId: OseroChainId, initialAllowance = 0n): Setup {
+function setup(chainId: OseroChainId, initialAllowance = 0n, tin = 0n): Setup {
   let allowance = initialAllowance;
   const readContract = mockFn(async (args: ReadArgs): Promise<bigint> => {
     switch (args.functionName) {
       case 'allowance':
         return allowance;
       case 'tin':
+        return tin;
       case 'tout':
         return 0n;
       case 'previewSwapExactIn':
@@ -337,7 +338,60 @@ describe('approval policy', () => {
         'APPROVE_ERC20',
         'DEPOSIT_USDS_FOR_SUSDS',
       ]);
+      expect(result.value.plan.requirements.execution).toBe('sequential');
       expect(result.value.plan.metadata.allowanceSnapshots).toHaveLength(2);
+    }
+  });
+
+  it('builds a 1:1 scaled atomic-batch plan for mainnet USDC to sUSDS', async () => {
+    const { client } = setup(1, 0n);
+    const input = amount('USDC');
+    const result = await prepareSwap(client, {
+      mode: 'exact-in',
+      chainId: 1,
+      account: ACCOUNT,
+      amountIn: input,
+      assetOut: 'sUSDS',
+      referral: false,
+      allowUnprotectedSlippage: true,
+      execution: 'atomic-batch',
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.plan.requirements.execution).toBe('atomic-batch');
+      expect(result.value.plan.steps.map((step) => step.operation)).toEqual([
+        'APPROVE_ERC20',
+        'MINT_USDS',
+        'APPROVE_ERC20',
+        'DEPOSIT_USDS_FOR_SUSDS',
+      ]);
+      const decoded = decodeFunctionData({
+        abi: erc4626Abi,
+        data: result.value.plan.steps.at(-1)!.data,
+      });
+      expect(decoded.functionName).toBe('deposit');
+      expect(decoded.args[0]).toBe(input.raw * USDC_TO_USDS_SCALE);
+    }
+  });
+
+  it('rejects atomic-batch USDC to sUSDS when Lite PSM tin is not zero', async () => {
+    const { client } = setup(1, 0n, 10n ** 16n);
+    const result = await prepareSwap(client, {
+      mode: 'exact-in',
+      chainId: 1,
+      account: ACCOUNT,
+      amountIn: amount('USDC'),
+      assetOut: 'sUSDS',
+      referral: false,
+      allowUnprotectedSlippage: true,
+      execution: 'atomic-batch',
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+      if (result.error instanceof ValidationError) expect(result.error.field).toBe('execution');
     }
   });
 
@@ -474,6 +528,24 @@ describe('deterministic validation', () => {
     });
 
     expect(result.isErr()).toBe(true);
+    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid execution mode before RPC', async () => {
+    const { client, publicClient } = setup(1);
+    const result = await prepare(client, {
+      mode: 'exact-in',
+      chainId: 1,
+      account: ACCOUNT,
+      amountIn: amount('USDC'),
+      assetOut: 'sUSDS',
+      referral: false,
+      allowUnprotectedSlippage: true,
+      execution: 'parallel' as never,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ValidationError);
     expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
   });
 

@@ -74,6 +74,12 @@
       "import": "./dist/viem.js",
       "default": "./dist/viem.js"
     },
+    "./eip5792": {
+      "osero-sdk": "./src/eip5792.ts",
+      "types": "./dist/eip5792.d.ts",
+      "import": "./dist/eip5792.js",
+      "default": "./dist/eip5792.js"
+    },
     "./ethers": {
       "osero-sdk": "./src/ethers.ts",
       "types": "./dist/ethers.d.ts",
@@ -105,7 +111,7 @@
   "peerDependencies": {
     "@privy-io/node": "^0.19.0 || ^0.28.0",
     "ethers": "^6.14.0",
-    "viem": ">=2.21.22 <3"
+    "viem": ">=2.28.0 <3"
   },
   "peerDependenciesMeta": {
     "@privy-io/node": {

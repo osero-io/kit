@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "neverthrow": "^8.2.0",
-    "viem": "^2.48.11"
+    "viem": "^2.55.10"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.7",

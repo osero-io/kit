@@ -9,7 +9,7 @@ graph LR
   A[Validated domain input] --> B[prepareSwap]
   B --> C[Rich prepared quote]
   C --> D[Immutable ExecutionPlan]
-  D --> E[Viem / ethers / Privy preflight]
+  D --> E[Viem / EIP-5792 / ethers / Privy preflight]
   E --> F[Sequential confirmed transactions]
 ```
 
@@ -83,6 +83,7 @@ Operational APIs return typed `Result`/`ResultAsync` values. Executor adapters v
 | `@osero/client/api`       | Hosted quotes and cross-chain completion polling                   |
 | `@osero/client/contracts` | Supported ABIs and protocol addresses                              |
 | `@osero/client/viem`      | viem executor                                                      |
+| `@osero/client/eip5792`   | EIP-5792 atomic batch executor with sequential fallback            |
 | `@osero/client/ethers`    | ethers v6 executor                                                 |
 | `@osero/client/privy`     | Privy server-wallet executor                                       |
 
