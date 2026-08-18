@@ -1,226 +1,511 @@
 import type { Address, Hex } from 'viem';
 
+import type { HostedSwapProgressType } from './hostedSwap.js';
+import type { ExecutionPlan, QuoteExpiry, TransactionResult } from './types.js';
+
+export type ExecutionStage =
+  | 'preflight'
+  | 'simulation'
+  | 'signing'
+  | 'broadcast'
+  | 'confirmation'
+  | 'replacement'
+  | 'revert'
+  | 'progress';
+
+export type CompletedExecutionStep = {
+  readonly planId: string;
+  readonly stepId: string;
+  readonly stepIndex: number;
+  readonly operation: string;
+  readonly hash: Hex;
+};
+
+export type ExecutionFailureContext = {
+  readonly planId: string;
+  readonly stepId: string;
+  readonly stepIndex: number;
+  readonly operation: string;
+  readonly stage: ExecutionStage;
+  readonly hash?: Hex;
+  readonly completed: readonly CompletedExecutionStep[];
+};
+
+export type HostedSwapFailureContext = {
+  readonly progressType: HostedSwapProgressType;
+  readonly approvalResults: readonly TransactionResult[];
+  readonly executionResult?: TransactionResult;
+};
+
+export type OseroErrorCode =
+  | 'VALIDATION_ERROR'
+  | 'CONFIGURATION_ERROR'
+  | 'UNSUPPORTED_CHAIN'
+  | 'ACCOUNT_MISMATCH'
+  | 'CHAIN_MISMATCH'
+  | 'UNSUPPORTED_CAPABILITY'
+  | 'INSUFFICIENT_ALLOWANCE'
+  | 'QUOTE_EXPIRED'
+  | 'CANCELLED'
+  | 'SIMULATION_FAILED'
+  | 'SIGNING_FAILED'
+  | 'BROADCAST_FAILED'
+  | 'CONFIRMATION_FAILED'
+  | 'TRANSACTION_REVERTED'
+  | 'RPC_REQUEST_FAILED'
+  | 'API_REQUEST_FAILED'
+  | 'API_TRANSPORT_FAILED'
+  | 'API_RESPONSE_INVALID'
+  | 'TIMEOUT'
+  | 'PROGRESS_CALLBACK_FAILED'
+  | 'APPROVAL_LIMIT_EXCEEDED'
+  | 'QUOTE_REFRESH_LIMIT_EXCEEDED'
+  | 'UNEXPECTED_ERROR';
+
 function extractMessage(cause: unknown, fallback: string): string {
-  if (cause instanceof Error) return cause.message;
-  if (typeof cause === 'string') return cause;
-  return fallback;
+  return cause instanceof Error && cause.message ? cause.message : fallback;
 }
 
-/**
- * Base class for every error produced by the Osero SDK.
- *
- * All SDK errors are instances of {@link OseroError} and expose a unique
- * {@link OseroError.name | name} that can be used to discriminate them
- * inside a `switch` after `.isErr()`.
- */
-export abstract class OseroError extends Error {}
-
-/**
- * Raised when the user cancels a signing or approval prompt in their wallet.
- */
-export class CancelError extends OseroError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = 'CancelError';
+function serialize(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      ...(value.cause === undefined ? {} : { cause: serialize(value.cause) }),
+    };
   }
-
-  static from(cause: unknown): CancelError {
-    return new CancelError(extractMessage(cause, 'The user cancelled the request'), { cause });
-  }
-}
-
-/**
- * Raised when the wallet fails to sign a message or transaction for any
- * reason other than an explicit cancellation.
- */
-export class SigningError extends OseroError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = 'SigningError';
-  }
-
-  static from(cause: unknown): SigningError {
-    return new SigningError(extractMessage(cause, 'Failed to sign the request'), { cause });
-  }
-}
-
-/**
- * Raised when a transaction is submitted but reverts or is otherwise
- * rejected by the network.
- */
-export class TransactionError extends OseroError {
-  readonly txHash: Hex;
-  readonly link?: string;
-
-  constructor(message: string, options: ErrorOptions & { txHash: Hex; link?: string }) {
-    super(message, { cause: options.cause });
-    this.name = 'TransactionError';
-    this.txHash = options.txHash;
-    this.link = options.link;
-  }
-
-  static from(params: {
-    txHash: Hex;
-    link?: string;
-    cause?: unknown;
-    message?: string;
-  }): TransactionError {
-    const message =
-      params.message ?? extractMessage(params.cause, `Transaction ${params.txHash} reverted`);
-    return new TransactionError(message, {
-      txHash: params.txHash,
-      link: params.link,
-      cause: params.cause,
-    });
-  }
-}
-
-/**
- * Raised when user-supplied input is invalid (amount <= 0, unknown token,
- * out-of-range slippage, etc.). The optional {@link ValidationError.field}
- * identifies the input field that failed validation.
- */
-export class ValidationError<Context = unknown> extends OseroError {
-  readonly context: Context;
-
-  constructor(message: string, context: Context, options?: ErrorOptions) {
-    super(message, options);
-    this.name = 'ValidationError';
-    this.context = context;
-  }
-
-  static forField(field: string, message: string): ValidationError<{ field: string }> {
-    return new ValidationError(message, { field });
-  }
-}
-
-/**
- * Raised when the caller targets a chain that is not listed in the
- * {@link CHAINS} registry.
- */
-export class UnsupportedChainError extends OseroError {
-  readonly chainId: number;
-
-  constructor(chainId: number, message?: string) {
-    super(message ?? `Chain ${chainId} is not supported by @osero/client`);
-    this.name = 'UnsupportedChainError';
-    this.chainId = chainId;
-  }
-}
-
-/**
- * Raised when the caller's on-chain balance is not enough to cover an
- * action. Produced by previews and sanity checks that happen before the
- * transaction is broadcast.
- */
-export class InsufficientBalanceError extends OseroError {
-  readonly token: Address;
-  readonly required: bigint;
-  readonly available: bigint;
-
-  constructor(params: { token: Address; required: bigint; available: bigint; message?: string }) {
-    super(
-      params.message ??
-        `Insufficient balance of ${params.token}: required ${params.required}, available ${params.available}`,
+  if (Array.isArray(value)) return value.map(serialize);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, serialize(nested)]),
     );
-    this.name = 'InsufficientBalanceError';
-    this.token = params.token;
-    this.required = params.required;
-    this.available = params.available;
+  }
+  return value;
+}
+
+/** Base class for every stable, public SDK error. */
+export abstract class OseroError<Code extends OseroErrorCode = OseroErrorCode> extends Error {
+  abstract override readonly name: string;
+  abstract readonly code: Code;
+
+  protected constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+  }
+
+  toJSON(): Readonly<Record<string, unknown>> {
+    const fields = Object.fromEntries(
+      Object.entries(this)
+        .filter(([key]) => key !== 'name' && key !== 'code')
+        .map(([key, value]) => [key, serialize(value)]),
+    );
+    return {
+      name: this.name,
+      code: this.code,
+      message: this.message,
+      ...(this.cause === undefined ? {} : { cause: serialize(this.cause) }),
+      ...fields,
+    };
   }
 }
 
-/**
- * Raised when the Osero HTTP API returns a non-2xx response. The
- * normalized fields expose the stable error metadata returned by the API
- * when available, while {@link ApiRequestError.body} keeps the decoded
- * response for callers that need endpoint-specific details.
- */
-export class ApiRequestError extends OseroError {
-  readonly statusCode: number;
-  readonly statusText: string;
-  readonly code?: string;
-  readonly correlationId?: string;
-  readonly body: unknown;
+export class ValidationError extends OseroError<'VALIDATION_ERROR'> {
+  override readonly name = 'ValidationError' as const;
+  readonly code = 'VALIDATION_ERROR' as const;
 
   constructor(
     message: string,
-    options: ErrorOptions & {
-      statusCode: number;
-      statusText: string;
-      code?: string;
-      correlationId?: string;
-      body: unknown;
-    },
+    readonly field: string,
+    readonly details?: Readonly<Record<string, unknown>>,
+    options?: ErrorOptions,
   ) {
-    super(message, { cause: options.cause });
-    this.name = 'ApiRequestError';
-    this.statusCode = options.statusCode;
-    this.statusText = options.statusText;
-    this.code = options.code;
-    this.correlationId = options.correlationId;
-    this.body = options.body;
+    super(message, options);
   }
 
-  static from(params: {
-    statusCode: number;
-    statusText: string;
-    body: unknown;
-    cause?: unknown;
-  }): ApiRequestError {
-    const metadata = extractApiErrorMetadata(params.body);
-    const message =
-      metadata.message ?? `Osero API request failed with ${params.statusCode} ${params.statusText}`;
+  static forField(
+    field: string,
+    message: string,
+    details?: Readonly<Record<string, unknown>>,
+  ): ValidationError {
+    return new ValidationError(message, field, details);
+  }
+}
 
-    return new ApiRequestError(message, {
-      statusCode: params.statusCode,
-      statusText: params.statusText,
-      code: metadata.code,
-      correlationId: metadata.correlationId,
-      body: params.body,
-      cause: params.cause,
+export class ConfigurationError extends OseroError<'CONFIGURATION_ERROR'> {
+  override readonly name = 'ConfigurationError' as const;
+  readonly code = 'CONFIGURATION_ERROR' as const;
+
+  constructor(
+    message: string,
+    readonly field?: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
+/**
+ * A local SDK operation has no contract capability for the requested chain.
+ * Hosted API chains are handled independently by `OseroApiClient` and do not
+ * use this error.
+ */
+export class UnsupportedChainError extends OseroError<'UNSUPPORTED_CHAIN'> {
+  override readonly name = 'UnsupportedChainError' as const;
+  readonly code = 'UNSUPPORTED_CHAIN' as const;
+
+  constructor(readonly chainId: number) {
+    super(`Chain ${chainId} is not supported by this operation`);
+  }
+}
+
+export class AccountMismatchError extends OseroError<'ACCOUNT_MISMATCH'> {
+  override readonly name = 'AccountMismatchError' as const;
+  readonly code = 'ACCOUNT_MISMATCH' as const;
+
+  constructor(
+    readonly expectedAccount: Address,
+    readonly actualAccount: Address,
+    readonly execution?: ExecutionFailureContext,
+  ) {
+    super(`Executor account ${actualAccount} does not match plan account ${expectedAccount}`);
+  }
+}
+
+export class ChainMismatchError extends OseroError<'CHAIN_MISMATCH'> {
+  override readonly name = 'ChainMismatchError' as const;
+  readonly code = 'CHAIN_MISMATCH' as const;
+
+  constructor(
+    readonly expectedChainId: number,
+    readonly actualChainId: number,
+    readonly execution?: ExecutionFailureContext,
+  ) {
+    super(`Executor chain ${actualChainId} does not match plan chain ${expectedChainId}`);
+  }
+}
+
+export class UnsupportedCapabilityError extends OseroError<'UNSUPPORTED_CAPABILITY'> {
+  override readonly name = 'UnsupportedCapabilityError' as const;
+  readonly code = 'UNSUPPORTED_CAPABILITY' as const;
+
+  constructor(
+    readonly capability: string,
+    readonly executor: string,
+  ) {
+    super(`${executor} does not support required capability: ${capability}`);
+  }
+}
+
+export class InsufficientAllowanceError extends OseroError<'INSUFFICIENT_ALLOWANCE'> {
+  override readonly name = 'InsufficientAllowanceError' as const;
+  readonly code = 'INSUFFICIENT_ALLOWANCE' as const;
+
+  constructor(
+    readonly token: Address,
+    readonly owner: Address,
+    readonly spender: Address,
+    readonly required: bigint,
+    readonly allowance: bigint,
+  ) {
+    super(
+      `Allowance ${allowance} for ${token} is below required amount ${required} for spender ${spender}`,
+    );
+  }
+}
+
+export class QuoteExpiredError extends OseroError<'QUOTE_EXPIRED'> {
+  override readonly name = 'QuoteExpiredError' as const;
+  readonly code = 'QUOTE_EXPIRED' as const;
+
+  constructor(
+    readonly plan: ExecutionPlan,
+    readonly quoteExpiresAt: QuoteExpiry,
+  ) {
+    super(`Execution plan ${plan.id} expired with its hosted quote at ${quoteExpiresAt}`);
+  }
+}
+
+export class ApprovalLimitError extends OseroError<'APPROVAL_LIMIT_EXCEEDED'> {
+  override readonly name = 'ApprovalLimitError' as const;
+  readonly code = 'APPROVAL_LIMIT_EXCEEDED' as const;
+
+  constructor(
+    readonly limit: number,
+    readonly approvalResults: readonly TransactionResult[],
+  ) {
+    super(`Hosted Swap Workflow requires more than ${limit} approval transactions`);
+  }
+}
+
+export class QuoteRefreshLimitError extends OseroError<'QUOTE_REFRESH_LIMIT_EXCEEDED'> {
+  override readonly name = 'QuoteRefreshLimitError' as const;
+  readonly code = 'QUOTE_REFRESH_LIMIT_EXCEEDED' as const;
+
+  constructor(
+    readonly limit: number,
+    readonly approvalResults: readonly TransactionResult[],
+  ) {
+    super(`Hosted Swap Workflow requires more than ${limit} Quote Refreshes`);
+  }
+}
+
+abstract class ExecutionError<Code extends OseroErrorCode> extends OseroError<Code> {
+  constructor(
+    message: string,
+    readonly execution?: ExecutionFailureContext,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
+export class ProgressCallbackError extends ExecutionError<'PROGRESS_CALLBACK_FAILED'> {
+  override readonly name = 'ProgressCallbackError' as const;
+  readonly code = 'PROGRESS_CALLBACK_FAILED' as const;
+
+  constructor(
+    message: string,
+    execution?: ExecutionFailureContext,
+    options?: ErrorOptions,
+    readonly hostedSwap?: HostedSwapFailureContext,
+  ) {
+    super(message, execution, options);
+  }
+
+  static from(cause: unknown, execution: ExecutionFailureContext): ProgressCallbackError {
+    return new ProgressCallbackError(
+      extractMessage(cause, 'Execution progress callback failed'),
+      execution,
+      { cause },
+    );
+  }
+
+  static fromHostedSwap(cause: unknown, context: HostedSwapFailureContext): ProgressCallbackError {
+    return new ProgressCallbackError(
+      extractMessage(cause, 'Hosted Swap Workflow progress callback failed'),
+      undefined,
+      { cause },
+      context,
+    );
+  }
+}
+
+export class CancelError extends ExecutionError<'CANCELLED'> {
+  override readonly name = 'CancelError' as const;
+  readonly code = 'CANCELLED' as const;
+
+  static from(cause: unknown, execution?: ExecutionFailureContext): CancelError {
+    return new CancelError(extractMessage(cause, 'Operation was cancelled'), execution, { cause });
+  }
+}
+
+export class SimulationError extends ExecutionError<'SIMULATION_FAILED'> {
+  override readonly name = 'SimulationError' as const;
+  readonly code = 'SIMULATION_FAILED' as const;
+
+  static from(cause: unknown, execution?: ExecutionFailureContext): SimulationError {
+    return new SimulationError(extractMessage(cause, 'Transaction simulation failed'), execution, {
+      cause,
     });
   }
 }
 
-function extractApiErrorMetadata(body: unknown): {
-  readonly code?: string;
-  readonly message?: string;
-  readonly correlationId?: string;
-} {
-  if (body === null || typeof body !== 'object') {
-    return {};
+export class SigningError extends ExecutionError<'SIGNING_FAILED'> {
+  override readonly name = 'SigningError' as const;
+  readonly code = 'SIGNING_FAILED' as const;
+
+  static from(cause: unknown, execution?: ExecutionFailureContext): SigningError {
+    return new SigningError(extractMessage(cause, 'Transaction signing failed'), execution, {
+      cause,
+    });
   }
-
-  const record = body as Record<string, unknown>;
-  const rawMessage = record.message;
-  const message = Array.isArray(rawMessage)
-    ? rawMessage.filter((entry): entry is string => typeof entry === 'string').join(', ')
-    : typeof rawMessage === 'string'
-      ? rawMessage
-      : undefined;
-
-  return {
-    code: typeof record.code === 'string' ? record.code : undefined,
-    message,
-    correlationId: typeof record.correlationId === 'string' ? record.correlationId : undefined,
-  };
 }
 
-/**
- * Raised for any error that does not fit the other, more specific
- * categories — typically an RPC failure, a network timeout, or an
- * unforeseen runtime exception. Always wraps the underlying error in
- * {@link Error.cause | cause}.
- */
-export class UnexpectedError extends OseroError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = 'UnexpectedError';
+export class BroadcastError extends ExecutionError<'BROADCAST_FAILED'> {
+  override readonly name = 'BroadcastError' as const;
+  readonly code = 'BROADCAST_FAILED' as const;
+
+  static from(cause: unknown, execution?: ExecutionFailureContext): BroadcastError {
+    return new BroadcastError(extractMessage(cause, 'Transaction broadcast failed'), execution, {
+      cause,
+    });
+  }
+}
+
+export class ConfirmationError extends ExecutionError<'CONFIRMATION_FAILED'> {
+  override readonly name = 'ConfirmationError' as const;
+  readonly code = 'CONFIRMATION_FAILED' as const;
+
+  static from(cause: unknown, execution: ExecutionFailureContext): ConfirmationError {
+    return new ConfirmationError(
+      extractMessage(cause, 'Transaction confirmation failed'),
+      execution,
+      { cause },
+    );
+  }
+}
+
+export class TransactionError extends ExecutionError<'TRANSACTION_REVERTED'> {
+  override readonly name = 'TransactionError' as const;
+  readonly code = 'TRANSACTION_REVERTED' as const;
+
+  constructor(
+    message: string,
+    readonly txHash: Hex,
+    execution?: ExecutionFailureContext,
+    options?: ErrorOptions,
+  ) {
+    super(message, execution, options);
+  }
+}
+
+export class RpcError extends OseroError<'RPC_REQUEST_FAILED'> {
+  override readonly name = 'RpcError' as const;
+  readonly code = 'RPC_REQUEST_FAILED' as const;
+
+  static from(args: {
+    readonly cause: unknown;
+    readonly operation: string;
+    readonly chainId: number;
+    readonly contract?: Address;
+    readonly functionName?: string;
+  }): RpcError {
+    return new RpcError({
+      ...args,
+      message: extractMessage(args.cause, `RPC ${args.operation} failed`),
+    });
   }
 
+  constructor(args: {
+    readonly message: string;
+    readonly operation: string;
+    readonly chainId: number;
+    readonly contract?: Address;
+    readonly functionName?: string;
+    readonly cause?: unknown;
+  }) {
+    super(args.message, { cause: args.cause });
+    this.operation = args.operation;
+    this.chainId = args.chainId;
+    this.contract = args.contract;
+    this.functionName = args.functionName;
+  }
+
+  readonly operation: string;
+  readonly chainId: number;
+  readonly contract?: Address;
+  readonly functionName?: string;
+}
+
+export const OSERO_API_ERROR_CODES = [
+  'INVALID_REQUEST',
+  'UNAUTHORIZED',
+  'RATE_LIMITED',
+  'QUOTE_UNAVAILABLE',
+  'INTERNAL_ERROR',
+] as const;
+
+export type OseroApiErrorCode = (typeof OSERO_API_ERROR_CODES)[number] | (string & {});
+
+export class ApiRequestError extends OseroError<'API_REQUEST_FAILED'> {
+  override readonly name = 'ApiRequestError' as const;
+  readonly code = 'API_REQUEST_FAILED' as const;
+
+  constructor(args: {
+    readonly url: string;
+    readonly method: string;
+    readonly statusCode: number;
+    readonly statusText: string;
+    readonly body: unknown;
+    readonly headers: Readonly<Record<string, string>>;
+    readonly apiCode?: OseroApiErrorCode;
+    readonly correlationId?: string;
+    readonly retryAfterMs?: number;
+    readonly cause?: unknown;
+  }) {
+    super(
+      `Osero API ${args.method} ${args.url} failed with ${args.statusCode} ${args.statusText}`,
+      { cause: args.cause },
+    );
+    Object.assign(this, args);
+  }
+
+  readonly url!: string;
+  readonly method!: string;
+  readonly statusCode!: number;
+  readonly statusText!: string;
+  readonly body!: unknown;
+  readonly headers!: Readonly<Record<string, string>>;
+  readonly apiCode?: OseroApiErrorCode;
+  readonly correlationId?: string;
+  readonly retryAfterMs?: number;
+}
+
+export class ApiTransportError extends OseroError<'API_TRANSPORT_FAILED'> {
+  override readonly name = 'ApiTransportError' as const;
+  readonly code = 'API_TRANSPORT_FAILED' as const;
+
+  static from(cause: unknown, url: string, method: string): ApiTransportError {
+    return new ApiTransportError(
+      extractMessage(cause, `Osero API ${method} ${url} failed before receiving a response`),
+      url,
+      method,
+      { cause },
+    );
+  }
+
+  constructor(
+    message: string,
+    readonly url: string,
+    readonly method: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
+export class ApiResponseError extends OseroError<'API_RESPONSE_INVALID'> {
+  override readonly name = 'ApiResponseError' as const;
+  readonly code = 'API_RESPONSE_INVALID' as const;
+
+  static from(cause: unknown, url: string, method: string): ApiResponseError {
+    return new ApiResponseError(
+      extractMessage(cause, `Osero API ${method} ${url} returned an invalid response`),
+      url,
+      method,
+      { cause },
+    );
+  }
+
+  constructor(
+    message: string,
+    readonly url: string,
+    readonly method: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
+export class TimeoutError extends OseroError<'TIMEOUT'> {
+  override readonly name = 'TimeoutError' as const;
+  readonly code = 'TIMEOUT' as const;
+
+  constructor(
+    readonly operation: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`${operation} timed out after ${timeoutMs}ms`);
+  }
+}
+
+export class UnexpectedError extends OseroError<'UNEXPECTED_ERROR'> {
+  override readonly name = 'UnexpectedError' as const;
+  readonly code = 'UNEXPECTED_ERROR' as const;
+
   static from(cause: unknown): UnexpectedError {
-    if (cause instanceof UnexpectedError) return cause;
-    return new UnexpectedError(extractMessage(cause, 'An unexpected error occurred'), { cause });
+    return new UnexpectedError(extractMessage(cause, 'An unexpected SDK error occurred'), {
+      cause,
+    });
   }
 }

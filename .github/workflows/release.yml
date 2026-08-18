@@ -4,17 +4,156 @@ on:
   push:
     branches:
       - main
+      - 'release/**'
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   id-token: write
   pull-requests: write
 
-concurrency: ${{ github.workflow }}-${{ github.ref }}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  release-state:
+    name: Inspect release state
+    runs-on: ubuntu-latest
+    outputs:
+      publishing: ${{ steps.release-mode.outputs.publishing }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Inspect Changesets release mode
+        id: release-mode
+        run: node scripts/prepare-changesets-release.mjs
+
+  quality:
+    name: Release quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm release:verify
+
+  compatibility:
+    name: Minimum Node compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm nx run-many -t build typecheck test
+
+  forks:
+    name: Release fork ${{ matrix.chain_id }}
+    needs: release-state
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      needs.release-state.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chain_id: 1
+            block: 25525000
+          - chain_id: 10
+            block: 154184000
+          - chain_id: 130
+            block: 53219000
+          - chain_id: 8453
+            block: 48589000
+          - chain_id: 42161
+            block: 483508000
+    env:
+      SOURCE_RPC_URL: ${{ matrix.chain_id == 1 && secrets.ETHEREUM_RPC_URL || matrix.chain_id == 10 && secrets.OPTIMISM_RPC_URL || matrix.chain_id == 130 && secrets.UNICHAIN_RPC_URL || matrix.chain_id == 8453 && secrets.BASE_RPC_URL || secrets.ARBITRUM_RPC_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Start deterministic fork and run contract gate
+        shell: bash
+        run: |
+          test -n "$SOURCE_RPC_URL"
+          anvil \
+            --host 127.0.0.1 \
+            --port 8545 \
+            --fork-url "$SOURCE_RPC_URL" \
+            --fork-block-number "${{ matrix.block }}" \
+            > /tmp/anvil.log 2>&1 &
+          ANVIL_PID=$!
+          trap 'kill "$ANVIL_PID"' EXIT
+          for attempt in $(seq 1 30); do
+            if cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$ANVIL_PID" 2>/dev/null; then
+              cat /tmp/anvil.log
+              exit 1
+            fi
+            sleep 1
+          done
+          RUN_FORK_TESTS=1 \
+          OSERO_FORK_CHAIN_ID="${{ matrix.chain_id }}" \
+          OSERO_FORK_RPC_URL=http://127.0.0.1:8545 \
+          pnpm --filter @osero/client test:fork
+
   release:
+    name: Version or publish
+    needs: [release-state, quality, compatibility, forks]
+    if: >-
+      always() &&
+      needs.release-state.result == 'success' &&
+      needs.quality.result == 'success' &&
+      needs.compatibility.result == 'success' &&
+      (
+        github.ref != 'refs/heads/main' ||
+        needs.release-state.outputs.publishing != 'true' ||
+        needs.forks.result == 'success'
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,15 +173,27 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Create release PR or publish
+      - name: Prepare Changesets release mode
+        id: release-mode
+        run: pnpm release:prepare
+
+      - name: Create release PR or publish verified commit
         id: changesets
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
         with:
+          branch: ${{ github.ref_name }}
           commit: 'chore(release): version packages'
           title: 'chore(release): version packages'
           createGithubReleases: false
-          version: pnpm version-packages
+          version: ${{ steps.release-mode.outputs.version_script }}
           publish: pnpm ci:publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
+
+      - name: Run CI for version pull request
+        if: steps.changesets.outputs.pullRequestNumber != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_BRANCH: changeset-release/${{ github.ref_name }}
+        run: gh workflow run ci.yml --ref "$VERSION_BRANCH"

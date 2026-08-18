@@ -5,8 +5,17 @@
   "license": "MIT",
   "scripts": {
     "changeset": "changeset",
-    "version-packages": "changeset version",
-    "ci:publish": "pnpm nx run-many -t build --projects='packages/*' && pnpm -r --filter './packages/*' publish --access public --no-git-checks",
+    "version-packages": "changeset version && oxfmt .changeset packages",
+    "version-packages:stable": "changeset pre exit && changeset version && oxfmt .changeset packages",
+    "release:prepare": "node scripts/prepare-changesets-release.mjs",
+    "clean:client": "node scripts/clean-client-output.mjs",
+    "typecheck:api-v1-contract": "node scripts/typecheck-api-v1-contract.mjs",
+    "test:api-v1-contract": "node scripts/run-api-v1-contract-tests.mjs",
+    "api:report:check": "node scripts/check-client-api.mjs",
+    "api:report:write": "node scripts/check-client-api.mjs --write",
+    "package:validate": "node scripts/validate-client-package.mjs",
+    "release:verify": "pnpm nx run-many -t format:check lint build typecheck test && pnpm --filter @osero/client test:coverage && pnpm package:validate",
+    "ci:publish": "pnpm release:verify && changeset publish",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
@@ -14,7 +23,7 @@
   },
   "dependencies": {
     "neverthrow": "^8.2.0",
-    "viem": "^2.48.11"
+    "viem": "^2.55.10"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.7",

@@ -1,145 +1,67 @@
-import { OseroClient, getChain, getSUsdsBalance, getTokenBalances } from '@osero/client';
-/**
- * Full round-trip on Base using an ethers v6 signer:
- *
- *   USDC → sUSDS (mintSUsds)  → sUSDS → USDC (redeemSUsds)
- *
- * Deliberately mirrors `viem/roundtrip-usdc-susds.ts` almost
- * line-for-line so the diff between the two adapters is easy to
- * spot: different wallet, different balance read, same action
- * calls, same plan handling.
- *
- * Run with:
- *
- *   pnpm --filter @osero/examples ethers:roundtrip
- */
-import {
-  mintSUsds,
-  previewMintSUsds,
-  previewRedeemSUsds,
-  redeemSUsds,
-} from '@osero/client/actions';
+import { getChain, getSUsdsBalance, getTokenBalances, OseroClient } from '@osero/client';
+import { prepareSwap } from '@osero/client/actions';
 import { sendWith } from '@osero/client/ethers';
 import { JsonRpcProvider, Wallet } from 'ethers';
 import { http, parseUnits } from 'viem';
 
 import { loadPrivateKey, optionalRpcUrl } from '../shared/env.js';
-import { banner, describeResult, formatToken } from '../shared/format.js';
+import { banner, describeResult, formatToken, requireTokenAmount } from '../shared/format.js';
 
 const CHAIN_ID = 8453 as const;
-const MINT_AMOUNT_USDC = parseUnits('10', 6);
+const INPUT_USDC = parseUnits('10', 6);
 
 async function main() {
-  const chainMeta = getChain(CHAIN_ID);
-  if (!chainMeta) throw new Error(`unsupported chain ${CHAIN_ID}`);
-
-  const provider = new JsonRpcProvider(
-    optionalRpcUrl(CHAIN_ID) ?? 'https://mainnet.base.org',
-    CHAIN_ID,
-  );
-  const signer = new Wallet(loadPrivateKey(), provider);
-  const senderAddress = (await signer.getAddress()) as `0x${string}`;
-
-  const client = OseroClient.create({
-    transports: {
-      [CHAIN_ID]: http(optionalRpcUrl(CHAIN_ID)),
-    },
-  });
-
-  const balancesBeforeResult = await getTokenBalances(client, {
-    chainId: CHAIN_ID,
-    account: senderAddress,
-  });
-  if (balancesBeforeResult.isErr()) throw balancesBeforeResult.error;
-  const { USDC: usdcBefore, sUSDS: susdsBefore } = balancesBeforeResult.value;
-
-  banner(`Round-trip — ${chainMeta.name} (ethers)`);
-  console.log(`  sender: ${senderAddress}`);
-  console.log(
-    `  start:  ${formatToken(usdcBefore, 6, 'USDC')}, ${formatToken(susdsBefore, 18, 'sUSDS')}`,
-  );
-
-  if (usdcBefore < MINT_AMOUNT_USDC) {
-    console.error(`  insufficient USDC: have ${usdcBefore}, need ${MINT_AMOUNT_USDC}`);
-    process.exitCode = 1;
-    return;
+  const chain = getChain(CHAIN_ID);
+  if (chain === null) throw new Error(`unsupported chain ${CHAIN_ID}`);
+  const rpcUrl = optionalRpcUrl(CHAIN_ID) ?? 'https://mainnet.base.org';
+  const signer = new Wallet(loadPrivateKey(), new JsonRpcProvider(rpcUrl, CHAIN_ID));
+  const sender = (await signer.getAddress()) as `0x${string}`;
+  const client = OseroClient.create({ transports: { [CHAIN_ID]: http(rpcUrl) } });
+  const before = await getTokenBalances(client, { chainId: CHAIN_ID, account: sender });
+  if (before.isErr()) throw before.error;
+  if (before.value.USDC < INPUT_USDC) {
+    throw new Error(`insufficient USDC: have ${before.value.USDC}, need ${INPUT_USDC}`);
   }
 
-  // -------------------------------------------------------------
-  // Leg 1 — USDC → sUSDS
-  // -------------------------------------------------------------
-  banner('Leg 1 — mintSUsds');
-  const mintPreview = await previewMintSUsds(client, {
+  banner('Leg 1 — USDC → sUSDS');
+  const deposit = await prepareSwap(client, {
     chainId: CHAIN_ID,
-    amount: MINT_AMOUNT_USDC,
+    account: sender,
+    mode: 'exact-in',
+    amountIn: requireTokenAmount('USDC', INPUT_USDC),
+    assetOut: 'sUSDS',
   });
-  if (mintPreview.isErr()) throw mintPreview.error;
-  console.log(`  quote:    ${formatToken(mintPreview.value, 18, 'sUSDS')}`);
+  if (deposit.isErr()) throw deposit.error;
+  console.log(`  expected: ${formatToken(deposit.value.expectedAmountOut.raw, 18, 'sUSDS')}`);
+  const deposited = await sendWith(signer, deposit.value.plan);
+  if (deposited.isErr()) throw deposited.error;
+  console.log(describeResult(deposited.value, chain.explorerUrl));
 
-  const mintResult = await mintSUsds(client, {
+  const middle = await getSUsdsBalance(client, { chainId: CHAIN_ID, account: sender });
+  if (middle.isErr()) throw middle.error;
+  const sharesReceived = middle.value - before.value.sUSDS;
+
+  banner('Leg 2 — sUSDS → USDC');
+  const redeem = await prepareSwap(client, {
     chainId: CHAIN_ID,
-    amount: MINT_AMOUNT_USDC,
-    sender: senderAddress,
-  }).andThen(sendWith(signer));
-
-  if (mintResult.isErr()) {
-    console.error('mintSUsds failed:', mintResult.error);
-    process.exitCode = 1;
-    return;
-  }
-  console.log(describeResult(mintResult.value, chainMeta.explorerUrl));
-
-  const susdsMidResult = await getSUsdsBalance(client, {
-    chainId: CHAIN_ID,
-    account: senderAddress,
+    account: sender,
+    mode: 'exact-in',
+    amountIn: requireTokenAmount('sUSDS', sharesReceived),
+    assetOut: 'USDC',
   });
-  if (susdsMidResult.isErr()) throw susdsMidResult.error;
-  const susdsMid = susdsMidResult.value;
-  const sharesReceived = susdsMid - susdsBefore;
-  console.log(`  received: ${formatToken(sharesReceived, 18, 'sUSDS')}`);
+  if (redeem.isErr()) throw redeem.error;
+  console.log(`  expected: ${formatToken(redeem.value.expectedAmountOut.raw, 6, 'USDC')}`);
+  const redeemed = await sendWith(signer, redeem.value.plan);
+  if (redeemed.isErr()) throw redeemed.error;
+  console.log(describeResult(redeemed.value, chain.explorerUrl));
 
-  // -------------------------------------------------------------
-  // Leg 2 — sUSDS → USDC
-  // -------------------------------------------------------------
-  banner('Leg 2 — redeemSUsds');
-  const redeemPreview = await previewRedeemSUsds(client, {
-    chainId: CHAIN_ID,
-    amount: sharesReceived,
-  });
-  if (redeemPreview.isErr()) throw redeemPreview.error;
-  console.log(`  quote:    ${formatToken(redeemPreview.value, 6, 'USDC')}`);
-
-  const redeemResult = await redeemSUsds(client, {
-    chainId: CHAIN_ID,
-    amount: sharesReceived,
-    sender: senderAddress,
-  }).andThen(sendWith(signer));
-
-  if (redeemResult.isErr()) {
-    console.error('redeemSUsds failed:', redeemResult.error);
-    process.exitCode = 1;
-    return;
-  }
-  console.log(describeResult(redeemResult.value, chainMeta.explorerUrl));
-
-  // -------------------------------------------------------------
-  // Final delta
-  // -------------------------------------------------------------
-  const balancesAfterResult = await getTokenBalances(client, {
-    chainId: CHAIN_ID,
-    account: senderAddress,
-  });
-  if (balancesAfterResult.isErr()) throw balancesAfterResult.error;
-  const { USDC: usdcAfter, sUSDS: susdsAfter } = balancesAfterResult.value;
-
+  const after = await getTokenBalances(client, { chainId: CHAIN_ID, account: sender });
+  if (after.isErr()) throw after.error;
   banner('Round-trip complete');
-  console.log(
-    `  end:   ${formatToken(usdcAfter, 6, 'USDC')}, ${formatToken(susdsAfter, 18, 'sUSDS')}`,
-  );
-  console.log(`  Δusdc: ${usdcAfter - usdcBefore} (raw 6-dec)`);
+  console.log(`  USDC delta: ${after.value.USDC - before.value.USDC} raw units`);
 }
 
-main().catch((err) => {
-  console.error(err);
+main().catch((error) => {
+  console.error(error);
   process.exitCode = 1;
 });

@@ -1,474 +1,507 @@
-# `@osero/client`
+# @osero/client
 
-The official TypeScript SDK for minting **USDS** and **sUSDS** on every
-chain where Sky / Spark runs a PSM. One API, wallet integrations for
-**viem**, **ethers v6**, and **Privy server wallets**, five chains out of the box.
+Production TypeScript SDK for preparing, inspecting, simulating, and executing USDC, USDS, and sUSDS swaps through the deployed Sky/Spark liquidity routes supported by Osero.
 
----
+The v1 API separates five responsibilities:
 
-## What it does
+1. `OseroClient` owns explicit read transports and safe policy defaults.
+2. `quoteSwap` returns account-free swap economics from a coherent block snapshot.
+3. `prepareSwap` reads a fresh quote and binds it to an immutable, account-specific execution plan.
+4. An executor adapter (`/viem`, `/eip5792`, `/ethers`, or `/privy`) preflights and executes that plan.
+5. The hosted API client (`/api`) decodes untrusted responses, verifies transaction integrity, and prepares allowance-aware plans.
 
-Given a wallet holding USDC, `@osero/client` builds and sends the
-right sequence of transactions to land USDS or sUSDS in any address
-you name, no matter which chain you are on:
+Every operational API returns `Result` or `ResultAsync`. Invalid runtime input, RPC failures, wallet mismatch, transaction failure, and completion timeout are values—not thrown exceptions. Constructors may throw `ConfigurationError` for invalid static configuration.
 
-| Chain        | Chain ID | Route                                               |
-| ------------ | -------: | --------------------------------------------------- |
-| Ethereum     |        1 | Spark `UsdsPsmWrapper` (+ ERC-4626 `sUSDS` deposit) |
-| OP Mainnet   |       10 | Spark `PSM3`                                        |
-| Unichain     |      130 | Spark `PSM3`                                        |
-| Base         |     8453 | Spark `PSM3`                                        |
-| Arbitrum One |    42161 | Spark `PSM3`                                        |
-
-The SDK figures out which contract to talk to, reads the live fee
-(`tin` / `tout`) or swap quote, assembles the approval and swap
-transactions, and hands you back a wallet-agnostic `ExecutionPlan`
-that any adapter can broadcast.
-
-It also exposes preview helpers for every exact-in flow so callers can
-quote the expected output amount before building or sending a plan.
-
-The package also includes `@osero/client/api`, a small HTTP client for
-the hosted Osero API. It can fetch supported API assets, build API
-swap quotes, convert those quotes into SDK execution plans, and poll
-bridge status for cross-chain quotes.
-
-## Install
+## Installation
 
 ```bash
 pnpm add @osero/client viem
-# (optional) for the ethers adapter:
+```
+
+Add only the wallet adapter peer you use:
+
+```bash
 pnpm add ethers
-# (optional) for the Privy server-wallet adapter:
+# or
 pnpm add @privy-io/node
 ```
 
-`viem` is a required peer dependency — the SDK uses it to encode
-calldata and to build public clients internally.
-`ethers` and `@privy-io/node` are optional; install them only if
-you use `@osero/client/ethers` or `@osero/client/privy`.
+Requirements:
 
-## Quick start
+- Node.js 20 or newer
+- ESM
+- viem `>=2.28.0 <3`
+- ethers v6 for `@osero/client/ethers`
+- `@privy-io/node` v0.19 for `@osero/client/privy`
 
-### With viem
+## Public entrypoints
 
-```ts
-import { OseroClient } from '@osero/client';
-import { mintSUsds } from '@osero/client/actions';
-import { sendWith } from '@osero/client/viem';
-import { createWalletClient, http, parseUnits } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
-import { base } from 'viem/chains';
+| Import path               | Purpose                                                                    |
+| ------------------------- | -------------------------------------------------------------------------- |
+| `@osero/client`           | Client, domain values, plans, errors, chain/token discovery, balances, APY |
+| `@osero/client/actions`   | `quoteSwap`, `prepareSwap`, and `simulateExecutionPlan`                    |
+| `@osero/client/api`       | Hosted API client and hosted wire/domain types                             |
+| `@osero/client/contracts` | Supported contract ABIs and protocol addresses                             |
+| `@osero/client/viem`      | viem executor                                                              |
+| `@osero/client/eip5792`   | EIP-5792 atomic batch executor with sequential fallback                    |
+| `@osero/client/ethers`    | ethers v6 executor                                                         |
+| `@osero/client/privy`     | Privy server-wallet executor                                               |
 
-const privateKey = process.env.PRIVATE_KEY as `0x${string}` | undefined;
-if (!privateKey) throw new Error('Set PRIVATE_KEY before sending transactions');
+Unexported files under `src/lib` and `dist/lib` are implementation details. Package export-map enforcement prevents importing them as public subpaths.
 
-const client = OseroClient.create({
-  transports: {
-    8453: http('https://mainnet.base.org'),
-  },
-});
+## Configure reads explicitly
 
-const wallet = createWalletClient({
-  account: privateKeyToAccount(privateKey),
-  chain: base,
-  transport: http('https://mainnet.base.org'),
-});
-
-const result = await mintSUsds(client, {
-  chainId: 8453,
-  amount: parseUnits('100', 6), // 100 USDC
-  sender: wallet.account.address,
-}).andThen(sendWith(wallet));
-
-if (result.isErr()) {
-  console.error(result.error.name, result.error.message);
-  return;
-}
-
-console.log('sUSDS minted in tx', result.value.txHash);
-```
-
-### With ethers v6
-
-```ts
-import { OseroClient } from '@osero/client';
-import { mintUsds } from '@osero/client/actions';
-import { sendWith } from '@osero/client/ethers';
-import { JsonRpcProvider, Wallet, parseUnits } from 'ethers';
-
-const privateKey = process.env.PRIVATE_KEY;
-if (!privateKey) throw new Error('Set PRIVATE_KEY before sending transactions');
-
-const provider = new JsonRpcProvider('https://arb1.arbitrum.io/rpc');
-const signer = new Wallet(privateKey, provider);
-
-const client = OseroClient.create();
-
-const result = await mintUsds(client, {
-  chainId: 42161,
-  amount: parseUnits('1000', 6),
-  sender: await signer.getAddress(),
-}).andThen(sendWith(signer));
-
-if (result.isOk()) {
-  console.log('USDS minted in tx', result.value.txHash);
-}
-```
-
-### With Privy server wallets
-
-```ts
-import { PrivyClient } from '@privy-io/node';
-import { OseroClient } from '@osero/client';
-import { mintUsds } from '@osero/client/actions';
-import { sendWith, type PrivyWallet } from '@osero/client/privy';
-import { parseUnits } from 'viem';
-
-const privy = new PrivyClient({
-  appId: process.env.PRIVY_APP_ID!,
-  appSecret: process.env.PRIVY_APP_SECRET!,
-});
-
-const wallet = {
-  id: process.env.PRIVY_WALLET_ID!,
-  address: process.env.PRIVY_WALLET_ADDRESS as `0x${string}`,
-  authorizationContext: {
-    authorization_private_keys: [process.env.PRIVY_AUTHORIZATION_PRIVATE_KEY!],
-  },
-} satisfies PrivyWallet;
-const client = OseroClient.create();
-
-const result = await mintUsds(client, {
-  chainId: 8453,
-  amount: parseUnits('100', 6),
-  sender: wallet.address,
-}).andThen(sendWith(privy, wallet));
-
-if (result.isOk()) {
-  console.log('USDS minted in tx', result.value.txHash);
-}
-```
-
-`authorization_private_keys` must be the base64-encoded PKCS8 private
-key registered for your Privy app. Omit `authorizationContext` only if
-your Privy wallet configuration does not require request authorization.
-
-## Actions
-
-Every action returns a `ResultAsync<ExecutionPlan, …>` that you pipe
-into `sendWith` (from `@osero/client/viem`, `@osero/client/ethers`, or
-`@osero/client/privy`) to execute.
-
-| Action        | Direction    | Mainnet shape      | L2 shape            |
-| ------------- | ------------ | ------------------ | ------------------- |
-| `mintUsds`    | USDC → USDS  | approve + sellGem  | approve + PSM3 swap |
-| `mintSUsds`   | USDC → sUSDS | four-tx two-phase  | approve + PSM3 swap |
-| `redeemUsds`  | USDS → USDC  | approve + buyGem   | approve + PSM3 swap |
-| `redeemSUsds` | sUSDS → USDC | three-tx two-phase | approve + PSM3 swap |
-
-Matching preview helpers return the quoted output amount as a raw
-`bigint` wrapped in `ResultAsync`. They only take `chainId` and
-`amount` because they do not build a sender-specific execution plan:
-
-| Preview helper       | Quotes       | Input decimals |
-| -------------------- | ------------ | -------------: |
-| `previewMintUsds`    | USDC → USDS  |              6 |
-| `previewMintSUsds`   | USDC → sUSDS |              6 |
-| `previewRedeemUsds`  | USDS → USDC  |             18 |
-| `previewRedeemSUsds` | sUSDS → USDC |             18 |
-
-```ts
-import { previewMintSUsds } from '@osero/client/actions';
-import { parseUnits } from 'viem';
-
-const quote = await previewMintSUsds(client, {
-  chainId: 8453,
-  amount: parseUnits('100', 6),
-});
-
-if (quote.isOk()) {
-  console.log('expected sUSDS out:', quote.value);
-}
-```
-
-### Request shape
-
-```ts
-type Request = {
-  chainId: number; // one of the supported chain IDs
-  amount: bigint; // input amount in the input token's native decimals
-  sender: `0x${string}`; // the wallet that pays the input
-  receiver?: `0x${string}`; // default = sender
-  slippageBps?: number; // default = client.config.defaultSlippageBps (5)
-  referralCode?: bigint; // emitted on L2 PSM3 swaps and mainnet sUSDS deposits
-};
-```
-
-## Balance helpers
-
-`@osero/client` also exposes read-only helpers for canonical token
-balances so callers can stick with the SDK's chain registry and public
-client wiring instead of dropping down to raw ERC-20 reads.
-
-```ts
-import {
-  getSUsdsBalance,
-  getTokenBalance,
-  getTokenBalances,
-  getUsdcBalance,
-  getUsdsBalance,
-} from '@osero/client';
-```
-
-Choose the helper that matches the job:
-
-- `getTokenBalance(client, { chainId, account, token })` reads one of
-  the three canonical symbols: `USDC`, `USDS`, or `sUSDS`
-- `getTokenBalances(client, { chainId, account })` returns all three
-  balances in one keyed result object
-- `getUsdcBalance`, `getUsdsBalance`, and `getSUsdsBalance` keep the
-  common single-token cases terse
-
-```ts
-const result = await getTokenBalances(client, {
-  chainId: 8453,
-  account: wallet.account.address,
-});
-
-if (result.isOk()) {
-  console.log(result.value.USDC);
-  console.log(result.value.USDS);
-  console.log(result.value.sUSDS);
-}
-```
-
-All balance helpers return raw `bigint` values and surface
-`UnsupportedChainError` or `UnexpectedError` through the same
-`ResultAsync` model used by the action builders.
-
-## Osero API client
-
-Use `@osero/client/api` for hosted API quotes instead of building the
-route locally. The client sends `x-api-key`, validates the public API
-key shape before making requests, and returns typed `ResultAsync`
-values.
-
-```ts
-import { flattenExecutionPlan } from '@osero/client';
-import { OseroApiClient } from '@osero/client/api';
-import { parseUnits } from 'viem';
-
-const api = OseroApiClient.create({
-  apiKey: process.env.OSERO_API_KEY!,
-  // Defaults to https://api.osero.org/v1/
-  baseUrl: process.env.OSERO_API_BASE_URL,
-});
-
-const quote = await api.getSwapQuote({
-  fromAddress: '0x1111111111111111111111111111111111111111',
-  fromAssetId: 'base:usdc',
-  toAssetId: 'ethereum:susds',
-  amount: parseUnits('1', 6),
-  slippage: '0.5',
-  referralCode: 3000,
-});
-
-if (quote.isErr()) {
-  console.error(quote.error.name, quote.error.message);
-  return;
-}
-
-console.log('sUSDS out:', quote.value.quote.amountOut?.formatted);
-console.log(flattenExecutionPlan(quote.value.executionPlan));
-```
-
-To execute the hosted quote through a wallet, hand off the attached
-`executionPlan` to the same viem, ethers, or Privy adapter used by local
-action builders:
-
-```ts
-import { sendWith } from '@osero/client/viem';
-
-const result = await api
-  .getSwapQuote(request)
-  .map((quote) => quote.executionPlan)
-  .andThen(sendWith(wallet));
-```
-
-Common calls:
-
-- `getSupportedAssets()` returns the public asset IDs accepted by the
-  quote endpoint.
-- `getSwapQuote(request)` builds approval and execution transactions
-  for supported counter asset ↔ sUSDS routes.
-- `getSwapStatus({ txHash, sourceChainId, bridgeProtocol })` checks a
-  bridge status request returned by a cross-chain quote.
-- `getSwapStatusForQuote(quote, txHash)` is a convenience wrapper that
-  pulls `sourceChainId` and `bridgeProtocol` off `quote.bridge.statusRequest`
-  for you. Same-chain quotes have no bridge to track and return a
-  `ValidationError`.
-
-The client-level API key can be overridden per request:
-
-```ts
-await api.getSupportedAssets({ apiKey: 'osero_partner-key' });
-```
-
-Quote `referralCode` is optional. When provided, it must be an integer
-from `3000` to `3999` and overrides the referral code attached to the
-authenticated API key for that quote.
-
-## Error handling
-
-`@osero/client` uses [`neverthrow`](https://github.com/supermacro/neverthrow)
-for functional error handling. Every action returns a
-`ResultAsync`. Chain them with `.andThen`, then call `.isOk()` /
-`.isErr()` at the top level:
-
-```ts
-const result = await mintUsds(client, request).andThen(sendWith(wallet));
-
-if (result.isErr()) {
-  switch (result.error.name) {
-    case 'CancelError':
-      // user rejected the wallet prompt
-      break;
-    case 'ValidationError':
-      // bad input (amount <= 0, etc.)
-      break;
-    case 'UnsupportedChainError':
-      // chainId is not in SUPPORTED_CHAIN_IDS
-      break;
-    case 'TransactionError':
-      // tx was broadcast but reverted — inspect .txHash / .link
-      break;
-    case 'ApiRequestError':
-      // hosted API returned a non-2xx response — inspect .statusCode / .body
-      break;
-    case 'SigningError':
-    case 'UnexpectedError':
-      // RPC failure, bad signature, etc. — .cause has the original
-      break;
-  }
-  return;
-}
-```
-
-Every error class extends `OseroError`, which itself extends the
-built-in `Error`, so `instanceof OseroError` is the broadest catch.
-
-## Configuration
+Public fallback RPCs are disabled by default. Supply a viem transport for every chain your process uses:
 
 ```ts
 import { OseroClient } from '@osero/client';
 import { http } from 'viem';
 
 const client = OseroClient.create({
-  // Override the default public transports for every chain you care
-  // about — strongly recommended for production.
   transports: {
-    1: http('https://eth.llamarpc.com'),
-    10: http('https://mainnet.optimism.io'),
-    130: http('https://mainnet.unichain.org'),
-    8453: http('https://mainnet.base.org'),
-    42161: http('https://arb1.arbitrum.io/rpc'),
+    8453: http(process.env.BASE_RPC_URL),
+    1: http(process.env.ETHEREUM_RPC_URL),
   },
-
-  // Default slippage (in bps) used by any action that doesn't pass
-  // its own `slippageBps`. Defaults to 5 (= 0.05%).
-  defaultSlippageBps: 10,
 });
 ```
 
-Set confirmation waits on the viem, ethers, or Privy adapter when
-broadcasting:
+`client.getPublicClient(chainId)` returns a typed `Result`. Set `allowPublicRpc: true` only when rate-limited public endpoints are an intentional policy.
+
+Safe defaults:
+
+- slippage: 5 basis points, represented by branded `Slippage`
+- referral attribution: disabled
+- approval policy: exact amount
+- public RPC fallback: disabled
+- executor confirmations: one, configured per executor call
+
+## Quote before wallet connection
+
+`quoteSwap` needs a read transport, not an account. It returns economics, route and slippage-protection details, protocol fee inputs, and the quote block without constructing calldata, reading allowances, or returning an execution plan.
 
 ```ts
-const result = await mintUsds(client, request).andThen(sendWith(wallet, { confirmations: 2 }));
+import { OseroClient, tokenAmount } from '@osero/client';
+import { quoteSwap } from '@osero/client/actions';
+import { http, parseUnits } from 'viem';
+
+const client = OseroClient.create({
+  transports: { 8453: http(process.env.BASE_RPC_URL) },
+});
+const amountIn = tokenAmount('USDC', parseUnits('100', 6));
+if (amountIn.isErr()) throw amountIn.error;
+
+const quoted = await quoteSwap(client, {
+  chainId: 8453,
+  mode: 'exact-in',
+  amountIn: amountIn.value,
+  assetOut: 'sUSDS',
+});
+
+if (quoted.isOk()) {
+  console.log(quoted.value.expectedAmountOut);
+  console.log(quoted.value.minimumAmountOut);
+}
 ```
 
-The Privy adapter can also receive `transports` for receipt polling,
-using the same chain-keyed shape as `OseroClient.create({ transports })`.
+Call `prepareSwap` after an account is available. Preparation deliberately reads a fresh quote so its allowance decisions, calldata, bounds, and plan share one current block snapshot; it does not upgrade a potentially stale account-free quote.
 
-For server-side retries with Privy, pass caller-managed idempotency
-keys. The SDK does not derive keys from transaction contents because
-two unrelated operations can produce identical transaction data. Store
-a fresh key with the operation you are about to execute and reuse that
-same key only when retrying that operation:
+## Prepare an exact-input swap
+
+Amounts carry their token symbol. Slippage and referrals are also constructed values, which prevents ambiguous raw numbers from crossing public boundaries.
 
 ```ts
-const result = await mintUsds(client, request).andThen(
-  sendWith(privy, wallet, {
-    idempotencyKeys: [storedIdempotencyKey],
-  }),
+import { OseroClient, parseSlippage, tokenAmount } from '@osero/client';
+import { prepareSwap } from '@osero/client/actions';
+import { http, parseUnits } from 'viem';
+
+const client = OseroClient.create({
+  transports: { 8453: http(process.env.BASE_RPC_URL) },
+});
+const amountIn = tokenAmount('USDC', parseUnits('100', 6));
+const slippage = parseSlippage({ bps: '25' }); // 25 bps = 0.25%
+
+if (amountIn.isErr() || slippage.isErr()) {
+  throw new Error('static application input is invalid');
+}
+
+const prepared = await prepareSwap(client, {
+  chainId: 8453,
+  account: '0x1111111111111111111111111111111111111111',
+  mode: 'exact-in',
+  amountIn: amountIn.value,
+  assetOut: 'sUSDS',
+  slippage: slippage.value,
+  approvalPolicy: 'exact',
+});
+
+if (prepared.isErr()) {
+  console.error(prepared.error.code, prepared.error.toJSON());
+} else {
+  console.log(prepared.value.expectedAmountOut);
+  console.log(prepared.value.minimumAmountOut);
+  console.log(prepared.value.quotedAt.blockNumber);
+  console.log(prepared.value.route);
+  console.log(prepared.value.plan.steps);
+}
+```
+
+The returned quote ties together:
+
+- input and output token amounts
+- expected output and enforced minimum output
+- slippage representation and enforcement mechanism
+- protocol fee inputs
+- route and source chain
+- quote block
+- allowance snapshot and approval decision
+- the exact execution plan
+- advisory gas estimates with provenance when available
+
+Preparation performs one coherent read pass. It does not preview and then silently re-quote while constructing the plan.
+
+## Prepare an exact-output swap
+
+```ts
+import { tokenAmount } from '@osero/client';
+import { prepareSwap } from '@osero/client/actions';
+import { parseUnits } from 'viem';
+
+const amountOut = tokenAmount('USDS', parseUnits('100', 18));
+if (amountOut.isErr()) throw amountOut.error;
+
+const prepared = await prepareSwap(client, {
+  chainId: 8453,
+  account,
+  mode: 'exact-out',
+  assetIn: 'USDC',
+  amountOut: amountOut.value,
+});
+
+if (prepared.isOk()) {
+  console.log(prepared.value.expectedAmountIn);
+  console.log(prepared.value.maximumAmountIn); // rounded upward for safety
+}
+```
+
+The chain capability matrix determines which pair/mode combinations are deployed. Unsupported combinations return `ValidationError`; the SDK does not guess protocol liquidity from a generic ABI.
+
+## Approval policy
+
+`prepareSwap` and hosted quote preparation accept:
+
+- `exact` (default): add an approval only when current allowance is insufficient; approve the required amount
+- `max`: explicit opt-in to `uint256.max` approval
+- `none`: never add an approval; insufficient allowance returns `InsufficientAllowanceError`
+
+Allowance observations, block number, required amount, policy, and selected approval amount are recorded in plan metadata. They are evidence from preparation time, not a guarantee that execution cannot race or revert.
+
+## Execute with viem
+
+```ts
+import { sendWith } from '@osero/client/viem';
+
+if (prepared.isErr()) throw prepared.error;
+
+const result = await sendWith(walletClient, prepared.value.plan, {
+  confirmations: 2,
+  confirmationTimeoutMs: 120_000,
+  onProgress(progress) {
+    console.log(progress.type);
+  },
+});
+
+if (result.isErr()) {
+  console.error(result.error.code, result.error.execution);
+} else {
+  for (const transaction of result.value.transactions) {
+    console.log(transaction.operation, transaction.submittedHash, transaction.hash);
+  }
+}
+```
+
+The curried form is equivalent:
+
+```ts
+const execute = sendWith(walletClient, { confirmations: 2 });
+const result = await execute(prepared.value.plan);
+```
+
+Before transaction 1, every adapter validates the complete plan, connected account, current chain, deterministic options, executor capabilities, and any supplied resume proof. A malformed later step causes zero broadcasts.
+
+The viem and ethers executors perform a fresh gas estimate and apply a bounded buffer. Hosted/local `estimatedGas` remains advisory and never becomes an automatic hard gas limit.
+
+## Execute with ethers
+
+```ts
+import { sendWith } from '@osero/client/ethers';
+
+const result = await sendWith(signer, prepared.value.plan, {
+  confirmations: 2,
+  confirmationTimeoutMs: 120_000,
+});
+```
+
+The signer must already be attached to the plan chain. The adapter does not switch networks. Repriced replacement transactions preserve both the submitted hash and effective replacement hash in `ConfirmedTransaction`.
+
+## Execute with Privy
+
+```ts
+import { sendWith } from '@osero/client/privy';
+import { http } from 'viem';
+
+const idempotencyKeys = Object.fromEntries(
+  prepared.value.plan.steps.map((step) => [step.id, `${prepared.value.plan.id}:${step.id}`]),
+);
+
+const result = await sendWith(privy, wallet, prepared.value.plan, {
+  chainId: 8453,
+  transport: http(process.env.BASE_RPC_URL),
+  idempotencyKeys,
+  confirmations: 2,
+});
+```
+
+Privy options explicitly bind the invocation to one chain. Idempotency keys are keyed by stable plan step ID, validated before any Wallet API call, and should be persisted across retries. Sponsored/user-operation responses without a standard transaction hash return `UnsupportedCapabilityError`; the adapter never fabricates a hash.
+
+## Recovery and progress
+
+A confirmation failure includes:
+
+- the failed plan and step identity
+- execution stage
+- submitted transaction hash when one exists
+- the ordered confirmed prefix
+
+Persist plans and resume state with canonical serializers:
+
+```ts
+import {
+  deserializeExecutionPlan,
+  resumeExecutionPlan,
+  serializeExecutionPlan,
+} from '@osero/client';
+
+const serialized = serializeExecutionPlan(prepared.value.plan);
+if (serialized.isErr()) throw serialized.error;
+
+const restored = deserializeExecutionPlan(serialized.value);
+if (restored.isErr()) throw restored.error;
+
+const resumed = resumeExecutionPlan(restored.value, savedResumeState);
+if (resumed.isErr()) throw resumed.error;
+```
+
+Adapters re-fetch receipts for a supplied confirmed prefix before skipping it. Resume state must match the plan ID, step order, operation, and hashes exactly.
+
+## Honest simulation
+
+```ts
+import { simulateExecutionPlan } from '@osero/client/actions';
+
+const simulation = await simulateExecutionPlan(client, prepared.value.plan, account);
+```
+
+Simulation reports the pinned block, native balance, relevant token balances/allowances, fee data, per-step estimate, and RPC provenance. Multi-step plans are labeled `independent-steps`: later estimates do not pretend earlier state transitions have occurred.
+
+## Hosted API
+
+The hosted client requests a provider-neutral quote. The API selects the Quote Provider; callers do not request Enso, LI.FI, 0x, or another provider directly. `quote.provider` identifies that selection, while Provider Details retain provider-specific attribution and diagnostics. Narrow known Provider Details with `isOseroApiEnsoProviderDetails`, `isOseroApiLifiProviderDetails`, or `isOseroApiZeroXProviderDetails`; preserve unknown providers and their opaque details.
+
+0x is one Quote Provider spanning two upstream APIs — same-chain pairs are filled through the 0x Swap API, cross-chain pairs through the 0x Cross-Chain API — so it reports a single `'0x'` tag either way. `isOseroApiZeroXProviderDetails` narrows to the 0x support id (`zid`), the curated route, gas and network-fee estimates, and `fees`. Those fees are reporting only: `quote.expectedOutput` is already net of the Osero Integrator Fee, the 0x fee, and any bridge-native fee, so never subtract them again when displaying a quote. A `bridgeNativeFee` is paid through the execution transaction's native `value` rather than deducted from the source token. An allowance requirement arrives as an ordinary Approval Step — always spend against the returned `spender`, never a hardcoded AllowanceHolder address.
+
+The client requires an API key and a public-client provider when an Approval Step may need an allowance read.
+
+```ts
+import { parseSlippage } from '@osero/client';
+import { oseroApiAmount, OseroApiClient } from '@osero/client/api';
+import { createPublicClient, http, parseUnits } from 'viem';
+import { base } from 'viem/chains';
+
+const publicClient = createPublicClient({
+  chain: base,
+  transport: http(process.env.BASE_RPC_URL),
+});
+const api = OseroApiClient.create({
+  apiKey: process.env.OSERO_API_KEY,
+  publicClientProvider: (chainId) => {
+    if (chainId !== 8453) throw new Error(`No client for ${chainId}`);
+    return publicClient;
+  },
+});
+const amount = oseroApiAmount(parseUnits('1', 6));
+const slippage = parseSlippage({ bps: '50' });
+if (amount.isErr() || slippage.isErr()) throw new Error('invalid input');
+
+const quote = await api.getSwapQuote({
+  fromAddress: account,
+  fromAssetId: 'base:usdc',
+  toAssetId: 'ethereum:susds',
+  amount: amount.value,
+  slippage: slippage.value,
+});
+```
+
+Hosted decoding accepts future asset, protocol, and Quote Provider vocabulary, but executable fields and normalized Transfer Status states are strict. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
+
+Every normalized quote includes an API Execution Plan for inspection and diagnostics. Do not pass `workflow.quote.executionPlan` to a wallet adapter: its later actions become stale after any Approval Step. The discriminated Hosted Swap Workflow exposes only the currently safe Wallet Execution Plan:
+
+```ts
+const workflow = await api.getSwapQuote(request);
+if (workflow.isErr()) throw workflow.error;
+
+if (workflow.value.state === 'approval-required') {
+  const approval = await sendWith(walletClient)(workflow.value.walletExecutionPlan);
+  if (approval.isErr()) throw approval.error;
+
+  // Confirmation invalidates every remaining action in the API Execution Plan.
+  const refreshed = await api.refreshSwapQuote(workflow.value.quote.refreshContext);
+  if (refreshed.isErr()) throw refreshed.error;
+  // Inspect refreshed.value.state and repeat, or persist/pause here.
+} else {
+  const executed = await sendWith(walletClient)(workflow.value.walletExecutionPlan);
+  if (executed.isErr()) throw executed.error;
+}
+```
+
+This manual path is appropriate for frontends that need explicit prompts, persistence, pausing, or resume control. Quote Refresh is provider-locked: it returns a replacement from the selected Quote Provider rather than selecting a provider again. A Wallet Execution Plan is bound to `quote.expiresAt`; adapters reject it at or after expiry. Refresh an expired quote before submission.
+
+Use `executeSwap(request, handler)` for bounded high-level execution. It submits at most one approval-only Wallet Execution Plan at a time, performs Quote Refresh after confirmation or expiry, and then submits the fresh execution-only plan. The defaults allow three approval transactions and five total Quote Refreshes; `approvalTransactionLimit` and `quoteRefreshLimit` accept deliberate positive-integer overrides.
+
+```ts
+const execution = await api.executeSwap(request, sendWith(walletClient), {
+  signal: abortController.signal,
+  onProgress: (event) => console.log(event.type),
+});
+if (execution.isErr()) throw execution.error;
+
+console.log(execution.value.approvalResults);
+console.log(execution.value.executionResult.txHash);
+```
+
+High-level execution ends when the source-chain execution is confirmed. For a cross-chain quote, destination delivery is a separate Transfer Status lifecycle. Start it with the final quote, not an earlier invalidated quote:
+
+```ts
+const completion = await api.waitForSwapCompletion(
+  execution.value.finalQuote,
+  execution.value.executionResult.txHash,
+  {
+    signal: abortController.signal,
+    pollingIntervalMs: 5_000,
+    timeoutMs: 30 * 60_000,
+    onStatus: (status) => console.log(status.state, status.providerDetails),
+  },
 );
 ```
 
-Plans with approvals or multiple phases send more than one
-transaction. In those cases, provide one key per transaction in the
-same order returned by `flattenExecutionPlan(plan)`. The adapter
-fails before broadcasting anything if the number of keys does not
-match the number of transactions, so no transaction is ever sent
-without its retry protection.
+The helper sends the source transaction hash with the quote's complete Status Context: Quote Provider, source chain, destination chain, bridge, and — for 0x only — the Provider Quote ID. It polls normalized `pending` and `unknown` states and stops on `completed` or `failed`. A terminal `failed` state is a successful Transfer Status observation whose payload preserves the nullable error and Provider Details. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors. Same-chain quotes have no Status Context and reject Transfer Status polling before an HTTP request.
 
-## The execution plan model
+Status Context is a provider-discriminated union. Persist it whole alongside the quote and submit it unchanged: a 0x context additionally carries `providerQuoteId` (0x's `quoteId`), which the client serializes into every status poll and refuses to poll without, because bundled transactions cannot be disambiguated otherwise. `isOseroApiZeroXStatusContext` narrows to it.
 
-Every action returns an `ExecutionPlan`, a wallet-agnostic
-description of the transactions that need to happen. The adapter
-(`sendWith`) is the only piece that touches a real wallet. This
-gives you three things for free:
+### Recovery
 
-1. **Dry-run** — inspect the plan without signing anything:
+A failed cross-chain transfer is not automatically terminal. Inspect `status.recoveryContext` — nullable on every Transfer Status — instead of treating `failed` as the end of the story:
 
-   ```ts
-   import { flattenExecutionPlan } from '@osero/client';
+| `recoveryContext.state` | What to show                                                       |
+| ----------------------- | ------------------------------------------------------------------ |
+| `pending`               | Automatic recovery in progress; keep polling with backoff.         |
+| `completed`             | Recovered funds, using `chainId`, `tokenAddress`, `settledAmount`. |
+| `action-required`       | The `deadline` and the Recovery Action, prominently.               |
+| `not-required`          | Funds did not leave, or are already available.                     |
+| `unavailable`           | Stop automated recovery; direct the user to support.               |
 
-   const result = await mintSUsds(client, request);
-   if (result.isOk()) {
-     for (const tx of flattenExecutionPlan(result.value)) {
-       console.log(tx.operation, tx.to, tx.data);
-     }
-   }
-   ```
+Pass `waitForRecovery: true` to `waitForSwapCompletion` to keep polling a failed transfer while its recovery is still `pending`, so the returned status reflects the settled outcome. `reason` normalizes to `expired`, `cancelled`, `out-of-gas`, `provider-failure`, or `unknown`; provider-native strings stay in Provider Details for diagnostics only.
 
-2. **Portability** — pass the same plan to a viem wallet, an ethers
-   signer, a Privy server wallet, a custom batching relayer, or an
-   account-abstraction bundler. Only `sendWith` needs to change.
-3. **Testability** — actions are pure functions over an `OseroClient`;
-   unit-testing them without a live chain is a matter of injecting a
-   mock `PublicClient`.
-
-Plans come in three shapes:
-
-- `TransactionRequest` — a single pre-encoded tx.
-- `Erc20ApprovalRequired` — one or more approvals gating a single
-  main tx (e.g. every L2 mint / redeem).
-- `MultiStepExecution` — an ordered list of the above (e.g. mainnet
-  sUSDS mint, which is USDC → USDS → sUSDS in two phases).
-
-## Supported chains & contracts
-
-All addresses live in the source tree in `src/lib/addresses.ts` and
-`src/lib/tokens.ts`, and are re-exported from the package root:
+A Recovery Action is deliberately sender-free — any caller may submit it — so name the submitting wallet yourself rather than assuming the original one:
 
 ```ts
-import { SUPPORTED_CHAIN_IDS, CHAINS, PSM_ADDRESSES, getToken } from '@osero/client';
+import { isOseroApiActionableRecovery, prepareRecoveryExecutionPlan } from '@osero/client/api';
 
-console.log(PSM_ADDRESSES[8453].psm); // Spark PSM3 on Base
-console.log(getToken(1, 'sUSDS').address); // sUSDS on mainnet
+if (isOseroApiActionableRecovery(completion.value.recoveryContext)) {
+  const plan = prepareRecoveryExecutionPlan(completion.value, submitter);
+  if (plan.isErr()) throw plan.error;
+  const recovered = await sendWith(walletClient)(plan.value);
+  if (recovered.isErr()) throw recovered.error;
+
+  // Submission does not settle recovery; keep polling the original transfer.
+  const settled = await api.waitForSwapCompletion(finalQuote, sourceTxHash, {
+    waitForRecovery: true,
+  });
+}
 ```
 
-## Building & testing
+Only a `failed` transfer whose recovery is `action-required` authorizes a submission. Every other state is the API saying no wallet action is wanted, so `prepareRecoveryExecutionPlan` rejects a stale or malformed response that still carries calldata rather than turning it into a signable plan. `isOseroApiActionableRecovery` narrows to the one combination that is submittable, which is also what makes an unsubmittable one unrepresentable on the executable path.
 
-This package is part of the Osero SDK Nx workspace. From the repo
-root:
+The recipient, calldata, value, and gas limit are carried through unchanged; nonce and fee pricing stay the wallet's job. A non-null `deadline` becomes the plan's quote expiry, so adapters reject a recovery whose window has already closed. Osero never signs or submits a Recovery Action. Recovery status is tracked against the original source transaction, so keep polling that transfer after submitting.
 
-```bash
-pnpm nx build @osero/client      # tsc → dist/
-pnpm nx typecheck @osero/client  # strict tsc --noEmit
-pnpm nx test @osero/client       # vitest run
+The v1 hosted response is an intentional breaking replacement. The client does not decode or promise compatibility with the removed legacy Enso-shaped quote or bridge-status response.
+
+## Balances and APY
+
+```ts
+import { getSUsdsApy, getTokenBalance, getTokenBalances } from '@osero/client';
+
+const balances = await getTokenBalances(client, {
+  chainId: 8453,
+  account,
+  multicall: 'prefer', // 'require' | 'never'
+});
+const usdc = await getTokenBalance(client, {
+  chainId: 8453,
+  account,
+  token: 'USDC', // or any validated ERC-20 address
+});
+const apy = await getSUsdsApy(client, { chainId: 8453 });
 ```
+
+`multicall: 'prefer'` falls back to isolated reads only when the aggregate call itself cannot execute. Per-contract failures retain token and operation context. `ssrToApy` uses stable log-domain compounding and returns a validation `Result` for invalid or numerically unrepresentable rates.
+
+## Errors
+
+All public errors extend `OseroError` and expose stable literal `name` and `code` discriminants plus JSON-safe `toJSON()` output.
+
+```ts
+if (result.isErr()) {
+  switch (result.error.code) {
+    case 'ACCOUNT_MISMATCH':
+    case 'CHAIN_MISMATCH':
+      // Fix wallet/plan binding. No transaction was broadcast.
+      break;
+    case 'SIMULATION_FAILED':
+      // Fresh gas estimation failed.
+      break;
+    case 'CONFIRMATION_FAILED':
+      // Persist result.error.execution before retrying.
+      break;
+    case 'TRANSACTION_REVERTED':
+      // The receipt is final and reverted.
+      break;
+    default:
+      console.error(result.error.toJSON());
+  }
+}
+```
+
+## Supported chains
+
+| Chain        |    ID | Protocol                |
+| ------------ | ----: | ----------------------- |
+| Ethereum     |     1 | Sky Lite PSM + ERC-4626 |
+| OP Mainnet   |    10 | Spark PSM3              |
+| Unichain     |   130 | Spark PSM3              |
+| Base         |  8453 | Spark PSM3              |
+| Arbitrum One | 42161 | Spark PSM3              |
+
+Use `listChains()` and `CHAIN_CAPABILITIES`-backed discovery APIs rather than copying addresses. Raw ABIs and intentionally supported addresses are available through `@osero/client/contracts`.
+
+## Security notes
+
+- Inspect every plan before signing.
+- Keep RPC URLs explicit in production.
+- `max` approvals are persistent authority; use them only after explicit user consent.
+- Quotes and allowance observations can become stale.
+- Independent simulation is not a guarantee of sequential multi-step success.
+- Examples can broadcast real transactions. Use disposable wallets and small balances.
+- Never commit API keys, private keys, Privy secrets, or authorization keys.
 
 ## License
 

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a pnpm/Nx TypeScript workspace. The SDK lives in `packages/client`, with public entrypoints in `src/index.ts`, `src/viem.ts`, `src/ethers.ts`, and `src/privy.ts`. Core logic is under `packages/client/src/lib`, action builders are in `src/lib/actions`, and contract ABIs are in `src/lib/abis`. Tests are colocated with implementation as `*.test.ts`. Runnable examples live in `examples/src`, split by adapter (`viem`, `ethers`, `privy`) plus shared helpers in `examples/src/shared`.
+This is a pnpm/Nx TypeScript workspace. The SDK lives in `packages/client`, with public entrypoints in `src/index.ts`, `src/api.ts`, `src/viem.ts`, `src/ethers.ts`, and `src/privy.ts`. Core logic is under `packages/client/src/lib`, action builders are in `src/lib/actions`, hosted API support is in `src/lib/api.ts`, and contract ABIs are in `src/lib/abis`. Tests are colocated with implementation as `*.test.ts`. Runnable examples live in `examples/src`, split by hosted API (`api`), dry-runs (`dry-run`), adapters (`viem`, `ethers`, `privy`), and shared helpers in `examples/src/shared`.
 
 ## Build, Test, and Development Commands
 
@@ -12,7 +12,8 @@ This is a pnpm/Nx TypeScript workspace. The SDK lives in `packages/client`, with
 - `pnpm nx test @osero/client`: run the Vitest suite for the client package.
 - `pnpm lint` / `pnpm lint:fix`: run oxlint across workspace sources, optionally fixing issues.
 - `pnpm format:check` / `pnpm format`: check or apply oxfmt formatting.
-- `pnpm --filter @osero/examples dry-run:inspect-plan`: run the safest example; it builds a plan without broadcasting.
+- `pnpm --filter @osero/examples dry-run:inspect-plan`: run the safest local-action example; it builds a plan without broadcasting.
+- `OSERO_API_KEY=osero_... pnpm --filter @osero/examples api:quote-swap`: run the read-only hosted API quote example.
 
 ## Coding Style & Naming Conventions
 
@@ -20,7 +21,7 @@ Use strict TypeScript with ESM imports and explicit `.js` extensions for local r
 
 ## Testing Guidelines
 
-Vitest is configured in `packages/client/vitest.config.mts` with Node environment and globals enabled. Add focused tests next to the code under test using `*.test.ts` or `*.spec.ts`; action tests belong beside the action in `src/lib/actions`. For changes touching transaction planning, cover validation failures and the resulting `ExecutionPlan` shape. Coverage uses V8 and writes to `packages/client/test-output/vitest/coverage`.
+Vitest is configured in `packages/client/vitest.config.mts` with Node environment and globals enabled. Add focused tests next to the code under test using `*.test.ts` or `*.spec.ts`; action tests belong beside the action in `src/lib/actions`, and hosted API tests belong in `src/lib/api.test.ts`. For changes touching transaction planning, cover validation failures and the resulting `ExecutionPlan` shape. For hosted API changes, cover structural decoding with at least one unknown-vocabulary fixture and one known-pair decoded quote. Coverage uses V8 and writes to `packages/client/test-output/vitest/coverage`.
 
 ## Commit & Pull Request Guidelines
 

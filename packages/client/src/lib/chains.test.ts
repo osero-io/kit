@@ -12,10 +12,9 @@ describe('chain registry', () => {
     expect([...SUPPORTED_CHAIN_IDS].sort((a, b) => a - b)).toEqual([1, 10, 130, 8453, 42161]);
   });
 
-  it('marks only Ethereum mainnet with isMainnet=true', () => {
-    const mainnetOnly = listChains().filter((c) => c.isMainnet);
-    expect(mainnetOnly).toHaveLength(1);
-    expect(mainnetOnly[0]!.chainId).toBe(1);
+  it('models protocol differences explicitly rather than through a mainnet flag', () => {
+    expect(CHAINS[1].protocol).toBe('ethereum-lite-psm');
+    expect(listChains().filter((chain) => chain.protocol === 'psm3')).toHaveLength(4);
   });
 
   it('returns the correct viem chain for each supported ID', () => {

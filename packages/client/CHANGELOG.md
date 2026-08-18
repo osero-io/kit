@@ -1,5 +1,177 @@
 # @osero/client
 
+## 1.0.0-next.4
+
+### Minor Changes
+
+- 32d4137: Add an opt-in EIP-5792 wallet adapter.
+
+  The adapter submits pending execution-plan steps as one atomic call batch when the wallet supports
+  it and falls back to sequential viem execution by default. `prepareSwap({ execution: 'atomic-batch' })`
+  marks the plan so a capable wallet must send every pending step in one bundle. Mainnet USDC to sUSDS
+  then sizes the USDS approval and deposit as the 1:1 scaled USDC amount.
+
+## 1.0.0-next.3
+
+### Major Changes
+
+- 5bca250: Require slippage inputs to name basis points explicitly.
+
+  `parseSlippage` now accepts `{ bps: string }`, rejecting the legacy unitless string input.
+
+- 4b8ac15: Support the hosted API's 0x integration.
+
+  `'0x'` joins `'enso'` and `'lifi'` as a first-class Quote Provider across every
+  provider discriminator. 0x is one provider spanning the same-chain 0x Swap API
+  and the 0x Cross-Chain API, so it reports a single tag either way, and its
+  allowance requirements arrive as ordinary Approval Steps bound to the returned
+  spender.
+
+  - `isOseroApiZeroXProviderDetails` narrows quote Provider Details to the 0x
+    support id, curated route, gas and network-fee estimates, and the
+    `integratorFee` / `zeroExFee` / `bridgeNativeFee` breakdown.
+    `quote.expectedOutput` is already net of all three.
+  - Status Context is now a provider-discriminated union. A 0x context carries
+    the required `providerQuoteId`, which is serialized into every status poll;
+    polling a 0x context without it fails locally as a `ValidationError`.
+    Unrecognised primitive fields from a future provider's context are echoed
+    back unchanged instead of dropped.
+  - `isOseroApiZeroXTransferStatusProviderDetails` narrows Transfer Status
+    Provider Details to the original 0x status, failure reason, and recovery
+    status.
+  - Every Transfer Status gains a nullable `recoveryContext` with normalized
+    `state` and `reason`, so a failed cross-chain transfer is no longer
+    unconditionally terminal. `waitForSwapCompletion` accepts `waitForRecovery`
+    to keep polling while automatic recovery is pending.
+  - `prepareRecoveryExecutionPlan(status, submitter)` turns a sender-free
+    Recovery Action into a wallet-agnostic Execution Plan under the new
+    `RECOVER_CROSS_CHAIN_TRANSFER` operation. A recovery deadline becomes the
+    plan's quote expiry, so adapters refuse a closed window. Only a `failed`
+    transfer whose recovery is `action-required` authorizes a submission; every
+    other state is rejected rather than built into a signable plan, and
+    `isOseroApiActionableRecovery` narrows to that one submittable combination.
+
+### Minor Changes
+
+- 5bca250: Add account-free local swap quotes.
+
+  The new `quoteSwap` action returns block-pinned swap economics without requiring an account,
+  reading allowances, constructing calldata, or creating an execution plan.
+
+## 1.0.0-next.2
+
+### Patch Changes
+
+- 8562478: Call the hosted API fetch implementation as a plain function instead of as a method, so browsers
+  that enforce the fetch receiver no longer throw `TypeError: Illegal invocation`. This applies to
+  both the default global fetch and a caller-supplied `fetch` override.
+
+## 1.0.0-next.1
+
+### Major Changes
+
+- 7fcfe4a: Replace legacy bridge-status requests and responses with normalized Transfer Status. Status requests
+  now keep the source transaction hash and complete quote Status Context together, known Enso and LI.FI
+  Provider Details are typed, and unknown providers remain inspectable. Polling continues for pending
+  and unknown states and returns completed or failed Transfer Status observations without discarding
+  provider diagnostics.
+- 7fcfe4a: Replace the legacy hosted quote response with the provider-neutral API contract. Same-chain quotes
+  now return a `ready-to-execute` Hosted Swap Workflow containing the normalized API quote and a
+  separate execution-only, expiry-bound Wallet Execution Plan. Enso and LI.FI Provider Details are
+  typed, unknown providers remain inspectable and executable, and hosted approval policy is removed.
+- 7fcfe4a: Publish the breaking v1 hosted API migration as a provider-neutral Hosted Swap Workflow. Replace
+  the legacy Enso-shaped quote and bridge status with discriminated approval and ready states,
+  provider-locked Quote Refresh, expiry-bound Wallet Execution Plans, bounded high-level execution,
+  and normalized Transfer Status polling.
+
+### Minor Changes
+
+- 7fcfe4a: Add manual hosted Approval Step and provider-locked Quote Refresh transitions. Insufficient
+  allowance now returns one exact approval-only Wallet Execution Plan, while refreshed quotes restart
+  allowance preparation before exposing replacement execution calldata.
+- 7fcfe4a: Add a bounded wallet-neutral Hosted Swap Workflow executor. It confirms one approval at a time,
+  performs provider-locked Quote Refreshes after approvals or expiry, emits serialized lifecycle
+  progress, and returns the final quote with every confirmed wallet result.
+- 7fcfe4a: Add optional hosted quote expiry constraints to Wallet Execution Plans. Expiry now participates in
+  plan identity and persistence, and viem, ethers, and Privy executions fail with a typed
+  `QuoteExpiredError` when the quote expires before broadcast.
+
+## 1.0.0-next.0
+
+### Major Changes
+
+- a9f7ba8: Replace the 0.x pair-specific preview/action surface with a single typed `prepareSwap` API. It
+  returns a rich exact-input or exact-output quote tied to a flat, versioned, account/chain-bound
+  `ExecutionPlan`. Amounts, slippage, referrals, approval policy, and unprotected-route consent are
+  explicit domain inputs. Referral attribution and public RPC fallback default to disabled, while
+  allowance-aware exact approvals are the default.
+
+  Wallet adapters now preflight the complete plan before broadcasting, estimate fresh buffered gas,
+  report truthful signing/broadcast/confirmation/revert stages, preserve submitted and replacement
+  hashes, emit progress, and support receipt-verified confirmed-prefix recovery. Every SDK error has
+  stable literal discriminants and contextual JSON output; operational calls keep failures in
+  `Result`/`ResultAsync`.
+
+  The public surface is intentionally split across the root, `/actions`, `/api`, `/contracts`,
+  `/viem`, `/ethers`, and `/privy` entrypoints. Legacy local action functions, nested plan variants,
+  and internal flattening/type-guard helpers are removed.
+
+  Refactor the hosted Osero API client around API-authoritative asset refs. The SDK no longer ships a gating registry, so a deployed build keeps working as the hosted API adds and removes assets, chains, and bridge protocols.
+
+  `getSwapQuote` accepts any asset ref — a canonical id (`'ethereum:usdc'`), an arbitrary string id, or a `{ chainId, address }` locator encoded on the wire as `'<chainId>:<0xaddress>'`. Known ids still autocomplete, but nothing is rejected locally on membership: the hosted API is the sole authority and answers unsupported refs with HTTP 400 and a stable API response code (for example `SWAP_ASSET_NOT_SUPPORTED`). That server code is exposed as `ApiRequestError.apiCode`; `ApiRequestError.code` remains the SDK error discriminant `API_REQUEST_FAILED`. Responses decode structurally, so assets, chains, protocols, kinds, directions, and states unknown to this SDK release decode normally.
+
+  Registry exports are renamed to advisory `KNOWN_` snapshots — `OSERO_API_KNOWN_ASSETS`, `OSERO_API_KNOWN_CHAINS`, `OSERO_API_KNOWN_ASSET_IDS`, `OSERO_API_KNOWN_CHAIN_IDS`, and `OSERO_API_KNOWN_BRIDGE_PROTOCOLS` — that only power editor autocomplete and offline UI hints. The input/output splits (`OSERO_API_INPUT_*`, `OSERO_API_OUTPUT_*`, `OseroApiInputAssetId`, `OseroApiOutputAssetId`) and the source-chain allowlist (`OSERO_API_SOURCE_CHAIN_IDS`, `OseroApiSourceChainId`) are removed. `getSupportedAssets()` is the sanctioned live list, and the new `matchOseroApiAsset(assets, ref)` helper pre-flights a ref against it.
+
+  Client-side validation narrows to wire grammar and execution safety (EVM addresses, hex payloads, uint256 amounts, 32-byte tx hashes). Server-policy checks that 0.x ran locally are now enforced by the API instead of pre-flight `ValidationError`s: asset/pair membership and slippage failures come back as 400s with stable codes (`SWAP_ASSET_NOT_SUPPORTED`, `SWAP_PAIR_NOT_SUPPORTED`, `SLIPPAGE_INVALID`, `SLIPPAGE_OUT_OF_RANGE`), an out-of-range referral code is a plain 400 from request validation, and a printable-ASCII but invalid API key is a 401. Empty keys and keys containing non-ASCII, whitespace, or control characters remain local `ValidationError`s. `getTokenBalance` additionally accepts any ERC-20 address alongside the canonical token symbols.
+
+  Hosted API Execution Plans tag execution transactions as `SWAP_EXACT_IN`; derive user-facing labels from `quote.pair.source` and `quote.pair.destination`. See `docs/osero-sdk/upgrading-0-to-1.md` for the full migration guide.
+
+## Unreleased
+
+### Major Changes
+
+- Replace pair-specific preview/action helpers with one typed `prepareSwap` API covering the
+  verified exact-input and exact-output route matrix. Preparation now returns a rich quote bound to
+  a versioned flat `ExecutionPlan`.
+- Make amounts, slippage, referrals, approval policy, account, and chain binding explicit.
+  Referral attribution and public RPC fallback now default to disabled; exact allowance-aware
+  approval is the default authorization policy.
+- Require slippage constructors to name their unit explicitly as
+  `parseSlippage({ bps: value })`; the legacy unitless string input is rejected.
+- Replace nested plan variants with deterministic step IDs, plan identity, canonical
+  serialization, confirmed-prefix recovery, progress callbacks, and executor capability
+  requirements.
+- Replace broad/generic failures with stable literal error codes and contextual, JSON-safe error
+  fields. Operational APIs return `Result`/`ResultAsync`; executor preflight validates the complete
+  plan before any broadcast.
+- Split the intentional public surface across root, `/actions`, `/api`, `/contracts`, `/viem`,
+  `/ethers`, and `/privy`. Legacy action functions and internal flattening/type-guard helpers are
+  no longer exported.
+
+### Minor Changes
+
+- Add account-free `quoteSwap` for read-only local route economics. It returns the same block-pinned
+  amounts, fees, route, and slippage-protection details used by preparation without reading
+  allowances, constructing calldata, or returning an execution plan.
+
+### Security and Reliability
+
+- Verify hosted quote sender, amount, source-chain relationships, approval target/value, and decoded
+  ERC-20 `approve(spender, amount)` calldata before exposing executable plans.
+- Recheck live allowance at a recorded block and rebuild approval transactions locally. Hosted gas
+  values remain advisory metadata and never bypass fresh executor estimation.
+- Add account/chain/checksum binding, all-step preflight, fresh buffered gas estimation, truthful
+  signing/broadcast/confirmation/revert stages, ethers replacement tracking, and standard-hash
+  enforcement for Privy.
+- Add cancellable bounded bridge completion polling, independent-step plan simulation with live fee
+  and balance provenance, explicit balance multicall policy, and stable log-domain APY conversion.
+
+### Release Gates
+
+- Add a clean-build tarball allowlist, MIT license packaging, declaration API report, packed ESM and
+  TypeScript consumers, optional-peer isolation, Node 20/24 compatibility, all-source coverage
+  thresholds, shared adapter contracts, and pinned-block fork gates for every supported chain.
+
 ## 0.8.0
 
 ### Minor Changes

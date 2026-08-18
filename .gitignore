@@ -4,6 +4,7 @@
 dist
 tmp
 out-tsc
+/packages/client/test-output/
 
 # dependencies
 node_modules
