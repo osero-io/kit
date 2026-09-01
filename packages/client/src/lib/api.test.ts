@@ -1031,6 +1031,12 @@ describe('hosted quote verification and preparation', () => {
       }),
     ],
     ['approval calldata differs', quoteWithApproval({ encodedSpender: OTHER_SPENDER })],
+    [
+      'approval required amount exceeds quote input',
+      quoteWithApproval({
+        requiredAmount: BigInt(ENSO_SAME_CHAIN_QUOTE.quote.inputAmount.raw) + 1n,
+      }),
+    ],
     ['approval token identity differs', quoteWithApproval({ tokenSymbol: 'OTHER' })],
   ])('rejects malformed normalized quote data when %s', async (_name, fixture) => {
     const transport = fetchSequence({ body: fixture });

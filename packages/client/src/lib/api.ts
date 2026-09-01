@@ -2196,6 +2196,9 @@ function assertSwapQuoteInvariants(
       throw new DecodeError(`${path}.token must match $.pair.source`);
     }
     assertAmountFormat(approval.requiredAmount, pair.source, `${path}.requiredAmount`);
+    if (BigInt(approval.requiredAmount.raw) > BigInt(quote.inputAmount.raw)) {
+      throw new DecodeError(`${path}.requiredAmount.raw must not exceed $.quote.inputAmount.raw`);
+    }
     if (!isAddressEqual(approval.transaction.recipient, approval.token.address)) {
       throw new DecodeError(`${path}.transaction.recipient must match the approval token`);
     }
