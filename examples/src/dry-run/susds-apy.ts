@@ -54,7 +54,9 @@ async function main() {
   // a cached read) and just want to format the APY.
   const exampleSsr = 1_000_000_001_136_785_036_595_443_334n;
   console.log(`ssr=${exampleSsr}`);
-  console.log(`apy=${(ssrToApy(exampleSsr) * 100).toFixed(4)}%`);
+  const converted = ssrToApy(exampleSsr);
+  if (converted.isErr()) throw converted.error;
+  console.log(`apy=${(converted.value * 100).toFixed(4)}%`);
 }
 
 main().catch((err) => {

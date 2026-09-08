@@ -1,0 +1,34 @@
+{
+  "mode": "pre",
+  "tag": "next",
+  "initialVersions": {
+    "@osero/examples": "0.0.0",
+    "@osero/client": "0.8.0"
+  },
+  "changesets": [
+    "bind-browser-fetch",
+    "dependabot-pr-44",
+    "dependabot-pr-46",
+    "dependabot-pr-47",
+    "dependabot-pr-50",
+    "dependabot-pr-51",
+    "dependabot-pr-52",
+    "dependabot-pr-64",
+    "dependabot-pr-70",
+    "dependabot-pr-72",
+    "drive-hosted-approval-refresh",
+    "eip5792-wallet-batching",
+    "execute-hosted-swap-workflows",
+    "flexible-api-swaps",
+    "guard-hosted-approval-amount",
+    "guard-wallet-quote-expiry",
+    "name-slippage-basis-points",
+    "opt-out-error-telemetry",
+    "poll-normalized-transfer-status",
+    "prepare-provider-neutral-quotes",
+    "publish-hosted-v1-surface",
+    "quote-before-wallet",
+    "stable-sdk-version-declaration",
+    "support-zerox-quotes-and-recovery"
+  ]
+}
