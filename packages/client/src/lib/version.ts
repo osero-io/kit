@@ -7,4 +7,4 @@
  * literal type in `dist/lib/version.d.ts`, so every release would change a public
  * declaration hash and trip the `api-report.json` gate.
  */
-export const SDK_VERSION: string = '1.0.0-next.4';
+export const SDK_VERSION: string = '1.0.0-next.5';

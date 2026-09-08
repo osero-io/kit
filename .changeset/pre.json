@@ -20,12 +20,15 @@
     "eip5792-wallet-batching",
     "execute-hosted-swap-workflows",
     "flexible-api-swaps",
+    "guard-hosted-approval-amount",
     "guard-wallet-quote-expiry",
     "name-slippage-basis-points",
+    "opt-out-error-telemetry",
     "poll-normalized-transfer-status",
     "prepare-provider-neutral-quotes",
     "publish-hosted-v1-surface",
     "quote-before-wallet",
+    "stable-sdk-version-declaration",
     "support-zerox-quotes-and-recovery"
   ]
 }
