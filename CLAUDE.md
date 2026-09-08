@@ -48,6 +48,10 @@ Never hand-build plan objects. Use the constructors in `src/lib/plan.ts` so sche
 
 Never throw from an action path. Errors are typed classes in `src/lib/errors.ts` (`ValidationError`, `UnsupportedChainError`, `InsufficientBalanceError`, `TransactionError`, `SigningError`, `CancelError`, `UnexpectedError`) and returned via `neverthrow`. Re-exports of `Result`/`ResultAsync` come from `src/lib/result.ts` — import from there, not directly from `neverthrow`, so the dependency stays swappable.
 
+### Telemetry
+
+`src/lib/telemetry.ts` reports a curated subset of returned errors to Osero's Sentry project (opt-out, on by default). Rules: errors are observed only where they leave a public entry point via `observeResult(result, { operation, ... })` — never inside internal loops or retries; the report/ignore policy lives in `classifyForTelemetry` and is documented in `docs/osero-sdk/telemetry.md`; the Sentry client is a private `@sentry/core` instance loaded lazily, never `Sentry.init`; API keys, headers, addresses, and amounts must never be attached. Hosted API requests to `*.osero.org` carry a `sentry-trace` header from `startTelemetryTrace()`. Telemetry is off under `NODE_ENV=test`, so tests that exercise it call `_configureTelemetryForTesting`. `src/lib/version.ts` must match `package.json`; `pnpm version-packages` syncs it and `version.test.ts` enforces it.
+
 ### Chain/token/API registries
 
 `src/lib/chains.ts` (`SUPPORTED_CHAIN_IDS`, `CHAINS`, `isSupportedChainId`), `src/lib/tokens.ts`, and `src/lib/addresses.ts` are the single source of truth for local action builders — any new local PSM chain requires updating all three plus the `PSM_ADDRESSES` entry (and a `litePsm` entry if mainnet-style). `isMainnet` is semantic (only chain ID 1) because it switches the action flow, not a geographic flag.

@@ -43,6 +43,12 @@ import {
 } from './plan.js';
 import { referralCodeForApi } from './referrals.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './result.js';
+import {
+  observeResult,
+  startTelemetryTrace,
+  telemetryTraceHeaders,
+  type TelemetryTrace,
+} from './telemetry.js';
 import type {
   ExecutionPlan,
   ExecutionPlanHandler,
@@ -861,6 +867,7 @@ type RequestJsonArgs<T> = {
   readonly path: string;
   readonly body?: OseroApiSwapQuoteBody | OseroApiRefreshContext;
   readonly options?: OseroApiRequestOptions;
+  readonly trace?: TelemetryTrace;
   readonly decoder: (value: unknown) => Result<T, UnexpectedError>;
 };
 
@@ -924,17 +931,34 @@ export class OseroApiClient {
   getSupportedAssets(
     options?: OseroApiRequestOptions,
   ): ResultAsync<OseroApiSupportedAssetsResponse, OseroApiClientError> {
-    return this.requestJson({
-      method: 'GET',
-      path: 'swap/assets',
-      options,
-      decoder: decodeSupportedAssetsResponse,
-    });
+    const trace = startTelemetryTrace();
+    return observeResult(
+      this.requestJson({
+        method: 'GET',
+        path: 'swap/assets',
+        options,
+        trace,
+        decoder: decodeSupportedAssetsResponse,
+      }),
+      { operation: 'api.getSupportedAssets', trace },
+    );
   }
 
   getSwapQuote(
     request: OseroApiSwapQuoteRequest,
     options?: OseroApiRequestOptions,
+  ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
+    const trace = startTelemetryTrace();
+    return observeResult(this.getSwapQuoteWithTrace(request, options, trace), {
+      operation: 'api.getSwapQuote',
+      trace,
+    });
+  }
+
+  private getSwapQuoteWithTrace(
+    request: OseroApiSwapQuoteRequest,
+    options: OseroApiRequestOptions | undefined,
+    trace: TelemetryTrace | undefined,
   ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
     const body = encodeSwapQuoteRequest(request);
     if (body.isErr()) return errAsync(body.error);
@@ -944,6 +968,7 @@ export class OseroApiClient {
       path: 'swap/quote',
       body: body.value,
       options,
+      trace,
       decoder: (value) =>
         decodeSwapQuoteResponse(value, {
           fromAddress: body.value.fromAddress,
@@ -960,11 +985,24 @@ export class OseroApiClient {
     refreshContext: OseroApiRefreshContext,
     options?: OseroApiRequestOptions,
   ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
+    const trace = startTelemetryTrace();
+    return observeResult(this.refreshSwapQuoteWithTrace(refreshContext, options, trace), {
+      operation: 'api.refreshSwapQuote',
+      trace,
+    });
+  }
+
+  private refreshSwapQuoteWithTrace(
+    refreshContext: OseroApiRefreshContext,
+    options: OseroApiRequestOptions | undefined,
+    trace: TelemetryTrace | undefined,
+  ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
     return this.requestJson({
       method: 'POST',
       path: 'swap/quote/refresh',
       body: refreshContext,
       options,
+      trace,
       decoder: (value) =>
         decodeSwapQuoteResponse(value, {
           fromAddress: refreshContext.walletAddress,
@@ -983,6 +1021,7 @@ export class OseroApiClient {
     handler: ExecutionPlanHandler,
     options: ExecuteSwapOptions = {},
   ): ResultAsync<OseroApiHostedSwapResult, ExecuteSwapError> {
+    const trace = startTelemetryTrace();
     const execute = async (): Promise<Result<OseroApiHostedSwapResult, ExecuteSwapError>> => {
       if (typeof options !== 'object' || options === null) {
         return err(ValidationError.forField('options', 'options must be an object'));
@@ -1040,7 +1079,7 @@ export class OseroApiClient {
         );
       }
 
-      const initial = await this.getSwapQuote(request, requestOptions);
+      const initial = await this.getSwapQuoteWithTrace(request, requestOptions, trace);
       if (initial.isErr()) return err(initial.error);
       let workflow = initial.value;
       let refreshCount = 0;
@@ -1059,7 +1098,11 @@ export class OseroApiClient {
           reason,
         });
         if (refreshing.isErr()) return err(refreshing.error);
-        const refreshed = await this.refreshSwapQuote(current.quote.refreshContext, requestOptions);
+        const refreshed = await this.refreshSwapQuoteWithTrace(
+          current.quote.refreshContext,
+          requestOptions,
+          trace,
+        );
         if (refreshed.isErr()) return err(refreshed.error);
         const refreshReceived = await emit({
           type: 'quote-received',
@@ -1162,12 +1205,24 @@ export class OseroApiClient {
       }
       // oxlint-enable no-await-in-loop
     };
-    return new ResultAsync(execute());
+    return observeResult(new ResultAsync(execute()), { operation: 'api.executeSwap', trace });
   }
 
   getSwapStatus(
     request: OseroApiTransferStatusRequest,
     options?: OseroApiRequestOptions,
+  ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
+    const trace = startTelemetryTrace();
+    return observeResult(this.getSwapStatusWithTrace(request, options, trace), {
+      operation: 'api.getSwapStatus',
+      trace,
+    });
+  }
+
+  private getSwapStatusWithTrace(
+    request: OseroApiTransferStatusRequest,
+    options: OseroApiRequestOptions | undefined,
+    trace: TelemetryTrace | undefined,
   ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
     const query = encodeSwapStatusRequest(request);
     if (query.isErr()) return errAsync(query.error);
@@ -1175,6 +1230,7 @@ export class OseroApiClient {
       method: 'GET',
       path: query.value,
       options,
+      trace,
       decoder: (value) => decodeTransferStatus(value, request),
     });
   }
@@ -1239,6 +1295,7 @@ export class OseroApiClient {
       );
     }
     const waitForRecovery = options.waitForRecovery ?? false;
+    const trace = startTelemetryTrace();
 
     const wait = async (): Promise<Result<OseroApiTransferStatus, OseroApiClientError>> => {
       const startedAt = Date.now();
@@ -1254,7 +1311,7 @@ export class OseroApiClient {
 
         const status = await awaitPollingOperation(
           (signal) =>
-            this.getSwapStatus(
+            this.getSwapStatusWithTrace(
               {
                 sourceTransactionHash: txHash,
                 statusContext: statusRequest,
@@ -1263,6 +1320,7 @@ export class OseroApiClient {
                 ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
                 signal,
               },
+              trace,
             ),
           remaining,
           timeoutMs,
@@ -1315,7 +1373,10 @@ export class OseroApiClient {
       }
       // oxlint-enable no-await-in-loop
     };
-    return new ResultAsync(wait());
+    return observeResult(new ResultAsync(wait()), {
+      operation: 'api.waitForSwapCompletion',
+      trace,
+    });
   }
 
   private prepareHostedWorkflow(
@@ -1482,6 +1543,7 @@ export class OseroApiClient {
     path,
     body,
     options,
+    trace,
     decoder,
   }: RequestJsonArgs<T>): ResultAsync<T, OseroApiClientError> {
     const request = async (): Promise<Result<T, OseroApiClientError>> => {
@@ -1517,6 +1579,7 @@ export class OseroApiClient {
           accept: 'application/json',
           'x-api-key': apiKey.value,
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...telemetryTraceHeaders(trace, url),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         ...(options?.signal === undefined ? {} : { signal: options.signal }),

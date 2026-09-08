@@ -12,6 +12,7 @@ import { vi } from 'vitest';
 import { defineAdapterContract, type AdapterContractFactory } from './lib/_testing.js';
 import { ConfirmationError, TransactionError } from './lib/errors.js';
 import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
+import { _configureTelemetryForTesting, type TelemetryEvent } from './lib/telemetry.js';
 import { sendWith } from './viem.js';
 
 const actions = vi.hoisted(() => ({
@@ -222,5 +223,55 @@ describe('viem stage behavior', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error).toBeInstanceOf(TransactionError);
+  });
+});
+
+describe('viem telemetry boundary', () => {
+  afterEach(() => {
+    _configureTelemetryForTesting({ enabled: undefined });
+  });
+
+  it('reports reverted executions once with executor context', async () => {
+    resetActions();
+    actions.waitForTransactionReceipt.mockResolvedValue({
+      status: 'reverted',
+      transactionHash: hash(1),
+      blockNumber: 1n,
+      gasUsed: 1n,
+      effectiveGasPrice: 1n,
+    });
+    const events: TelemetryEvent[] = [];
+    _configureTelemetryForTesting({
+      enabled: true,
+      sink: { capture: (event) => void events.push(event), flush: async () => true },
+    });
+
+    const result = await sendWith(wallet(ACCOUNT, 8453), singlePlan());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(result.isErr() && result.error).toBeInstanceOf(TransactionError);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      'osero.operation': 'viem.sendWith',
+      'osero.executor': 'viem',
+      'osero.chain_id': 8453,
+      'osero.error_code': 'TRANSACTION_REVERTED',
+      'osero.stage': 'revert',
+    });
+  });
+
+  it('does not report caller-side configuration failures', async () => {
+    resetActions();
+    const events: TelemetryEvent[] = [];
+    _configureTelemetryForTesting({
+      enabled: true,
+      sink: { capture: (event) => void events.push(event), flush: async () => true },
+    });
+
+    const result = await sendWith({} as WalletClient, singlePlan());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(result.isErr()).toBe(true);
+    expect(events).toHaveLength(0);
   });
 });

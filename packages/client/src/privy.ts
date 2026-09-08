@@ -32,6 +32,7 @@ import {
 } from './lib/errors.js';
 import { checkExecutionPlanExpiry } from './lib/plan.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './lib/result.js';
+import { observeResult } from './lib/telemetry.js';
 import type {
   ConfirmationOptions,
   ExecutionPlan,
@@ -436,7 +437,20 @@ export function sendWith(
   maybeOptions?: SendWithOptions,
 ): ExecutionPlanHandler | ResultAsync<TransactionResult, SendWithError> {
   if ('chainId' in planOrOptions) {
-    return (plan) => executePlan(privy, wallet, plan, planOrOptions);
+    return (plan) => observedExecutePlan(privy, wallet, plan, planOrOptions);
   }
-  return executePlan(privy, wallet, planOrOptions, maybeOptions);
+  return observedExecutePlan(privy, wallet, planOrOptions, maybeOptions);
+}
+
+function observedExecutePlan(
+  privy: PrivyExecutorClient,
+  wallet: PrivyWallet,
+  plan: ExecutionPlan,
+  options?: SendWithOptions,
+): ResultAsync<TransactionResult, SendWithError> {
+  return observeResult(executePlan(privy, wallet, plan, options), {
+    operation: 'privy.sendWith',
+    executor: 'privy',
+    ...(plan?.steps?.[0]?.chainId === undefined ? {} : { chainId: plan.steps[0].chainId }),
+  });
 }

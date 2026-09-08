@@ -14,6 +14,7 @@ import {
 } from './errors.js';
 import type { OseroClient } from './OseroClient.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './result.js';
+import { observeResult } from './telemetry.js';
 import type { ExecutionPlan, OperationType } from './types.js';
 import { validateExecutorBinding } from './validation.js';
 
@@ -253,5 +254,8 @@ export function simulateExecutionPlan(
     });
   };
 
-  return new ResultAsync(simulation());
+  return observeResult(new ResultAsync(simulation()), {
+    operation: 'actions.simulateExecutionPlan',
+    chainId: firstChainId,
+  });
 }
