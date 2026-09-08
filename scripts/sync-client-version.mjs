@@ -11,10 +11,10 @@ if (typeof version !== 'string' || version.length === 0) {
 
 const source = await readFile(versionUrl, 'utf8');
 const updated = source.replace(
-  /export const SDK_VERSION = '[^']*';/,
-  `export const SDK_VERSION = '${version}';`,
+  /export const SDK_VERSION: string = '[^']*';/,
+  `export const SDK_VERSION: string = '${version}';`,
 );
-if (!updated.includes(`SDK_VERSION = '${version}'`)) {
+if (!updated.includes(`SDK_VERSION: string = '${version}'`)) {
   throw new Error(`Could not find SDK_VERSION in ${fileURLToPath(versionUrl)}`);
 }
 if (updated !== source) {
