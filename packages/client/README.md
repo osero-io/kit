@@ -493,6 +493,20 @@ if (result.isErr()) {
 
 Use `listChains()` and `CHAIN_CAPABILITIES`-backed discovery APIs rather than copying addresses. Raw ABIs and intentionally supported addresses are available through `@osero/client/contracts`.
 
+## Telemetry
+
+The SDK reports a small, fixed set of its own failures to Osero's Sentry project: SDK bugs (`UnexpectedError`), hosted API contract drift (`ApiResponseError`), server-side API failures, and failed on-chain executions. Caller mistakes, user cancellations, wallet signing failures, network and RPC outages, quote expiry, and API key or rate-limit responses are never reported. Events never contain API keys, headers, wallet addresses, amounts, or user identity.
+
+Telemetry is on by default. Turn it off before using the SDK:
+
+```ts
+import { configureTelemetry } from '@osero/client';
+
+configureTelemetry({ enabled: false });
+```
+
+In Node.js, `OSERO_TELEMETRY=0` or `DO_NOT_TRACK=1` has the same effect, and telemetry is off automatically while `NODE_ENV=test`. The SDK never calls `Sentry.init` and never touches a host application's own Sentry setup; `@sentry/core` is loaded only when the first event qualifies. Hosted API requests to `*.osero.org` carry a `sentry-trace` header so API-side events can be correlated. See [docs/osero-sdk/telemetry.md](../../docs/osero-sdk/telemetry.md) for the full policy.
+
 ## Security notes
 
 - Inspect every plan before signing.

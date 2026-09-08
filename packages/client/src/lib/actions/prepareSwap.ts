@@ -25,6 +25,7 @@ import type { OseroClient } from '../OseroClient.js';
 import { createExecutionPlan, createTransactionRequest } from '../plan.js';
 import { referralCodeForRoute, resolveReferral } from '../referrals.js';
 import { err, errAsync, ok, ResultAsync, type Result } from '../result.js';
+import { observeResult } from '../telemetry.js';
 import type {
   ExecutionPlan,
   ExecutorRequirements,
@@ -126,7 +127,10 @@ export function prepareSwap(
     return prepareEthereumSwap(client, resolved.value, block.value, evaluation.value);
   };
 
-  return new ResultAsync(preparation());
+  return observeResult(new ResultAsync(preparation()), {
+    operation: 'actions.prepareSwap',
+    chainId: resolved.value.chainId,
+  });
 }
 
 type ResolvedRequest = ResolvedSwapQuoteRequest & {

@@ -20,6 +20,7 @@ import {
 } from './lib/errors.js';
 import { checkExecutionPlanExpiry } from './lib/plan.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './lib/result.js';
+import { observeResult } from './lib/telemetry.js';
 import type {
   ConfirmationOptions,
   ExecutionPlan,
@@ -339,7 +340,19 @@ export function sendWith(
     planOrOptions !== null &&
     '__typename' in planOrOptions &&
     planOrOptions.__typename === 'ExecutionPlan';
-  if (isPlan) return executePlan(signer, planOrOptions, maybeOptions);
+  if (isPlan) return observedExecutePlan(signer, planOrOptions, maybeOptions);
   const options = planOrOptions as SendWithOptions | undefined;
-  return (plan) => executePlan(signer, plan, options);
+  return (plan) => observedExecutePlan(signer, plan, options);
+}
+
+function observedExecutePlan(
+  signer: Signer,
+  plan: ExecutionPlan,
+  options?: SendWithOptions,
+): ResultAsync<TransactionResult, SendWithError> {
+  return observeResult(executePlan(signer, plan, options), {
+    operation: 'ethers.sendWith',
+    executor: 'ethers',
+    ...(plan?.steps?.[0]?.chainId === undefined ? {} : { chainId: plan.steps[0].chainId }),
+  });
 }

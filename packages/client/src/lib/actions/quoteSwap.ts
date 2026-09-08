@@ -24,6 +24,7 @@ import {
 } from '../math.js';
 import type { OseroClient, OseroPublicClient } from '../OseroClient.js';
 import { err, errAsync, ok, ResultAsync, type Result } from '../result.js';
+import { observeResult } from '../telemetry.js';
 import { isTokenSymbol } from '../tokens.js';
 import type {
   ExactInSwapQuote,
@@ -123,7 +124,10 @@ export function quoteSwap(
     return evaluated.map(({ quote }) => quote);
   };
 
-  return new ResultAsync(quotation());
+  return observeResult(new ResultAsync(quotation()), {
+    operation: 'actions.quoteSwap',
+    chainId: resolved.value.chainId,
+  });
 }
 
 export function resolveSwapQuoteRequest(

@@ -32,6 +32,7 @@ import {
 } from './lib/errors.js';
 import { checkExecutionPlanExpiry } from './lib/plan.js';
 import { err, errAsync, ok, ResultAsync, type Result } from './lib/result.js';
+import { observeResult } from './lib/telemetry.js';
 import type {
   ConfirmationOptions,
   ExecutionPlan,
@@ -319,7 +320,19 @@ export function sendWith(
     planOrOptions !== null &&
     '__typename' in planOrOptions &&
     planOrOptions.__typename === 'ExecutionPlan';
-  if (isPlan) return executePlan(walletClient, planOrOptions, maybeOptions);
+  if (isPlan) return observedExecutePlan(walletClient, planOrOptions, maybeOptions);
   const options = planOrOptions as SendWithOptions | undefined;
-  return (plan) => executePlan(walletClient, plan, options);
+  return (plan) => observedExecutePlan(walletClient, plan, options);
+}
+
+function observedExecutePlan(
+  walletClient: WalletClient,
+  plan: ExecutionPlan,
+  options?: SendWithOptions,
+): ResultAsync<TransactionResult, SendWithError> {
+  return observeResult(executePlan(walletClient, plan, options), {
+    operation: 'viem.sendWith',
+    executor: 'viem',
+    ...(plan?.steps?.[0]?.chainId === undefined ? {} : { chainId: plan.steps[0].chainId }),
+  });
 }
