@@ -15,7 +15,7 @@
     "**/out-tsc/**",
     "**/coverage/**",
     "**/node_modules/**",
-    ".nx/**",
+    ".turbo/**",
     "tmp/**",
     "**/*.tsbuildinfo"
   ],

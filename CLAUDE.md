@@ -4,18 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository layout
 
-pnpm + Nx TypeScript monorepo. The only publishable package is `@osero/client` in `packages/client`. Runnable broadcast/dry-run examples live in `examples/` (private package `@osero/examples`). Design notes for the underlying Sky/Spark contracts are in `PSM_GUIDE.md` and additional contributor conventions in `AGENTS.md`.
+pnpm + Turborepo TypeScript monorepo, compiled with TypeScript 7. The only publishable package is `@osero/client` in `packages/client`. Runnable broadcast/dry-run examples live in `examples/` (private package `@osero/examples`). Design notes for the underlying Sky/Spark contracts are in `PSM_GUIDE.md` and additional contributor conventions in `AGENTS.md`.
 
 ## Commands
 
 - `pnpm install` — install workspace deps
-- `pnpm nx build @osero/client` — compile the SDK (TS project references)
-- `pnpm nx typecheck @osero/client` — declaration-only typecheck
-- `pnpm nx test @osero/client` — run the Vitest suite (coverage → `packages/client/test-output/vitest/coverage`)
-- Run a single test: `pnpm nx test @osero/client -- -t "<test name>"` or point vitest at a file: `pnpm nx test @osero/client -- packages/client/src/lib/actions/mintUsds.test.ts`
+- `pnpm build` — `turbo run build`: compile the SDK with `tsc --build` (TS project references) into `packages/client/dist`
+- `pnpm typecheck` — `turbo run typecheck`: declaration-only typecheck of the client (including its tests) and the examples
+- `pnpm test` — `turbo run test`: run the Vitest suite. Coverage: `pnpm turbo run test -- --coverage` (written to `packages/client/test-output/vitest/coverage`)
+- `pnpm check` — everything CI runs: `turbo run format:check lint build typecheck test`
+- Scope any task to one package with a turbo filter: `pnpm turbo run build --filter=@osero/client`
+- Run a single test: `pnpm --filter @osero/client test -t "<test name>"` or point vitest at a file: `pnpm --filter @osero/client test src/lib/actions/mintUsds.test.ts`
 - `pnpm lint` / `pnpm lint:fix` — oxlint across workspace
 - `pnpm format:check` / `pnpm format` — oxfmt
 - `pnpm --filter @osero/examples dry-run:inspect-plan` — safe plan-building example (no broadcast)
+
+Task graph and caching live in `turbo.json`. `build` caches `dist/`; `typecheck` depends on `build` because both run `tsc --build` against the same project references and write the same `tsbuildinfo`; `test` depends on `^build`. Lint and format are root-level tasks (`//#lint`, `//#format:check`, …) because oxlint/oxfmt cover the whole workspace in one pass.
 
 Broadcasting examples (`pnpm --filter @osero/examples viem:mint-usds`, etc.) send real transactions — they require `examples/.env` with a disposable `PRIVATE_KEY`.
 
@@ -53,7 +57,7 @@ Never throw from an action path. Errors are typed classes in `src/lib/errors.ts`
 
 ## Code style
 
-- Strict TypeScript, ESM, **`.js` extensions on local imports** (these files are `.ts` but resolved post-build).
+- Strict TypeScript (v7, native compiler), ESM, **`.js` extensions on local imports** (these files are `.ts` but resolved post-build).
 - Formatting enforced by `.oxfmtrc.json` (2-space, single quotes, semis, trailing commas, 100-col, sorted imports). Lint via oxlint (`.oxlintrc.json`).
 - `PascalCase` types/classes, `camelCase` values. Test helpers live in `_testing.ts` files which are excluded from the published package.
 - Tests colocated as `*.test.ts`. Action tests belong next to the action and should cover both validation failures and the resulting `ExecutionPlan` shape (not just the final tx hash).

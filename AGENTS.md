@@ -2,14 +2,16 @@
 
 ## Project Structure & Module Organization
 
-This is a pnpm/Nx TypeScript workspace. The SDK lives in `packages/client`, with public entrypoints in `src/index.ts`, `src/viem.ts`, `src/ethers.ts`, and `src/privy.ts`. Core logic is under `packages/client/src/lib`, action builders are in `src/lib/actions`, and contract ABIs are in `src/lib/abis`. Tests are colocated with implementation as `*.test.ts`. Runnable examples live in `examples/src`, split by adapter (`viem`, `ethers`, `privy`) plus shared helpers in `examples/src/shared`.
+This is a pnpm/Turborepo TypeScript workspace built with TypeScript 7. The SDK lives in `packages/client`, with public entrypoints in `src/index.ts`, `src/viem.ts`, `src/ethers.ts`, and `src/privy.ts`. Core logic is under `packages/client/src/lib`, action builders are in `src/lib/actions`, and contract ABIs are in `src/lib/abis`. Tests are colocated with implementation as `*.test.ts`. Runnable examples live in `examples/src`, split by adapter (`viem`, `ethers`, `privy`) plus shared helpers in `examples/src/shared`.
 
 ## Build, Test, and Development Commands
 
 - `pnpm install`: install workspace dependencies.
-- `pnpm nx build @osero/client`: compile the SDK with TypeScript project references.
-- `pnpm nx typecheck @osero/client`: run declaration-only type checking for the client.
-- `pnpm nx test @osero/client`: run the Vitest suite for the client package.
+- `pnpm build`: compile the SDK with TypeScript project references (`turbo run build`).
+- `pnpm typecheck`: run declaration-only type checking for the client and the examples (`turbo run typecheck`).
+- `pnpm test`: run the Vitest suite for the client package (`turbo run test`).
+- `pnpm check`: run the full CI pipeline (`turbo run format:check lint build typecheck test`).
+- `pnpm turbo run <task> --filter=@osero/client`: scope any task to a single package.
 - `pnpm lint` / `pnpm lint:fix`: run oxlint across workspace sources, optionally fixing issues.
 - `pnpm format:check` / `pnpm format`: check or apply oxfmt formatting.
 - `pnpm --filter @osero/examples dry-run:inspect-plan`: run the safest example; it builds a plan without broadcasting.

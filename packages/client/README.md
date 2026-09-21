@@ -461,13 +461,13 @@ console.log(getToken(1, 'sUSDS').address); // sUSDS on mainnet
 
 ## Building & testing
 
-This package is part of the Osero SDK Nx workspace. From the repo
+This package is part of the Osero SDK Turborepo workspace. From the repo
 root:
 
 ```bash
-pnpm nx build @osero/client      # tsc → dist/
-pnpm nx typecheck @osero/client  # strict tsc --noEmit
-pnpm nx test @osero/client       # vitest run
+pnpm turbo run build --filter=@osero/client      # tsc --build → dist/
+pnpm turbo run typecheck --filter=@osero/client  # tsc --build --emitDeclarationOnly (incl. tests)
+pnpm turbo run test --filter=@osero/client       # vitest run
 ```
 
 ## License

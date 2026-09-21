@@ -10,6 +10,9 @@ permissions:
   actions: read
   contents: read
 
+env:
+  TURBO_TELEMETRY_DISABLED: 1
+
 jobs:
   main:
     runs-on: ubuntu-latest
@@ -32,4 +35,4 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm nx run-many -t format:check lint build typecheck test
+      - run: pnpm turbo run format:check lint build typecheck test

@@ -3,10 +3,8 @@ minimumReleaseAgeExclude:
   - 'nanoid@3.3.17'
 
 allowBuilds:
-  '@swc/core': false
   bufferutil: false
   esbuild: false
-  nx: false
   utf-8-validate: false
 
 overrides:
