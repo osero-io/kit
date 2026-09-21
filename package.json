@@ -22,7 +22,7 @@
     "@emnapi/runtime": "1.11.3",
     "@nx/js": "23.1.1",
     "@nx/vitest": "23.1.1",
-    "@privy-io/node": "^0.28.0",
+    "@privy-io/node": "^0.34.0",
     "@swc-node/register": "1.12.1",
     "@swc/core": "1.15.47",
     "@swc/helpers": "0.5.23",
