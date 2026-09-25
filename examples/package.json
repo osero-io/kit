@@ -16,10 +16,7 @@
     "ethers:mint-usds": "tsx src/ethers/mint-usds.ts",
     "ethers:roundtrip": "tsx src/ethers/roundtrip-usdc-susds.ts",
     "privy:mint-usds": "tsx src/privy/mint-usds.ts",
-    "lint": "oxlint src",
-    "lint:fix": "oxlint --fix src",
-    "format": "oxfmt src",
-    "format:check": "oxfmt --check src"
+    "typecheck": "tsc --build --emitDeclarationOnly"
   },
   "dependencies": {
     "@osero/client": "workspace:*",
@@ -30,30 +27,6 @@
   "devDependencies": {
     "@types/node": "^26.1.0",
     "tsx": "^4.19.0",
-    "typescript": "~6.0.3"
-  },
-  "nx": {
-    "includedScripts": [
-      "lint",
-      "lint:fix",
-      "format",
-      "format:check"
-    ],
-    "targets": {
-      "lint": {
-        "cache": true,
-        "inputs": [
-          "{workspaceRoot}/.oxlintrc.json",
-          "{projectRoot}/src/**/*.{ts,tsx}"
-        ]
-      },
-      "format:check": {
-        "cache": true,
-        "inputs": [
-          "{workspaceRoot}/.oxfmtrc.json",
-          "{projectRoot}/src/**/*.{ts,tsx,json,md}"
-        ]
-      }
-    }
+    "typescript": "~7.0.2"
   }
 }

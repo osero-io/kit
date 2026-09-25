@@ -421,11 +421,12 @@ and explicit RPC URLs when testing against public networks.
 
 ```bash
 pnpm install
-pnpm nx build @osero/client
-pnpm nx typecheck @osero/client
-pnpm nx test @osero/client
+pnpm build       # turbo run build
+pnpm typecheck   # turbo run typecheck
+pnpm test        # turbo run test
 pnpm lint
 pnpm format:check
+pnpm check       # everything CI runs
 ```
 
 The SDK source is in `packages/client/src`. Tests are colocated as `*.test.ts`, and
