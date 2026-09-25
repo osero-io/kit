@@ -1,5 +1,12 @@
 # @osero/client
 
+## 0.8.1
+
+### Patch Changes
+
+- c50ab01: Allow `@privy-io/node` 0.34 as a peer dependency.
+- 11021ed: Replace Nx with Turborepo for workspace orchestration and compile the SDK with TypeScript 7.
+
 ## 0.8.0
 
 ### Minor Changes
