@@ -10,13 +10,10 @@ import {
 
 import { CHAINS, isSupportedChainId, type OseroChainId } from './chains.js';
 import { type ClientConfig, type ResolvedClientConfig, resolveConfig } from './config.js';
-import { UnsupportedChainError } from './errors.js';
+import type { Referral, Slippage } from './domain.js';
+import { ConfigurationError, UnexpectedError, UnsupportedChainError } from './errors.js';
+import { err, ok, type Result } from './result.js';
 
-/**
- * Generic viem `PublicClient` used by the SDK. Typed in a way that
- * lets us store heterogeneous clients (one per chain) in a single
- * map without losing read-method autocomplete.
- */
 export type OseroPublicClient = Client<
   Transport,
   ViemChain,
@@ -25,87 +22,65 @@ export type OseroPublicClient = Client<
   PublicActions
 >;
 
-/**
- * The top-level entry point into the Osero SDK.
- *
- * An `OseroClient` holds the (resolved) configuration and lazily
- * instantiates viem public clients per chain so that actions can run
- * previews and fee reads without the caller having to wire up RPCs
- * by hand.
- *
- * ```ts
- * import { OseroClient } from '@osero/client';
- * import { http } from 'viem';
- *
- * const client = OseroClient.create({
- *   transports: {
- *     1: http('https://eth.llamarpc.com'),
- *     8453: http('https://mainnet.base.org'),
- *   },
- * });
- * ```
- *
- * The client is intentionally stateless from the caller's point of
- * view: there is no "connect" step, no wallet binding, and nothing
- * that holds a network connection open. Every action is a pure
- * function that takes the client as its first argument — the wallet
- * is supplied later via the viem or ethers adapter.
- */
-export class OseroClient {
-  readonly config: ResolvedClientConfig;
+export type GetPublicClientError = UnsupportedChainError | ConfigurationError | UnexpectedError;
 
+export class OseroClient {
+  readonly defaults: {
+    readonly slippage: Slippage;
+    readonly referral: Referral;
+  };
+
+  readonly #config: ResolvedClientConfig;
   readonly #publicClients = new Map<OseroChainId, OseroPublicClient>();
 
   private constructor(config: ResolvedClientConfig) {
-    this.config = config;
+    this.#config = config;
+    this.defaults = Object.freeze({
+      slippage: config.defaultSlippage,
+      referral: config.referral,
+    });
+    for (const [chainId, publicClient] of Object.entries(config.publicClients)) {
+      if (publicClient !== undefined) {
+        this.#publicClients.set(Number(chainId) as OseroChainId, publicClient);
+      }
+    }
   }
 
   /**
-   * Create a new `OseroClient` with the given configuration.
-   *
-   * Every field in {@link ClientConfig} is optional, so
-   * `OseroClient.create()` with no arguments yields a perfectly
-   * usable (but public-RPC-backed) client. For production you should
-   * supply your own `transports`.
+   * Creates a client. Invalid configuration throws a typed
+   * {@link ConfigurationError}; operations after construction return failures in `Result`.
    */
   static create(config: ClientConfig = {}): OseroClient {
     return new OseroClient(resolveConfig(config));
   }
 
-  /**
-   * Return the memoised viem `PublicClient` for a chain, creating it
-   * on first access.
-   *
-   * @throws {UnsupportedChainError} if `chainId` is not listed in
-   *   {@link CHAINS}.
-   */
-  getPublicClient(chainId: number): OseroPublicClient {
+  getPublicClient(chainId: number): Result<OseroPublicClient, GetPublicClientError> {
     if (!isSupportedChainId(chainId)) {
-      throw new UnsupportedChainError(chainId);
+      return err(new UnsupportedChainError(chainId));
     }
 
     const cached = this.#publicClients.get(chainId);
-    if (cached) return cached;
+    if (cached !== undefined) return ok(cached);
 
-    const meta = CHAINS[chainId];
-    const transport = this.config.transports[chainId] ?? http();
-    const publicClient = createPublicClient({
-      chain: meta.viemChain,
-      transport,
-    }) as OseroPublicClient;
+    const configuredTransport = this.#config.transports[chainId];
+    if (configuredTransport === undefined && !this.#config.allowPublicRpc) {
+      return err(
+        new ConfigurationError(
+          `No public RPC transport configured for chain ${chainId}; provide a transport or explicitly set allowPublicRpc: true`,
+          `transports.${chainId}`,
+        ),
+      );
+    }
 
-    this.#publicClients.set(chainId, publicClient);
-    return publicClient;
-  }
-
-  /**
-   * **Testing only.** Replace the cached public client for a chain
-   * so that unit tests can inject a fake viem client without needing
-   * live RPCs. Does nothing in production code paths.
-   *
-   * @internal
-   */
-  _setPublicClientForTesting(chainId: OseroChainId, publicClient: OseroPublicClient): void {
-    this.#publicClients.set(chainId, publicClient);
+    try {
+      const publicClient = createPublicClient({
+        chain: CHAINS[chainId].viemChain,
+        transport: configuredTransport ?? http(),
+      }) as OseroPublicClient;
+      this.#publicClients.set(chainId, publicClient);
+      return ok(publicClient);
+    } catch (cause) {
+      return err(UnexpectedError.from(cause));
+    }
   }
 }

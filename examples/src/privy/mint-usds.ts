@@ -1,102 +1,78 @@
-import { OseroClient, getChain } from '@osero/client';
-/**
- * Mint USDS from USDC on Base using a Privy server wallet.
- *
- * Identical semantics to `viem/mint-usds.ts` — the only thing that
- * changes is the wallet adapter subpath. Privy signs and broadcasts
- * the transactions server-side; the adapter supplies each fully-built
- * tx with a CAIP-2 chain ID and waits for the receipt with a viem
- * public client before moving to the next one.
- *
- * Requires PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_WALLET_ID, and
- * PRIVY_WALLET_ADDRESS in `examples/.env`. Set
- * PRIVY_AUTHORIZATION_PRIVATE_KEY as well if your Privy app requires
- * request authorization.
- *
- * Run with:
- *
- *   pnpm --filter @osero/examples privy:mint-usds
- */
-import { mintUsds, previewMintUsds } from '@osero/client/actions';
+import { getChain, OseroClient } from '@osero/client';
+import { prepareSwap } from '@osero/client/actions';
 import { sendWith, type PrivyWallet } from '@osero/client/privy';
 import { PrivyClient } from '@privy-io/node';
 import { http, isAddress, parseUnits } from 'viem';
 
 import { optionalEnv, optionalRpcUrl, requireEnv } from '../shared/env.js';
-import { banner, describeResult, formatToken } from '../shared/format.js';
+import {
+  banner,
+  describePlan,
+  describeResult,
+  formatToken,
+  requireTokenAmount,
+} from '../shared/format.js';
 
 const CHAIN_ID = 8453 as const;
-const AMOUNT_USDC = parseUnits('10', 6); // 10 USDC
+const AMOUNT_USDC = parseUnits('10', 6);
 
 async function main() {
-  const chainMeta = getChain(CHAIN_ID);
-  if (!chainMeta) throw new Error(`unsupported chain ${CHAIN_ID}`);
-
-  const privy = new PrivyClient({
-    appId: requireEnv('PRIVY_APP_ID'),
-    appSecret: requireEnv('PRIVY_APP_SECRET'),
-  });
-
+  const chain = getChain(CHAIN_ID);
+  if (chain === null) throw new Error(`unsupported chain ${CHAIN_ID}`);
   const walletAddress = requireEnv('PRIVY_WALLET_ADDRESS');
   if (!isAddress(walletAddress)) {
-    throw new Error(`PRIVY_WALLET_ADDRESS is not a valid EVM address: ${walletAddress}`);
+    throw new Error(`PRIVY_WALLET_ADDRESS is not an EVM address: ${walletAddress}`);
   }
-
   const authorizationKey = optionalEnv('PRIVY_AUTHORIZATION_PRIVATE_KEY');
   const wallet = {
     id: requireEnv('PRIVY_WALLET_ID'),
     address: walletAddress,
-    ...(authorizationKey !== undefined
-      ? { authorizationContext: { authorization_private_keys: [authorizationKey] } }
-      : {}),
+    ...(authorizationKey === undefined
+      ? {}
+      : { authorizationContext: { authorization_private_keys: [authorizationKey] } }),
   } satisfies PrivyWallet;
-
-  // `OseroClient` still needs a viem transport for its own read
-  // calls; the adapter reuses the same RPC URL for receipt polling.
-  const client = OseroClient.create({
-    transports: {
-      [CHAIN_ID]: http(optionalRpcUrl(CHAIN_ID)),
-    },
+  const privy = new PrivyClient({
+    appId: requireEnv('PRIVY_APP_ID'),
+    appSecret: requireEnv('PRIVY_APP_SECRET'),
   });
+  const transport = http(optionalRpcUrl(CHAIN_ID));
+  const client = OseroClient.create({ transports: { [CHAIN_ID]: transport } });
 
-  banner(`mintUsds — ${chainMeta.name} (Privy)`);
-  console.log(`  sender: ${wallet.address}`);
-  console.log(`  spend:  ${AMOUNT_USDC} USDC (raw 6-dec)`);
-
-  const previewResult = await previewMintUsds(client, {
+  banner(`Prepare USDC → USDS — ${chain.name} (Privy)`);
+  const prepared = await prepareSwap(client, {
     chainId: CHAIN_ID,
-    amount: AMOUNT_USDC,
+    account: wallet.address,
+    mode: 'exact-in',
+    amountIn: requireTokenAmount('USDC', AMOUNT_USDC),
+    assetOut: 'USDS',
   });
-  if (previewResult.isErr()) {
-    console.error('previewMintUsds failed:', previewResult.error);
+  if (prepared.isErr()) {
+    console.error('prepareSwap failed:', prepared.error);
     process.exitCode = 1;
     return;
   }
-  console.log(`  quote:  ${formatToken(previewResult.value, 18, 'USDS')}`);
 
-  const result = await mintUsds(client, {
-    chainId: CHAIN_ID,
-    amount: AMOUNT_USDC,
-    sender: wallet.address,
-  }).andThen(
-    sendWith(privy, wallet, {
-      transports: {
-        [CHAIN_ID]: http(optionalRpcUrl(CHAIN_ID)),
-      },
-    }),
+  console.log(`  expected: ${formatToken(prepared.value.expectedAmountOut.raw, 18, 'USDS')}`);
+  console.log(describePlan(prepared.value.plan));
+  const idempotencyKeys = Object.fromEntries(
+    prepared.value.plan.steps.map((step) => [step.id, `${prepared.value.plan.id}:${step.id}`]),
   );
-
+  const result = await sendWith(privy, wallet, prepared.value.plan, {
+    chainId: CHAIN_ID,
+    transport,
+    idempotencyKeys,
+  });
   if (result.isErr()) {
-    console.error('mintUsds failed:', result.error);
+    console.error('sendWith failed:', result.error);
     process.exitCode = 1;
     return;
   }
 
   banner('Success');
-  console.log(describeResult(result.value, chainMeta.explorerUrl));
+  console.log(describeResult(result.value, chain.explorerUrl));
 }
 
-main().catch((err) => {
-  console.error(err);
+main().catch((error) => {
+  console.error(error);
   process.exitCode = 1;
 });

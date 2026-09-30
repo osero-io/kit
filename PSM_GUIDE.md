@@ -7,6 +7,10 @@ users swap between USDC, USDS, and sUSDS at fixed/oracle rates. It extends
 Sky's mainnet PSM liquidity onto L2s. Mainnet itself does **not** run PSM3 —
 it uses the Sky/Maker Lite PSM (`USDS_LITE_PSM = 0xf6e72Db5454dd049d0788e411b06CfAF16853042`).
 
+> SDK scope note: `@osero/client` 1.0 still uses this guide for local
+> USDC/USDS/sUSDS PSM action builders. Flexible hosted Osero API routes such as
+> USDT → USDS are API-built routes, not direct PSM3 token pairs.
+
 ## Addresses by chain
 
 | Chain                 | Chain ID | PSM3 Address                                 | Explorer                                                                                                   |
