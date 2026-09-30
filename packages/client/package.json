@@ -97,12 +97,15 @@
     "access": "public"
   },
   "scripts": {
-    "lint": "oxlint src",
-    "lint:fix": "oxlint --fix src",
+    "build": "tsc --build tsconfig.lib.json",
     "format": "oxfmt src",
     "format:check": "oxfmt --check src",
+    "lint": "oxlint src",
+    "lint:fix": "oxlint --fix src",
+    "test": "vitest run",
     "test:coverage": "vitest --run --coverage",
-    "test:fork": "vitest --config vitest.fork.config.mts --run"
+    "test:fork": "vitest --config vitest.fork.config.mts --run",
+    "typecheck": "tsc --build --emitDeclarationOnly"
   },
   "dependencies": {
     "@sentry/core": "^10.73.0",
@@ -110,7 +113,7 @@
     "tslib": "^2.3.0"
   },
   "peerDependencies": {
-    "@privy-io/node": "^0.19.0 || ^0.28.0",
+    "@privy-io/node": "^0.19.0 || ^0.28.0 || ^0.34.0",
     "ethers": "^6.14.0",
     "viem": ">=2.28.0 <3"
   },
@@ -124,29 +127,5 @@
   },
   "engines": {
     "node": ">=20"
-  },
-  "nx": {
-    "includedScripts": [
-      "lint",
-      "lint:fix",
-      "format",
-      "format:check"
-    ],
-    "targets": {
-      "lint": {
-        "cache": true,
-        "inputs": [
-          "{workspaceRoot}/.oxlintrc.json",
-          "{projectRoot}/src/**/*.{ts,tsx}"
-        ]
-      },
-      "format:check": {
-        "cache": true,
-        "inputs": [
-          "{workspaceRoot}/.oxfmtrc.json",
-          "{projectRoot}/src/**/*.{ts,tsx,json,md}"
-        ]
-      }
-    }
   }
 }

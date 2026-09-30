@@ -24,7 +24,7 @@ writeFileSync(
     {
       extends: '../../tsconfig.base.json',
       compilerOptions: {
-        baseUrl: '../..',
+        types: ['node'],
         composite: false,
         declaration: false,
         declarationMap: false,

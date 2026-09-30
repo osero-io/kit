@@ -1,6 +1,6 @@
 # Osero TypeScript SDK
 
-Nx/pnpm workspace for `@osero/client`, the production SDK for preparing and executing USDC, USDS, and sUSDS swaps across Ethereum, OP Mainnet, Unichain, Base, and Arbitrum One.
+Turborepo/pnpm workspace for `@osero/client`, the production SDK for preparing and executing USDC, USDS, and sUSDS swaps across Ethereum, OP Mainnet, Unichain, Base, and Arbitrum One.
 
 The v1 design is plan-first:
 
@@ -103,12 +103,13 @@ scripts/               Deterministic clean-build and package validation scripts
 
 ```bash
 pnpm install
-pnpm nx build @osero/client
-pnpm nx typecheck @osero/client
-pnpm nx test @osero/client
+pnpm build
+pnpm typecheck
+pnpm test
 pnpm --filter @osero/client test:coverage
 pnpm lint
 pnpm format:check
+pnpm check       # everything CI runs
 ```
 
 Release-integrity checks:

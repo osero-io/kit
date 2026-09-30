@@ -520,3 +520,15 @@ In Node.js, `OSERO_TELEMETRY=0` or `DO_NOT_TRACK=1` has the same effect, and tel
 ## License
 
 MIT
+
+## Building & testing
+
+From the repository root:
+
+```bash
+pnpm turbo run build --filter=@osero/client
+pnpm turbo run typecheck --filter=@osero/client
+pnpm turbo run test --filter=@osero/client
+pnpm --filter @osero/client test:coverage
+pnpm release:verify
+```

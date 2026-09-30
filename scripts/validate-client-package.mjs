@@ -45,7 +45,7 @@ try {
   await writeFile(staleFixture, 'throw new Error("stale output leaked");\n');
 
   runNode([join(workspaceRoot, 'scripts/clean-client-output.mjs')], workspaceRoot);
-  run(['nx', 'build', '@osero/client', '--skipNxCache'], workspaceRoot);
+  run(['turbo', 'run', 'build', '--filter=@osero/client', '--force'], workspaceRoot);
   runNode([join(workspaceRoot, 'scripts/check-client-api.mjs')], workspaceRoot);
 
   const packOutput = run(['pack', '--json', '--pack-destination', temporaryRoot], packageRoot);

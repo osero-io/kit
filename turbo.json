@@ -1,0 +1,44 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "globalDependencies": ["tsconfig.base.json"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "!src/**/*.test.ts",
+        "!src/**/*.spec.ts",
+        "!src/**/_testing.ts",
+        "!tsconfig.spec.json",
+        "!vitest.config.*"
+      ],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build", "build"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "//#lint": {
+      "inputs": ["$TURBO_DEFAULT$", "packages/*/src/**", "examples/src/**"]
+    },
+    "//#lint:fix": {
+      "cache": false
+    },
+    "//#format:check": {
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "packages/*/*.{json,md}",
+        "packages/*/src/**",
+        "examples/*.{json,md}",
+        "examples/src/**"
+      ]
+    },
+    "//#format": {
+      "cache": false
+    }
+  }
+}

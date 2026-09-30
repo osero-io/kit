@@ -21,7 +21,10 @@ async function readPreState() {
       typeof value !== 'object' ||
       (value.mode !== 'pre' && value.mode !== 'exit') ||
       typeof value.tag !== 'string' ||
-      value.tag.length === 0
+      value.tag.length === 0 ||
+      (value.changesets !== undefined &&
+        (!Array.isArray(value.changesets) ||
+          value.changesets.some((changeset) => typeof changeset !== 'string')))
     ) {
       throw new Error('Invalid .changeset/pre.json prerelease state');
     }
@@ -61,9 +64,19 @@ if (!branch) {
 }
 
 const preState = await readPreState();
+// Changesets 2 leaves consumed prerelease changesets in the root and records
+// their IDs in pre.json. Changesets 3 moves them to pre/ when it reads that state.
+// This inspection runs before dependencies are installed: support both layouts
+// without migrating or modifying the prerelease state ourselves.
+const consumedChangesets = new Set(preState?.changesets ?? []);
 const changesetFiles = await readdir(changesetDirectoryUrl);
 const hasPendingChangesets = changesetFiles.some(
-  (file) => file.endsWith('.md') && file !== 'README.md',
+  (file) =>
+    !file.startsWith('.') &&
+    file.endsWith('.md') &&
+    !/^README\.md$/i.test(file) &&
+    !['AGENTS.md', 'CLAUDE.md', 'GEMINI.md'].includes(file) &&
+    !consumedChangesets.has(file.slice(0, -3)),
 );
 let releaseKind = 'stable';
 let versionScript = 'pnpm version-packages';

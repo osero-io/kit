@@ -42,7 +42,7 @@ Skip this skill (and defer to the listed source instead) when:
 - The question is about Sky / Spark contract internals beyond what the
   SDK exposes — read `PSM_GUIDE.md` at the repo root for `tin`, `tout`,
   `sellGem`, `buyGem`, the Lite PSM, or the Spark wrapper.
-- The question is about repository tooling (Nx targets, Vitest config,
+- The question is about repository tooling (Turborepo tasks, Vitest config,
   oxlint/oxfmt, Changesets release flow) — read `CLAUDE.md` and
   `AGENTS.md` at the repo root.
 - The work is unrelated Web3 or generic TypeScript code that does not
