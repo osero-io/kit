@@ -1,5 +1,129 @@
 # @osero/client
 
+## 1.0.0-next.6
+
+### Major Changes
+
+- Replace the 0.x pair-specific preview/action surface with a single typed `prepareSwap` API. It
+  returns a rich exact-input or exact-output quote tied to a flat, versioned, account/chain-bound
+  `ExecutionPlan`. Amounts, slippage, referrals, approval policy, and unprotected-route consent are
+  explicit domain inputs. Referral attribution and public RPC fallback default to disabled, while
+  allowance-aware exact approvals are the default.
+
+  Wallet adapters now preflight the complete plan before broadcasting, estimate fresh buffered gas,
+  report truthful signing/broadcast/confirmation/revert stages, preserve submitted and replacement
+  hashes, emit progress, and support receipt-verified confirmed-prefix recovery. Every SDK error has
+  stable literal discriminants and contextual JSON output; operational calls keep failures in
+  `Result`/`ResultAsync`.
+
+  The public surface is intentionally split across the root, `/actions`, `/api`, `/contracts`,
+  `/viem`, `/ethers`, and `/privy` entrypoints. Legacy local action functions, nested plan variants,
+  and internal flattening/type-guard helpers are removed.
+
+  Refactor the hosted Osero API client around API-authoritative asset refs. The SDK no longer ships a gating registry, so a deployed build keeps working as the hosted API adds and removes assets, chains, and bridge protocols.
+
+  `getSwapQuote` accepts any asset ref — a canonical id (`'ethereum:usdc'`), an arbitrary string id, or a `{ chainId, address }` locator encoded on the wire as `'<chainId>:<0xaddress>'`. Known ids still autocomplete, but nothing is rejected locally on membership: the hosted API is the sole authority and answers unsupported refs with HTTP 400 and a stable API response code (for example `SWAP_ASSET_NOT_SUPPORTED`). That server code is exposed as `ApiRequestError.apiCode`; `ApiRequestError.code` remains the SDK error discriminant `API_REQUEST_FAILED`. Responses decode structurally, so assets, chains, protocols, kinds, directions, and states unknown to this SDK release decode normally.
+
+  Registry exports are renamed to advisory `KNOWN_` snapshots — `OSERO_API_KNOWN_ASSETS`, `OSERO_API_KNOWN_CHAINS`, `OSERO_API_KNOWN_ASSET_IDS`, `OSERO_API_KNOWN_CHAIN_IDS`, and `OSERO_API_KNOWN_BRIDGE_PROTOCOLS` — that only power editor autocomplete and offline UI hints. The input/output splits (`OSERO_API_INPUT_*`, `OSERO_API_OUTPUT_*`, `OseroApiInputAssetId`, `OseroApiOutputAssetId`) and the source-chain allowlist (`OSERO_API_SOURCE_CHAIN_IDS`, `OseroApiSourceChainId`) are removed. `getSupportedAssets()` is the sanctioned live list, and the new `matchOseroApiAsset(assets, ref)` helper pre-flights a ref against it.
+
+  Client-side validation narrows to wire grammar and execution safety (EVM addresses, hex payloads, uint256 amounts, 32-byte tx hashes). Server-policy checks that 0.x ran locally are now enforced by the API instead of pre-flight `ValidationError`s: asset/pair membership and slippage failures come back as 400s with stable codes (`SWAP_ASSET_NOT_SUPPORTED`, `SWAP_PAIR_NOT_SUPPORTED`, `SLIPPAGE_INVALID`, `SLIPPAGE_OUT_OF_RANGE`), an out-of-range referral code is a plain 400 from request validation, and a printable-ASCII but invalid API key is a 401. Empty keys and keys containing non-ASCII, whitespace, or control characters remain local `ValidationError`s. `getTokenBalance` additionally accepts any ERC-20 address alongside the canonical token symbols.
+
+  Hosted API Execution Plans tag execution transactions as `SWAP_EXACT_IN`; derive user-facing labels from `quote.pair.source` and `quote.pair.destination`. See `docs/osero-sdk/upgrading-0-to-1.md` for the full migration guide.
+
+- Require slippage inputs to name basis points explicitly.
+
+  `parseSlippage` now accepts `{ bps: string }`, rejecting the legacy unitless string input.
+
+- Replace legacy bridge-status requests and responses with normalized Transfer Status. Status requests
+  now keep the source transaction hash and complete quote Status Context together, known Enso and LI.FI
+  Provider Details are typed, and unknown providers remain inspectable. Polling continues for pending
+  and unknown states and returns completed or failed Transfer Status observations without discarding
+  provider diagnostics.
+- Replace the legacy hosted quote response with the provider-neutral API contract. Same-chain quotes
+  now return a `ready-to-execute` Hosted Swap Workflow containing the normalized API quote and a
+  separate execution-only, expiry-bound Wallet Execution Plan. Enso and LI.FI Provider Details are
+  typed, unknown providers remain inspectable and executable, and hosted approval policy is removed.
+- Publish the breaking v1 hosted API migration as a provider-neutral Hosted Swap Workflow. Replace
+  the legacy Enso-shaped quote and bridge status with discriminated approval and ready states,
+  provider-locked Quote Refresh, expiry-bound Wallet Execution Plans, bounded high-level execution,
+  and normalized Transfer Status polling.
+- Support the hosted API's 0x integration.
+
+  `'0x'` joins `'enso'` and `'lifi'` as a first-class Quote Provider across every
+  provider discriminator. 0x is one provider spanning the same-chain 0x Swap API
+  and the 0x Cross-Chain API, so it reports a single tag either way, and its
+  allowance requirements arrive as ordinary Approval Steps bound to the returned
+  spender.
+
+  - `isOseroApiZeroXProviderDetails` narrows quote Provider Details to the 0x
+    support id, curated route, gas and network-fee estimates, and the
+    `integratorFee` / `zeroExFee` / `bridgeNativeFee` breakdown.
+    `quote.expectedOutput` is already net of all three.
+  - Status Context is now a provider-discriminated union. A 0x context carries
+    the required `providerQuoteId`, which is serialized into every status poll;
+    polling a 0x context without it fails locally as a `ValidationError`.
+    Unrecognised primitive fields from a future provider's context are echoed
+    back unchanged instead of dropped.
+  - `isOseroApiZeroXTransferStatusProviderDetails` narrows Transfer Status
+    Provider Details to the original 0x status, failure reason, and recovery
+    status.
+  - Every Transfer Status gains a nullable `recoveryContext` with normalized
+    `state` and `reason`, so a failed cross-chain transfer is no longer
+    unconditionally terminal. `waitForSwapCompletion` accepts `waitForRecovery`
+    to keep polling while automatic recovery is pending.
+  - `prepareRecoveryExecutionPlan(status, submitter)` turns a sender-free
+    Recovery Action into a wallet-agnostic Execution Plan under the new
+    `RECOVER_CROSS_CHAIN_TRANSFER` operation. A recovery deadline becomes the
+    plan's quote expiry, so adapters refuse a closed window. Only a `failed`
+    transfer whose recovery is `action-required` authorizes a submission; every
+    other state is rejected rather than built into a signable plan, and
+    `isOseroApiActionableRecovery` narrows to that one submittable combination.
+
+### Minor Changes
+
+- Add manual hosted Approval Step and provider-locked Quote Refresh transitions. Insufficient
+  allowance now returns one exact approval-only Wallet Execution Plan, while refreshed quotes restart
+  allowance preparation before exposing replacement execution calldata.
+- Add an opt-in EIP-5792 wallet adapter.
+
+  The adapter submits pending execution-plan steps as one atomic call batch when the wallet supports
+  it and falls back to sequential viem execution by default. `prepareSwap({ execution: 'atomic-batch' })`
+  marks the plan so a capable wallet must send every pending step in one bundle. Mainnet USDC to sUSDS
+  then sizes the USDS approval and deposit as the 1:1 scaled USDC amount.
+
+- Add a bounded wallet-neutral Hosted Swap Workflow executor. It confirms one approval at a time,
+  performs provider-locked Quote Refreshes after approvals or expiry, emits serialized lifecycle
+  progress, and returns the final quote with every confirmed wallet result.
+- Add optional hosted quote expiry constraints to Wallet Execution Plans. Expiry now participates in
+  plan identity and persistence, and viem, ethers, and Privy executions fail with a typed
+  `QuoteExpiredError` when the quote expires before broadcast.
+- Add opt-out error telemetry.
+
+  The SDK now reports a curated subset of the typed errors it returns — SDK bugs, hosted API contract
+  drift, server-side API failures, and failed on-chain executions — to Osero's Sentry project. Caller
+  mistakes, user cancellations, wallet signing failures, network and RPC outages, quote expiry, and
+  API key or rate-limit responses are never reported, and API keys, headers, wallet addresses, and
+  amounts are never attached. Reporting uses a private `@sentry/core` client loaded on first use, so
+  it never touches a host application's own Sentry setup. Disable it with
+  `configureTelemetry({ enabled: false })`, `OSERO_TELEMETRY=0`, or `DO_NOT_TRACK=1`. Hosted API
+  requests to `*.osero.org` now carry a `sentry-trace` header so API-side events can be correlated.
+
+- Add account-free local swap quotes.
+
+  The new `quoteSwap` action returns block-pinned swap economics without requiring an account,
+  reading allowances, constructing calldata, or creating an execution plan.
+
+### Patch Changes
+
+- Call the hosted API fetch implementation as a plain function instead of as a method, so browsers
+  that enforce the fetch receiver no longer throw `TypeError: Illegal invocation`. This applies to
+  both the default global fetch and a caller-supplied `fetch` override.
+- c50ab01: Allow `@privy-io/node` 0.34 as a peer dependency.
+- Reject hosted quote approval steps whose required amount exceeds the exact-input quote amount.
+- Integrate the pnpm 12, Changesets 3, Turborepo, and TypeScript 7 tooling upgrades into the v1 prerelease branch while preserving release validation and prerelease publishing safeguards.
+- Widen `SDK_VERSION` to `string` so the published declaration no longer embeds the release version and the public API report stays stable across releases.
+- 11021ed: Replace Nx with Turborepo for workspace orchestration and compile the SDK with TypeScript 7.
+
 ## 1.0.0-next.5
 
 ### Minor Changes
