@@ -9,6 +9,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['fork/**/*.test.ts'],
+    // Every fork file shares one Anvil node and some revert snapshots, so they must not interleave.
+    fileParallelism: false,
     reporters: ['default'],
     testTimeout: 60_000,
     hookTimeout: 60_000,

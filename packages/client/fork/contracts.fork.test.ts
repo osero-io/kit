@@ -2,6 +2,7 @@ import {
   createPublicClient,
   createWalletClient,
   encodeFunctionData,
+  erc20Abi as fullErc20Abi,
   http,
   type Address,
   type Hex,
@@ -42,6 +43,8 @@ const capability = CHAIN_CAPABILITIES[chainId];
 const pinnedBlock = PINNED_BLOCKS[chainId];
 const publicClient = createPublicClient({
   chain: capability.viemChain,
+  // The SDK pins reads to getBlockNumber(); a cached head would predate the test's own transactions.
+  cacheTime: 0,
   transport: http(rpcUrl, { retryCount: 0 }),
 });
 
@@ -59,6 +62,29 @@ async function anvil(method: string, params: readonly unknown[]): Promise<unknow
     throw new Error(payload.error?.message ?? `Anvil RPC ${method} failed with ${response.status}`);
   }
   return payload.result;
+}
+
+const FORK_SWAPPER: Address = '0x05e0000000000000000000000000000000000001';
+
+async function sendAs(account: Address, call: { readonly to: Address; readonly data: Hex }) {
+  await anvil('anvil_setBalance', [account, '0x8ac7230489e80000']);
+  await anvil('anvil_impersonateAccount', [account]);
+  try {
+    const walletClient = createWalletClient({
+      account,
+      chain: capability.viemChain,
+      transport: http(rpcUrl, { retryCount: 0 }),
+    });
+    const hash = await walletClient.sendTransaction({
+      account,
+      chain: capability.viemChain,
+      ...call,
+    });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    expect(receipt.status).toBe('success');
+  } finally {
+    await anvil('anvil_stopImpersonatingAccount', [account]);
+  }
 }
 
 function expectCode(code: Hex | undefined, address: Address): void {
@@ -144,19 +170,27 @@ describe(`pinned ${capability.name} fork at block ${pinnedBlock}`, () => {
   });
 
   it('prepares and independently simulates a real plan without broadcasting the swap', async () => {
-    const holder = capability.contracts.litePsm ?? capability.contracts.psm;
-    await anvil('anvil_setBalance', [holder, '0x8ac7230489e80000']);
-    await anvil('anvil_impersonateAccount', [holder]);
-
+    const amountIn = 1_000_000n;
+    // Leave the shared fork untouched for the other fork files.
+    const snapshot = (await anvil('evm_snapshot')) as Hex;
     try {
-      const walletClient = createWalletClient({
-        account: holder,
-        chain: capability.viemChain,
-        transport: http(rpcUrl, { retryCount: 0 }),
+      // The protocol's USDC lives in its pocket (the Lite PSM's pocket on mainnet, the PSM3 itself
+      // on L2s), so fund a fresh code-free swapper from there instead of impersonating the protocol.
+      const pocket = await publicClient.readContract({
+        address: capability.contracts.litePsm ?? capability.contracts.psm,
+        abi: capability.contracts.litePsm === undefined ? psm3Abi : litePsmAbi,
+        functionName: 'pocket',
       });
-      const approvalHash = await walletClient.sendTransaction({
-        account: holder,
-        chain: capability.viemChain,
+      expect(await publicClient.getCode({ address: FORK_SWAPPER })).toBeUndefined();
+      await sendAs(pocket, {
+        to: capability.tokens.USDC.address,
+        data: encodeFunctionData({
+          abi: fullErc20Abi,
+          functionName: 'transfer',
+          args: [FORK_SWAPPER, amountIn],
+        }),
+      });
+      await sendAs(FORK_SWAPPER, {
         to: capability.tokens.USDC.address,
         data: encodeFunctionData({
           abi: erc20Abi,
@@ -164,34 +198,38 @@ describe(`pinned ${capability.name} fork at block ${pinnedBlock}`, () => {
           args: [capability.contracts.psm, UINT256_MAX],
         }),
       });
-      await publicClient.waitForTransactionReceipt({ hash: approvalHash });
 
       const publicClients = {
         [chainId]: publicClient as unknown as OseroPublicClient,
       } as Partial<Record<OseroChainId, OseroPublicClient>>;
       const client = OseroClient.create({ publicClients });
-      const input = tokenAmount('USDC', 1_000_000n);
+      const input = tokenAmount('USDC', amountIn);
       const slippage = parseSlippage({ bps: '5' });
       if (input.isErr() || slippage.isErr()) throw new Error('fork test input failed');
+      const isPsm3 = capability.protocol === 'psm3';
       const prepared = await prepareSwap(client, {
         chainId,
-        account: holder,
+        account: FORK_SWAPPER,
         mode: 'exact-in',
         amountIn: input.value,
-        assetOut: 'USDS',
+        // PSM3 pools are not guaranteed to hold USDS (OP and Unichain hold none at their pinned
+        // blocks); sUSDS is the liquid L2 route. Mainnet's single-step route is USDC -> USDS.
+        assetOut: isPsm3 ? 'sUSDS' : 'USDS',
         slippage: slippage.value,
         referral: false,
         approvalPolicy: 'none',
+        // The mainnet wrapper's sellGem takes no minimum output, so that route needs explicit consent.
+        allowUnprotectedSlippage: !isPsm3,
       });
       if (prepared.isErr()) throw prepared.error;
 
       expect(prepared.value.plan.steps).toHaveLength(1);
-      const simulation = await simulateExecutionPlan(client, prepared.value.plan, holder);
+      const simulation = await simulateExecutionPlan(client, prepared.value.plan, FORK_SWAPPER);
       if (simulation.isErr()) throw simulation.error;
       expect(simulation.value.steps).toHaveLength(1);
       expect(simulation.value.steps[0]?.result.status).toBe('success');
     } finally {
-      await anvil('anvil_stopImpersonatingAccount', [holder]);
+      await anvil('evm_revert', [snapshot]);
     }
   });
 });
