@@ -1,173 +1,246 @@
 import { vi } from 'vitest';
 
 import {
-  flattenExecutionPlan,
-  isErc20ApprovalRequired,
-  isMultiStepExecution,
-  isTransactionRequest,
-  operationsFor,
   runExecutionPlan,
+  type SingleTransactionResult,
   type SingleTxExecutor,
 } from './adapters.js';
-import { UnexpectedError } from './errors.js';
-import { makeMultiStepPlan, makeSingleApprovalPlan, makeTransactionRequest } from './plan.js';
+import {
+  CancelError,
+  ConfirmationError,
+  ProgressCallbackError,
+  UnsupportedCapabilityError,
+} from './errors.js';
+import { createExecutionPlan, createTransactionRequest } from './plan.js';
 import { errAsync, okAsync } from './result.js';
-import type { TransactionRequest } from './types.js';
+import type {
+  ConfirmedTransaction,
+  ExecutionPlan,
+  ExecutorCapabilities,
+  TransactionRequest,
+} from './types.js';
 
-function fakeTx(hex: `0x${string}`, op: TransactionRequest['operation'] = 'MINT_USDS') {
-  return makeTransactionRequest({
-    chainId: 1,
-    from: '0x1111111111111111111111111111111111111111',
-    to: '0x2222222222222222222222222222222222222222',
-    data: hex,
-    operation: op,
+const ACCOUNT = '0x1111111111111111111111111111111111111111' as const;
+const TARGET = '0x2222222222222222222222222222222222222222' as const;
+
+const CAPABILITIES: ExecutorCapabilities = {
+  name: 'test',
+  sequentialTransactions: true,
+  atomicBatch: false,
+  permitAuthorization: false,
+  sponsoredTransactions: false,
+  chainSwitching: 'none',
+  simulation: 'none',
+};
+
+function step(id: string): TransactionRequest {
+  const result = createTransactionRequest({
+    id,
+    chainId: 8453,
+    from: ACCOUNT,
+    to: TARGET,
+    data: '0x1234',
+    operation: 'SWAP_EXACT_IN',
   });
+  if (result.isErr()) throw result.error;
+  return result.value;
 }
 
-describe('type guards', () => {
-  it('identifies a TransactionRequest', () => {
-    const tx = fakeTx('0x01');
-    expect(isTransactionRequest(tx)).toBe(true);
-    expect(isErc20ApprovalRequired(tx)).toBe(false);
-    expect(isMultiStepExecution(tx)).toBe(false);
+function plan(requirements?: ExecutionPlan['requirements']): ExecutionPlan {
+  const result = createExecutionPlan({
+    steps: [step('one'), step('two'), step('three')],
+    ...(requirements === undefined ? {} : { requirements }),
   });
+  if (result.isErr()) throw result.error;
+  return result.value;
+}
 
-  it('identifies an Erc20ApprovalRequired plan', () => {
-    const plan = makeSingleApprovalPlan({
-      chainId: 1,
-      from: '0x1111111111111111111111111111111111111111',
-      token: '0x2222222222222222222222222222222222222222',
-      spender: '0x3333333333333333333333333333333333333333',
-      amount: 1n,
-      mainTransaction: fakeTx('0x02'),
-    });
-    expect(isErc20ApprovalRequired(plan)).toBe(true);
-    expect(isTransactionRequest(plan)).toBe(false);
-    expect(isMultiStepExecution(plan)).toBe(false);
-  });
+function hash(index: number): `0x${string}` {
+  return `0x${String(index).repeat(64)}`;
+}
 
-  it('identifies a MultiStepExecution', () => {
-    const plan = makeMultiStepPlan([fakeTx('0x03')]);
-    expect(isMultiStepExecution(plan)).toBe(true);
-    expect(isTransactionRequest(plan)).toBe(false);
-    expect(isErc20ApprovalRequired(plan)).toBe(false);
-  });
-});
+function sent(index: number, confirmations = 1): SingleTransactionResult {
+  const transactionHash = hash(index);
+  return {
+    submittedHash: transactionHash,
+    hash: transactionHash,
+    confirmation: {
+      status: 'success',
+      transactionHash,
+      confirmations,
+    },
+  };
+}
 
-describe('flattenExecutionPlan', () => {
-  it('returns a single tx for a bare TransactionRequest', () => {
-    const tx = fakeTx('0x01');
-    expect(flattenExecutionPlan(tx)).toEqual([tx]);
-  });
-
-  it('returns approvals then original for an Erc20ApprovalRequired', () => {
-    const main = fakeTx('0x99');
-    const plan = makeSingleApprovalPlan({
-      chainId: 1,
-      from: '0x1111111111111111111111111111111111111111',
-      token: '0x2222222222222222222222222222222222222222',
-      spender: '0x3333333333333333333333333333333333333333',
-      amount: 1n,
-      mainTransaction: main,
-    });
-    const flat = flattenExecutionPlan(plan);
-    expect(flat).toHaveLength(2);
-    expect(flat[0]!.operation).toBe('APPROVE_ERC20');
-    expect(flat[1]).toBe(main);
-  });
-
-  it('recursively flattens a multi-step plan', () => {
-    const main1 = fakeTx('0xaa', 'MINT_USDS');
-    const main2 = fakeTx('0xbb', 'DEPOSIT_USDS_FOR_SUSDS');
-    const step1 = makeSingleApprovalPlan({
-      chainId: 1,
-      from: '0x1111111111111111111111111111111111111111',
-      token: '0x2222222222222222222222222222222222222222',
-      spender: '0x3333333333333333333333333333333333333333',
-      amount: 1n,
-      mainTransaction: main1,
-    });
-    const step2 = makeSingleApprovalPlan({
-      chainId: 1,
-      from: '0x1111111111111111111111111111111111111111',
-      token: '0x4444444444444444444444444444444444444444',
-      spender: '0x5555555555555555555555555555555555555555',
-      amount: 2n,
-      mainTransaction: main2,
-    });
-    const plan = makeMultiStepPlan([step1, step2]);
-    const flat = flattenExecutionPlan(plan);
-    expect(flat).toHaveLength(4);
-    expect(flat.map((t) => t.operation)).toEqual([
-      'APPROVE_ERC20',
-      'MINT_USDS',
-      'APPROVE_ERC20',
-      'DEPOSIT_USDS_FOR_SUSDS',
-    ]);
-  });
-});
-
-describe('operationsFor', () => {
-  it('extracts the operation sequence from a plan', () => {
-    const plan = makeSingleApprovalPlan({
-      chainId: 1,
-      from: '0x1111111111111111111111111111111111111111',
-      token: '0x2222222222222222222222222222222222222222',
-      spender: '0x3333333333333333333333333333333333333333',
-      amount: 1n,
-      mainTransaction: fakeTx('0x01', 'MINT_USDS'),
-    });
-    expect(operationsFor(plan)).toEqual(['APPROVE_ERC20', 'MINT_USDS']);
-  });
-});
+function confirmed(valuePlan: ExecutionPlan, index: number): ConfirmedTransaction {
+  const transactionHash = hash(index + 1);
+  const valueStep = valuePlan.steps[index]!;
+  return {
+    planId: valuePlan.id,
+    stepId: valueStep.id,
+    stepIndex: index,
+    operation: valueStep.operation,
+    submittedHash: transactionHash,
+    hash: transactionHash,
+    confirmation: {
+      status: 'success',
+      transactionHash,
+      confirmations: 1,
+    },
+  };
+}
 
 describe('runExecutionPlan', () => {
-  it('executes every transaction in strict order', async () => {
-    const main = fakeTx('0x02', 'MINT_USDS');
-    const plan = makeSingleApprovalPlan({
-      chainId: 1,
-      from: '0x1111111111111111111111111111111111111111',
-      token: '0x2222222222222222222222222222222222222222',
-      spender: '0x3333333333333333333333333333333333333333',
-      amount: 1n,
-      mainTransaction: main,
+  it('returns every hash in exact execution order and emits progress', async () => {
+    const valuePlan = plan();
+    const events: string[] = [];
+    let index = 0;
+    const executor = vi.fn<SingleTxExecutor>((_transaction, context) => {
+      index += 1;
+      void context.notifySubmitted(hash(index));
+      return okAsync(sent(index, context.confirmations));
     });
 
-    const calls: TransactionRequest[] = [];
-    const executor = vi.fn<SingleTxExecutor>((tx) => {
-      calls.push(tx);
-      return okAsync(`0x${calls.length.toString(16).padStart(64, '0')}` as `0x${string}`);
+    const result = await runExecutionPlan(valuePlan, executor, CAPABILITIES, {
+      confirmations: 2,
+      onProgress(progress) {
+        events.push(progress.type);
+      },
     });
 
-    const result = await runExecutionPlan(plan, executor);
     expect(result.isOk()).toBe(true);
-    expect(calls).toHaveLength(2);
-    expect(calls[0]!.operation).toBe('APPROVE_ERC20');
-    expect(calls[1]).toBe(main);
     if (result.isOk()) {
-      expect(result.value.operations).toEqual(['APPROVE_ERC20', 'MINT_USDS']);
-      // Final hash is the LAST tx, not the first.
-      expect(result.value.txHash).toBe(`0x${(2).toString(16).padStart(64, '0')}`);
+      expect(result.value.transactions.map((transaction) => transaction.hash)).toEqual([
+        hash(1),
+        hash(2),
+        hash(3),
+      ]);
+      expect(result.value.txHash).toBe(hash(3));
+      expect(
+        result.value.transactions.every(
+          (transaction) => transaction.confirmation.confirmations === 2,
+        ),
+      ).toBe(true);
+    }
+    expect(events).toEqual([
+      'preflight-complete',
+      'step-started',
+      'step-submitted',
+      'step-confirmed',
+      'step-started',
+      'step-submitted',
+      'step-confirmed',
+      'step-started',
+      'step-submitted',
+      'step-confirmed',
+      'plan-completed',
+    ]);
+  });
+
+  it('preserves completed steps and current hash when a later confirmation fails', async () => {
+    const valuePlan = plan();
+    let index = 0;
+    const executor = vi.fn<SingleTxExecutor>((_transaction, context) => {
+      index += 1;
+      if (index === 2) {
+        return errAsync(
+          new ConfirmationError('receipt timed out', context.failure('confirmation', hash(index))),
+        );
+      }
+      return okAsync(sent(index));
+    });
+
+    const result = await runExecutionPlan(valuePlan, executor, CAPABILITIES);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ConfirmationError);
+      if (result.error instanceof ConfirmationError) {
+        expect(result.error.execution?.hash).toBe(hash(2));
+        expect(result.error.execution?.completed.map((transaction) => transaction.stepId)).toEqual([
+          'one',
+        ]);
+      }
+    }
+    expect(executor).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves earlier confirmations when a later wallet prompt is cancelled', async () => {
+    const valuePlan = plan();
+    let index = 0;
+    const executor = vi.fn<SingleTxExecutor>((_transaction, context) => {
+      index += 1;
+      return index === 2
+        ? errAsync(CancelError.from(new Error('cancelled'), context.failure('signing')))
+        : okAsync(sent(index));
+    });
+
+    const result = await runExecutionPlan(valuePlan, executor, CAPABILITIES);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr() && result.error instanceof CancelError) {
+      expect(result.error.execution?.completed).toHaveLength(1);
+      expect(result.error.execution?.completed[0]!.stepId).toBe('one');
+    }
+    expect(executor).toHaveBeenCalledTimes(2);
+  });
+
+  it('resumes only after the confirmed prefix and retains it in the final result', async () => {
+    const valuePlan = plan();
+    const first = confirmed(valuePlan, 0);
+    const executor = vi.fn<SingleTxExecutor>((_transaction, context) =>
+      okAsync(sent(context.stepIndex + 1)),
+    );
+
+    const result = await runExecutionPlan(valuePlan, executor, CAPABILITIES, {
+      resume: { planId: valuePlan.id, confirmed: [first] },
+    });
+
+    expect(result.isOk()).toBe(true);
+    expect(executor).toHaveBeenCalledTimes(2);
+    if (result.isOk()) {
+      expect(result.value.transactions[0]).toEqual(first);
+      expect(result.value.transactions.map((transaction) => transaction.stepId)).toEqual([
+        'one',
+        'two',
+        'three',
+      ]);
     }
   });
 
-  it('short-circuits on the first executor failure', async () => {
-    const main = fakeTx('0x02');
-    const plan = makeSingleApprovalPlan({
-      chainId: 1,
-      from: '0x1111111111111111111111111111111111111111',
-      token: '0x2222222222222222222222222222222222222222',
-      spender: '0x3333333333333333333333333333333333333333',
-      amount: 1n,
-      mainTransaction: main,
+  it('rejects unsupported capabilities and invalid confirmations before execution', async () => {
+    const batchPlan = plan({
+      execution: 'atomic-batch',
+      authorization: 'transactions',
+      sponsored: false,
+      chainTransitions: false,
+    });
+    const executor = vi.fn<SingleTxExecutor>(() => okAsync(sent(1)));
+
+    const unsupported = await runExecutionPlan(batchPlan, executor, CAPABILITIES);
+    const invalidConfirmations = await runExecutionPlan(plan(), executor, CAPABILITIES, {
+      confirmations: 0,
     });
 
-    const executor = vi.fn<SingleTxExecutor>(() =>
-      errAsync(UnexpectedError.from(new Error('rpc timeout'))),
-    );
-    const result = await runExecutionPlan(plan, executor);
+    expect(unsupported.isErr()).toBe(true);
+    if (unsupported.isErr()) {
+      expect(unsupported.error).toBeInstanceOf(UnsupportedCapabilityError);
+    }
+    expect(invalidConfirmations.isErr()).toBe(true);
+    expect(executor).not.toHaveBeenCalled();
+  });
+
+  it('turns a progress callback failure into a typed pre-broadcast error', async () => {
+    const executor = vi.fn<SingleTxExecutor>(() => okAsync(sent(1)));
+
+    const result = await runExecutionPlan(plan(), executor, CAPABILITIES, {
+      onProgress() {
+        throw new Error('ui failed');
+      },
+    });
+
     expect(result.isErr()).toBe(true);
-    // Should have tried exactly once — not twice.
-    expect(executor).toHaveBeenCalledTimes(1);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ProgressCallbackError);
+    expect(executor).not.toHaveBeenCalled();
   });
 });

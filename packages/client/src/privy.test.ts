@@ -1,322 +1,309 @@
-import { APIUserAbortError } from '@privy-io/node';
-import { vi } from 'vitest';
+import { APIUserAbortError, type PrivyClient } from '@privy-io/node';
+import type { Hex, PublicClient } from 'viem';
+import { base, mainnet } from 'viem/chains';
+import { type Mock, vi } from 'vitest';
 
-import { CancelError, SigningError, TransactionError, UnexpectedError } from './lib/errors.js';
-import { makeSingleApprovalPlan, makeTransactionRequest } from './lib/plan.js';
+import { defineAdapterContract, mockFn, type AdapterContractFactory } from './lib/_testing.js';
+import { ConfirmationError, TransactionError } from './lib/errors.js';
+import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
 import { sendWith, type PrivyWallet } from './privy.js';
 
 const actions = vi.hoisted(() => ({
-  waitForTransactionReceipt: vi.fn<
-    (
-      client: unknown,
-      args: { readonly hash: `0x${string}`; readonly confirmations?: number },
-    ) => Promise<{
-      readonly status: 'success' | 'reverted';
-      readonly transactionHash: `0x${string}`;
-    }>
-  >(),
+  getTransactionReceipt:
+    vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
+  waitForTransactionReceipt:
+    vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
 }));
 
 vi.mock('viem/actions', () => actions);
 
-const WALLET_ADDRESS = '0x1111111111111111111111111111111111111111' as const;
+const ACCOUNT = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as const;
 const TARGET = '0x2222222222222222222222222222222222222222' as const;
-const TOKEN = '0x3333333333333333333333333333333333333333' as const;
-const HASH = `0x${'1'.repeat(64)}` as const;
-const WALLET_ID = 'wallet_123';
-const AUTHORIZATION_CONTEXT = { authorization_private_keys: ['authorization-key'] };
-const PRIVY_WALLET = {
-  id: WALLET_ID,
-  address: WALLET_ADDRESS,
-  authorizationContext: AUTHORIZATION_CONTEXT,
-} satisfies PrivyWallet;
 
-function requestFor(chainId: number) {
-  return makeTransactionRequest({
-    chainId,
-    from: WALLET_ADDRESS,
+function hash(index: number): `0x${string}` {
+  return `0x${index.toString(16).padStart(64, '0')}`;
+}
+
+type PrivyHarnessState = {
+  readonly sendTransaction: Mock;
+  readonly privy: PrivyClient;
+};
+
+function makePrivy(): PrivyHarnessState {
+  let sent = 0;
+  const sendTransaction = mockFn(async () => {
+    sent += 1;
+    return { hash: hash(sent) };
+  });
+  const privy = {
+    wallets: () => ({
+      ethereum: () => ({ sendTransaction }),
+    }),
+  } as unknown as PrivyClient;
+  return { sendTransaction, privy };
+}
+
+function receiptClient(chainId: number): PublicClient {
+  return {
+    chain: chainId === 1 ? mainnet : base,
+  } as unknown as PublicClient;
+}
+
+function resetReceipts(): void {
+  actions.waitForTransactionReceipt.mockReset().mockImplementation(async (_client, input) => ({
+    status: 'success',
+    transactionHash: input.hash,
+    blockNumber: 123n,
+    gasUsed: 50n,
+    effectiveGasPrice: 2n,
+  }));
+  actions.getTransactionReceipt.mockReset().mockImplementation(async (_client, input) => ({
+    status: 'success',
+    transactionHash: input.hash,
+  }));
+}
+
+const factory: AdapterContractFactory = (configuration = {}) => {
+  resetReceipts();
+  const state = makePrivy();
+  const chainId = configuration.chainId ?? 8453;
+  const wallet: PrivyWallet = {
+    id: 'wallet-1',
+    address: configuration.account ?? ACCOUNT,
+  };
+  return {
+    broadcast: state.sendTransaction,
+    execute(valuePlan, form, confirmations) {
+      const options = {
+        chainId,
+        receiptClient: receiptClient(chainId),
+        idempotencyKeys: Object.fromEntries(
+          valuePlan.steps.map((step) => [step.id, `key-${step.id}`]),
+        ),
+        ...(confirmations === undefined ? {} : { confirmations }),
+      };
+      return form === 'direct'
+        ? sendWith(state.privy, wallet, valuePlan, options)
+        : sendWith(state.privy, wallet, options)(valuePlan);
+    },
+  };
+};
+
+defineAdapterContract('Privy', factory);
+
+function singlePlan() {
+  const transaction = createTransactionRequest({
+    id: 'swap',
+    chainId: 8453,
+    from: ACCOUNT,
     to: TARGET,
     data: '0x1234',
-    value: 123n,
-    operation: 'MINT_USDS',
+    operation: 'SWAP_EXACT_IN',
   });
+  if (transaction.isErr()) throw transaction.error;
+  const valuePlan = createExecutionPlan({ steps: [transaction.value] });
+  if (valuePlan.isErr()) throw valuePlan.error;
+  return valuePlan.value;
 }
 
-function approvalPlanFor(chainId: number) {
-  return makeSingleApprovalPlan({
-    chainId,
-    from: WALLET_ADDRESS,
-    token: TOKEN,
-    spender: TARGET,
-    amount: 5n,
-    mainTransaction: requestFor(chainId),
+function twoStepPlan() {
+  const first = singlePlan().steps[0];
+  if (first === undefined) throw new Error('first step missing');
+  const valuePlan = createExecutionPlan({
+    steps: [first, { ...first, id: 'swap-two', data: '0x5678' }],
   });
+  if (valuePlan.isErr()) throw valuePlan.error;
+  return valuePlan.value;
 }
 
-function fakePrivy(
-  sendTransaction = vi.fn<
-    (walletId: string, input: Record<string, unknown>) => Promise<{ readonly hash: string }>
-  >(),
-) {
-  const ethereum = vi.fn<() => { readonly sendTransaction: typeof sendTransaction }>(() => ({
-    sendTransaction,
-  }));
-  const wallets = vi.fn<() => { readonly ethereum: typeof ethereum }>(() => ({ ethereum }));
+describe('Privy stage behavior', () => {
+  beforeEach(resetReceipts);
 
-  return {
-    privy: {
-      wallets,
-    } as unknown as Parameters<typeof sendWith>[0],
-    wallets,
-    ethereum,
-    sendTransaction,
-  };
-}
+  it('validates stable idempotency-key content before Wallet API calls', async () => {
+    const state = makePrivy();
+    const wallet = { id: 'wallet-1', address: ACCOUNT } satisfies PrivyWallet;
+    const valuePlan = singlePlan();
 
-describe('Privy sendWith', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('sends a transaction through Privy using the request chain as CAIP-2', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    sendTransaction.mockResolvedValue({ hash: HASH });
-    actions.waitForTransactionReceipt.mockResolvedValue({
-      status: 'success',
-      transactionHash: HASH,
+    const missing = await sendWith(state.privy, wallet, valuePlan, {
+      chainId: 8453,
+      receiptClient: receiptClient(8453),
+      idempotencyKeys: {},
+    });
+    const unknown = await sendWith(state.privy, wallet, valuePlan, {
+      chainId: 8453,
+      receiptClient: receiptClient(8453),
+      idempotencyKeys: { swap: 'same', extra: 'same' },
     });
 
-    const result = await sendWith(privy, PRIVY_WALLET, requestFor(8453), {
-      confirmations: 2,
-      idempotencyKeys: ['mint-usds-1'],
+    expect(missing.isErr()).toBe(true);
+    expect(unknown.isErr()).toBe(true);
+    expect(state.sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('separates caller cancellation from Wallet API broadcast failure', async () => {
+    const cancelled = makePrivy();
+    cancelled.sendTransaction.mockRejectedValue(
+      new APIUserAbortError({ message: 'caller aborted' }),
+    );
+    const broadcast = makePrivy();
+    broadcast.sendTransaction.mockRejectedValue(new Error('wallet API unavailable'));
+    const options = {
+      chainId: 8453,
+      receiptClient: receiptClient(8453),
+      idempotencyKeys: { swap: 'key-swap' },
+    } as const;
+
+    const cancelResult = await sendWith(
+      cancelled.privy,
+      { id: 'wallet-1', address: ACCOUNT },
+      singlePlan(),
+      options,
+    );
+    const broadcastResult = await sendWith(
+      broadcast.privy,
+      { id: 'wallet-1', address: ACCOUNT },
+      singlePlan(),
+      options,
+    );
+
+    expect(cancelResult.isErr()).toBe(true);
+    if (cancelResult.isErr()) expect(cancelResult.error.code).toBe('CANCELLED');
+    expect(broadcastResult.isErr()).toBe(true);
+    if (broadcastResult.isErr()) expect(broadcastResult.error.code).toBe('BROADCAST_FAILED');
+  });
+
+  it('rejects sponsored responses without inventing a transaction hash', async () => {
+    const state = makePrivy();
+    state.sendTransaction.mockResolvedValue({ hash: '' });
+
+    const result = await sendWith(state.privy, { id: 'wallet-1', address: ACCOUNT }, singlePlan(), {
+      chainId: 8453,
+      receiptClient: receiptClient(8453),
+      idempotencyKeys: { swap: 'key-swap' },
     });
 
-    expect(result.isOk()).toBe(true);
-    expect(sendTransaction).toHaveBeenCalledWith(WALLET_ID, {
-      caip2: 'eip155:8453',
-      authorization_context: AUTHORIZATION_CONTEXT,
-      idempotency_key: 'mint-usds-1',
-      params: {
-        transaction: {
-          from: WALLET_ADDRESS,
-          to: TARGET,
-          value: '0x7b',
-          chain_id: 8453,
-          data: '0x1234',
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('UNSUPPORTED_CAPABILITY');
+    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
+  });
+
+  it('preserves submitted hash on receipt failure and maps reverts', async () => {
+    const timeoutState = makePrivy();
+    actions.waitForTransactionReceipt.mockRejectedValueOnce(new Error('timeout'));
+    const timeoutResult = await sendWith(
+      timeoutState.privy,
+      { id: 'wallet-1', address: ACCOUNT },
+      singlePlan(),
+      {
+        chainId: 8453,
+        receiptClient: receiptClient(8453),
+        idempotencyKeys: { swap: 'key-swap' },
+      },
+    );
+
+    const revertState = makePrivy();
+    actions.waitForTransactionReceipt.mockResolvedValueOnce({
+      status: 'reverted',
+      transactionHash: hash(1),
+      blockNumber: 1n,
+      gasUsed: 1n,
+      effectiveGasPrice: 1n,
+    });
+    const revertResult = await sendWith(
+      revertState.privy,
+      { id: 'wallet-1', address: ACCOUNT },
+      singlePlan(),
+      {
+        chainId: 8453,
+        receiptClient: receiptClient(8453),
+        idempotencyKeys: { swap: 'key-swap-2' },
+      },
+    );
+
+    expect(timeoutResult.isErr()).toBe(true);
+    if (timeoutResult.isErr()) {
+      expect(timeoutResult.error).toBeInstanceOf(ConfirmationError);
+      if (timeoutResult.error instanceof ConfirmationError) {
+        expect(timeoutResult.error.execution?.hash).toBe(hash(1));
+      }
+    }
+    expect(revertResult.isErr()).toBe(true);
+    if (revertResult.isErr()) expect(revertResult.error).toBeInstanceOf(TransactionError);
+  });
+
+  it('returns confirmed prefix recovery state when a later receipt fails', async () => {
+    const state = makePrivy();
+    actions.waitForTransactionReceipt
+      .mockResolvedValueOnce({
+        status: 'success',
+        transactionHash: hash(1),
+        blockNumber: 1n,
+        gasUsed: 1n,
+        effectiveGasPrice: 1n,
+      })
+      .mockRejectedValueOnce(new Error('second receipt timeout'));
+
+    const result = await sendWith(
+      state.privy,
+      { id: 'wallet-1', address: ACCOUNT },
+      twoStepPlan(),
+      {
+        chainId: 8453,
+        receiptClient: receiptClient(8453),
+        idempotencyKeys: {
+          swap: 'key-swap',
+          'swap-two': 'key-swap-two',
         },
       },
-    });
-    expect(actions.waitForTransactionReceipt).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ hash: HASH, confirmations: 2 }),
     );
-    if (result.isOk()) {
-      expect(result.value.txHash).toBe(HASH);
-      expect(result.value.operations).toEqual(['MINT_USDS']);
-    }
-  });
-
-  it('omits authorization_context and idempotency_key from the payload when not provided', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    sendTransaction.mockResolvedValue({ hash: HASH });
-    actions.waitForTransactionReceipt.mockResolvedValue({
-      status: 'success',
-      transactionHash: HASH,
-    });
-    const wallet = { id: WALLET_ID, address: WALLET_ADDRESS } satisfies PrivyWallet;
-
-    const result = await sendWith(privy, wallet, requestFor(8453));
-
-    expect(result.isOk()).toBe(true);
-    expect(Object.keys(sendTransaction.mock.calls[0]![1])).toEqual(['caip2', 'params']);
-  });
-
-  it('broadcasts a multi-transaction plan in order with one idempotency key per transaction', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    sendTransaction.mockResolvedValue({ hash: HASH });
-    actions.waitForTransactionReceipt.mockResolvedValue({
-      status: 'success',
-      transactionHash: HASH,
-    });
-
-    const result = await sendWith(privy, PRIVY_WALLET, approvalPlanFor(8453), {
-      idempotencyKeys: ['approve-1', 'mint-1'],
-    });
-
-    expect(result.isOk()).toBe(true);
-    expect(sendTransaction).toHaveBeenCalledTimes(2);
-    expect(actions.waitForTransactionReceipt).toHaveBeenCalledTimes(2);
-    expect(sendTransaction.mock.calls[0]![1]).toMatchObject({
-      idempotency_key: 'approve-1',
-      params: { transaction: expect.objectContaining({ to: TOKEN }) },
-    });
-    expect(sendTransaction.mock.calls[1]![1]).toMatchObject({
-      idempotency_key: 'mint-1',
-      params: { transaction: expect.objectContaining({ to: TARGET }) },
-    });
-    if (result.isOk()) {
-      expect(result.value.operations).toEqual(['APPROVE_ERC20', 'MINT_USDS']);
-    }
-  });
-
-  it('restarts idempotency key assignment when a curried handler is reused', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    sendTransaction.mockResolvedValue({ hash: HASH });
-    actions.waitForTransactionReceipt.mockResolvedValue({
-      status: 'success',
-      transactionHash: HASH,
-    });
-
-    const handler = sendWith(privy, PRIVY_WALLET, { idempotencyKeys: ['retry-key'] });
-
-    const first = await handler(requestFor(8453));
-    const second = await handler(requestFor(8453));
-
-    expect(first.isOk()).toBe(true);
-    expect(second.isOk()).toBe(true);
-    expect(sendTransaction).toHaveBeenCalledTimes(2);
-    expect(sendTransaction.mock.calls[0]![1]).toMatchObject({ idempotency_key: 'retry-key' });
-    expect(sendTransaction.mock.calls[1]![1]).toMatchObject({ idempotency_key: 'retry-key' });
-  });
-
-  it('fails before sending when the idempotency key count does not match the plan', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-
-    const result = await sendWith(privy, PRIVY_WALLET, approvalPlanFor(8453), {
-      idempotencyKeys: ['only-one'],
-    });
 
     expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-      expect(result.error.message).toBe(
-        'Execution plan has 2 transaction(s) but 1 Privy idempotency key(s) were provided; pass exactly one key per transaction',
-      );
-    }
-    expect(sendTransaction).not.toHaveBeenCalled();
-    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
-  });
-
-  it('returns TransactionError when the receipt is reverted', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    sendTransaction.mockResolvedValue({ hash: HASH });
-    actions.waitForTransactionReceipt.mockResolvedValue({
-      status: 'reverted',
-      transactionHash: HASH,
-    });
-
-    const result = await sendWith(privy, PRIVY_WALLET, requestFor(8453));
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(TransactionError);
-      expect(result.error).toMatchObject({
-        txHash: HASH,
-        link: `https://basescan.org/tx/${HASH}`,
+    if (result.isErr() && result.error instanceof ConfirmationError) {
+      expect(result.error.execution).toMatchObject({
+        stepId: 'swap-two',
+        hash: hash(2),
+        completed: [expect.objectContaining({ stepId: 'swap', hash: hash(1) })],
       });
     }
+    expect(state.sendTransaction).toHaveBeenCalledTimes(2);
   });
 
-  it('returns SigningError when Privy rejects the transaction', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    sendTransaction.mockRejectedValue(new Error('policy violation'));
-
-    const result = await sendWith(privy, PRIVY_WALLET, requestFor(8453));
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(SigningError);
-    }
-    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
-  });
-
-  it('returns CancelError when the Privy request is aborted', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    sendTransaction.mockRejectedValue(new APIUserAbortError());
-
-    const result = await sendWith(privy, PRIVY_WALLET, requestFor(8453));
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(CancelError);
-    }
-    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
-  });
-
-  it('returns UnexpectedError when Privy does not return a valid transaction hash', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    sendTransaction.mockResolvedValue({ hash: '' });
-
-    const result = await sendWith(privy, PRIVY_WALLET, requestFor(8453));
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-      expect(result.error.message).toContain('did not return a valid transaction hash');
-    }
-    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
-  });
-
-  it('fails before sending when the Privy wallet address does not match the transaction sender', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-    const wallet = { ...PRIVY_WALLET, address: TARGET } satisfies PrivyWallet;
-
-    const result = await sendWith(privy, wallet, requestFor(8453));
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-      expect(result.error.message).toBe(
-        `Privy wallet ${WALLET_ID} address ${TARGET} does not match transaction sender ${WALLET_ADDRESS}`,
-      );
-    }
-    expect(sendTransaction).not.toHaveBeenCalled();
-    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
-  });
-
-  it('fails before sending when the idempotency key is empty', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-
-    const result = await sendWith(privy, PRIVY_WALLET, requestFor(8453), {
-      idempotencyKeys: [''],
+  it('allows forward-compatible unknown chains only with supplied metadata and transport', async () => {
+    const state = makePrivy();
+    const unknownChain = { ...base, id: 999_999, name: 'Future chain' };
+    const transaction = createTransactionRequest({
+      id: 'swap',
+      chainId: 999_999,
+      from: ACCOUNT,
+      to: TARGET,
+      data: '0x1234',
+      operation: 'SWAP_EXACT_IN',
     });
+    if (transaction.isErr()) throw transaction.error;
+    const futurePlanResult = createExecutionPlan({ steps: [transaction.value] });
+    if (futurePlanResult.isErr()) throw futurePlanResult.error;
+    const futurePlan = futurePlanResult.value;
 
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-      expect(result.error.message).toBe('Privy idempotency key cannot be empty');
-    }
-    expect(sendTransaction).not.toHaveBeenCalled();
-    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
-  });
-
-  it('fails before sending when the idempotency key exceeds the Privy limit', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-
-    const result = await sendWith(privy, PRIVY_WALLET, requestFor(8453), {
-      idempotencyKeys: ['k'.repeat(257)],
+    const missing = await sendWith(state.privy, { id: 'wallet-1', address: ACCOUNT }, futurePlan, {
+      chainId: 999_999,
+      chain: unknownChain,
+      idempotencyKeys: { swap: 'future-key' },
     });
+    const configured = await sendWith(
+      state.privy,
+      { id: 'wallet-1', address: ACCOUNT },
+      futurePlan,
+      {
+        chainId: 999_999,
+        receiptClient: {
+          chain: unknownChain,
+        } as unknown as PublicClient,
+        idempotencyKeys: { swap: 'future-key' },
+      },
+    );
 
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-      expect(result.error.message).toBe('Privy idempotency key cannot exceed 256 characters');
-    }
-    expect(sendTransaction).not.toHaveBeenCalled();
-    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
-  });
-
-  it('fails before sending when the plan targets an unsupported chain', async () => {
-    const { privy, sendTransaction } = fakePrivy();
-
-    const result = await sendWith(privy, PRIVY_WALLET, requestFor(999999));
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(UnexpectedError);
-      expect(result.error.message).toBe('Privy adapter cannot wait for unsupported chain 999999');
-    }
-    expect(sendTransaction).not.toHaveBeenCalled();
-    expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
+    expect(missing.isErr()).toBe(true);
+    if (missing.isErr()) expect(missing.error.code).toBe('CONFIGURATION_ERROR');
+    expect(configured.isOk()).toBe(true);
   });
 });

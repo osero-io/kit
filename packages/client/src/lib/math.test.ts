@@ -1,5 +1,7 @@
+import { parseSlippage, type Slippage } from './domain.js';
 import {
-  applySlippage,
+  applySlippageDown,
+  applySlippageUp,
   BPS,
   usdcFromUsdsViaBuyGem,
   usdsFromUsdcViaSellGem,
@@ -8,38 +10,27 @@ import {
   WAD,
 } from './math.js';
 
-describe('applySlippage', () => {
-  it('returns the quote unchanged for 0 bps', () => {
-    expect(applySlippage(1_000_000n, 0)).toBe(1_000_000n);
+function slippage(value: string): Slippage {
+  const result = parseSlippage({ bps: value });
+  if (result.isErr()) throw result.error;
+  return result.value;
+}
+
+describe('slippage bounds', () => {
+  it('returns the quote unchanged at zero', () => {
+    expect(applySlippageDown(1_000_000n, slippage('0'))).toBe(1_000_000n);
+    expect(applySlippageUp(1_000_000n, slippage('0'))).toBe(1_000_000n);
   });
 
-  it('applies 5 bps = 0.05% correctly', () => {
-    expect(applySlippage(1_000_000n, 5)).toBe(999_500n);
+  it('applies minimum-output slippage downward with floor rounding', () => {
+    expect(applySlippageDown(1_000_000n, slippage('5'))).toBe(999_500n);
+    expect(applySlippageDown(1001n, slippage('5'))).toBe(1000n);
+    expect(applySlippageDown(1_000_000n, slippage('10000'))).toBe(0n);
   });
 
-  it('applies 100 bps = 1% correctly', () => {
-    expect(applySlippage(1_000_000n, 100)).toBe(990_000n);
-  });
-
-  it('returns 0 at 10000 bps (100%)', () => {
-    expect(applySlippage(1_000_000n, 10_000)).toBe(0n);
-  });
-
-  it('rounds down when the result would not be an integer', () => {
-    // 1001 * 9995 / 10000 = 10_004.995 / 10 → 1000.4995 → floor 1000
-    expect(applySlippage(1001n, 5)).toBe(1000n);
-  });
-
-  it('rejects negative slippage', () => {
-    expect(() => applySlippage(1n, -1)).toThrow(RangeError);
-  });
-
-  it('rejects slippage over 10000 bps', () => {
-    expect(() => applySlippage(1n, 10_001)).toThrow(RangeError);
-  });
-
-  it('rejects non-integer slippage', () => {
-    expect(() => applySlippage(1n, 0.5)).toThrow(RangeError);
+  it('applies maximum-input slippage upward with ceiling rounding', () => {
+    expect(applySlippageUp(1_000_000n, slippage('100'))).toBe(1_010_000n);
+    expect(applySlippageUp(1001n, slippage('0.5'))).toBe(1002n);
   });
 });
 

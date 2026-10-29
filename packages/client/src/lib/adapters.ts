@@ -1,125 +1,210 @@
-import { CancelError, SigningError, TransactionError, UnexpectedError } from './errors.js';
-import { errAsync, okAsync, type ResultAsync } from './result.js';
+import type { Hex } from 'viem';
+
+import {
+  ProgressCallbackError,
+  UnsupportedCapabilityError,
+  type ExecutionFailureContext,
+  type ExecutionStage,
+} from './errors.js';
+import { resumeExecutionPlan } from './plan.js';
+import { err, ok, ResultAsync, type Result } from './result.js';
 import type {
-  Erc20ApprovalRequired,
+  ConfirmationOptions,
+  ConfirmedTransaction,
   ExecutionPlan,
-  ExecutionStep,
-  MultiStepExecution,
-  OperationType,
+  ExecutionProgress,
+  ExecutorCapabilities,
   SendWithError,
+  TransactionConfirmation,
   TransactionRequest,
   TransactionResult,
 } from './types.js';
+import { validateConfirmations, validateExecutionPlan } from './validation.js';
 
-/**
- * Narrowing guard for a concrete {@link TransactionRequest}.
- *
- * @internal
- */
-export function isTransactionRequest(
-  plan: ExecutionPlan | ExecutionStep,
-): plan is TransactionRequest {
-  return plan.__typename === 'TransactionRequest';
-}
+export type SingleTransactionResult = {
+  readonly submittedHash: Hex;
+  readonly hash: Hex;
+  readonly replacement?: ConfirmedTransaction['replacement'];
+  readonly confirmation: TransactionConfirmation;
+};
 
-/**
- * Narrowing guard for an approval-gated plan.
- *
- * @internal
- */
-export function isErc20ApprovalRequired(
-  plan: ExecutionPlan | ExecutionStep,
-): plan is Erc20ApprovalRequired {
-  return plan.__typename === 'Erc20ApprovalRequired';
-}
+export type SingleTransactionContext = {
+  readonly planId: string;
+  readonly stepIndex: number;
+  readonly confirmations: number;
+  readonly completed: readonly ConfirmedTransaction[];
+  notifySubmitted(hash: Hex): Promise<void>;
+  failure(stage: ExecutionStage, hash?: Hex): ExecutionFailureContext;
+};
 
-/**
- * Narrowing guard for a multi-phase plan.
- *
- * @internal
- */
-export function isMultiStepExecution(plan: ExecutionPlan): plan is MultiStepExecution {
-  return plan.__typename === 'MultiStepExecution';
-}
-
-/**
- * Walk an {@link ExecutionPlan} and return the ordered sequence of
- * {@link TransactionRequest}s that a wallet needs to broadcast,
- * exactly as they will be executed.
- *
- * Useful for previews, gas estimation, and inspection. The adapters
- * use this internally too — it keeps the viem and ethers send loops
- * identical aside from the actual `sendTransaction` call.
- */
-export function flattenExecutionPlan(plan: ExecutionPlan): readonly TransactionRequest[] {
-  if (isTransactionRequest(plan)) {
-    return [plan];
-  }
-  if (isErc20ApprovalRequired(plan)) {
-    const approvalTxs = plan.approvals.map((a) => a.byTransaction);
-    return [...approvalTxs, plan.originalTransaction];
-  }
-  return plan.steps.flatMap((step) => flattenExecutionPlan(step));
-}
-
-/**
- * Extract the semantic {@link OperationType} sequence from an
- * execution plan, in the same order that
- * {@link flattenExecutionPlan} produces.
- *
- * @internal
- */
-export function operationsFor(plan: ExecutionPlan): readonly OperationType[] {
-  return flattenExecutionPlan(plan).map((tx) => tx.operation);
-}
-
-/**
- * Signature of the low-level per-transaction sender that each wallet
- * adapter provides. It takes a single {@link TransactionRequest},
- * broadcasts it, waits for confirmation, and returns the final tx
- * hash (or a typed error).
- *
- * @internal
- */
 export type SingleTxExecutor = (
-  tx: TransactionRequest,
-) => ResultAsync<`0x${string}`, CancelError | SigningError | TransactionError | UnexpectedError>;
+  transaction: TransactionRequest,
+  context: SingleTransactionContext,
+) => ResultAsync<SingleTransactionResult, SendWithError>;
 
-/**
- * Run an {@link ExecutionPlan} against a wallet-specific
- * {@link SingleTxExecutor}. Every adapter in the SDK reduces to this
- * loop: viem and ethers only differ in how they send a single
- * transaction.
- *
- * The executor is called once per transaction, in strict order.
- * Each call must resolve before the next one is started — so an
- * approval lands before the swap that relies on it, and the first
- * phase of a multi-step plan confirms before the second phase
- * begins.
- *
- * @internal
- */
+export function preflightExecutorCapabilities(
+  plan: ExecutionPlan,
+  capabilities: ExecutorCapabilities,
+): Result<void, UnsupportedCapabilityError> {
+  if (plan.requirements.execution === 'atomic-batch' && !capabilities.atomicBatch) {
+    return err(new UnsupportedCapabilityError('atomic-batch', capabilities.name));
+  }
+  if (plan.requirements.authorization === 'permit' && !capabilities.permitAuthorization) {
+    return err(new UnsupportedCapabilityError('permit-authorization', capabilities.name));
+  }
+  if (plan.requirements.sponsored && !capabilities.sponsoredTransactions) {
+    return err(new UnsupportedCapabilityError('sponsored-transactions', capabilities.name));
+  }
+  if (plan.requirements.chainTransitions && capabilities.chainSwitching === 'none') {
+    return err(new UnsupportedCapabilityError('chain-transitions', capabilities.name));
+  }
+  return ok(undefined);
+}
+
 export function runExecutionPlan(
   plan: ExecutionPlan,
   execute: SingleTxExecutor,
+  capabilities: ExecutorCapabilities,
+  options: ConfirmationOptions = {},
 ): ResultAsync<TransactionResult, SendWithError> {
-  const transactions = flattenExecutionPlan(plan);
-  const operations = transactions.map((tx) => tx.operation);
-
-  if (transactions.length === 0) {
-    return errAsync(UnexpectedError.from(new Error('Execution plan has no transactions')));
+  const validated = validateExecutionPlan(plan);
+  if (validated.isErr()) return new ResultAsync(Promise.resolve(err(validated.error)));
+  const confirmationCount = validateConfirmations(options.confirmations ?? 1);
+  if (confirmationCount.isErr()) {
+    return new ResultAsync(Promise.resolve(err(confirmationCount.error)));
   }
+  const capabilityCheck = preflightExecutorCapabilities(validated.value, capabilities);
+  if (capabilityCheck.isErr()) {
+    return new ResultAsync(Promise.resolve(err(capabilityCheck.error)));
+  }
+  const resumed = resumeExecutionPlan(validated.value, options.resume);
+  if (resumed.isErr()) return new ResultAsync(Promise.resolve(err(resumed.error)));
 
-  const initial: ResultAsync<`0x${string}`, SendWithError> = execute(transactions[0]!);
+  const execution = async (): Promise<Result<TransactionResult, SendWithError>> => {
+    const confirmed = [...resumed.value.confirmed];
+    const progressFailures: unknown[] = [];
+    const emit = async (event: ExecutionProgress): Promise<void> => {
+      if (options.onProgress === undefined) return;
+      try {
+        await options.onProgress(event);
+      } catch (cause) {
+        progressFailures.push(cause);
+      }
+    };
 
-  const final = transactions
-    .slice(1)
-    .reduce<typeof initial>((acc, tx) => acc.andThen(() => execute(tx)), initial);
+    const firstPendingIndex = confirmed.length;
+    const contextFor = (step: TransactionRequest, stepIndex: number): SingleTransactionContext => ({
+      planId: validated.value.id,
+      stepIndex,
+      confirmations: confirmationCount.value,
+      completed: confirmed,
+      notifySubmitted: async (hash) => {
+        await emit({
+          type: 'step-submitted',
+          planId: validated.value.id,
+          stepId: step.id,
+          stepIndex,
+          operation: step.operation,
+          hash,
+        });
+      },
+      failure: (stage, hash) => ({
+        planId: validated.value.id,
+        stepId: step.id,
+        stepIndex,
+        operation: step.operation,
+        stage,
+        ...(hash === undefined ? {} : { hash }),
+        completed: confirmed.map((transaction) => ({
+          planId: transaction.planId,
+          stepId: transaction.stepId,
+          stepIndex: transaction.stepIndex,
+          operation: transaction.operation,
+          hash: transaction.hash,
+        })),
+      }),
+    });
 
-  return final.andThen((txHash) =>
-    okAsync({
-      txHash,
-      operations,
-    } satisfies TransactionResult),
-  );
+    const preflightStep =
+      validated.value.steps[firstPendingIndex] ??
+      validated.value.steps[validated.value.steps.length - 1]!;
+    await emit({
+      type: 'preflight-complete',
+      planId: validated.value.id,
+      totalSteps: validated.value.steps.length,
+      resumedSteps: confirmed.length,
+    });
+    if (progressFailures.length > 0) {
+      return err(
+        ProgressCallbackError.from(
+          progressFailures[0],
+          contextFor(
+            preflightStep,
+            Math.min(firstPendingIndex, validated.value.steps.length - 1),
+          ).failure('progress'),
+        ),
+      );
+    }
+
+    // oxlint-disable no-await-in-loop -- Plans and progress callbacks must complete in order.
+    for (let index = firstPendingIndex; index < validated.value.steps.length; index += 1) {
+      const step = validated.value.steps[index]!;
+      const context = contextFor(step, index);
+      await emit({
+        type: 'step-started',
+        planId: validated.value.id,
+        stepId: step.id,
+        stepIndex: index,
+        operation: step.operation,
+      });
+      if (progressFailures.length > 0) {
+        return err(ProgressCallbackError.from(progressFailures[0], context.failure('progress')));
+      }
+
+      const sent = await execute(step, context);
+      if (sent.isErr()) return err(sent.error);
+
+      const transaction: ConfirmedTransaction = {
+        planId: validated.value.id,
+        stepId: step.id,
+        stepIndex: index,
+        operation: step.operation,
+        submittedHash: sent.value.submittedHash,
+        hash: sent.value.hash,
+        ...(sent.value.replacement === undefined ? {} : { replacement: sent.value.replacement }),
+        confirmation: sent.value.confirmation,
+      };
+      confirmed.push(transaction);
+      await emit({ type: 'step-confirmed', transaction });
+      if (progressFailures.length > 0) {
+        return err(
+          ProgressCallbackError.from(
+            progressFailures[0],
+            contextFor(step, index).failure('progress'),
+          ),
+        );
+      }
+    }
+    // oxlint-enable no-await-in-loop
+
+    const last = confirmed[confirmed.length - 1]!;
+    const result: TransactionResult = {
+      planId: validated.value.id,
+      transactions: confirmed,
+      txHash: last.hash,
+    };
+    await emit({ type: 'plan-completed', result });
+    if (progressFailures.length > 0) {
+      const lastStep = validated.value.steps[validated.value.steps.length - 1]!;
+      return err(
+        ProgressCallbackError.from(
+          progressFailures[0],
+          contextFor(lastStep, validated.value.steps.length - 1).failure('progress'),
+        ),
+      );
+    }
+    return ok(result);
+  };
+
+  return new ResultAsync(execution());
 }

@@ -1,63 +1,49 @@
-import type { ResolvedClientConfig } from './config.js';
+import type { ReferralCapability } from './capabilities.js';
+import type { Referral } from './domain.js';
 import { ValidationError } from './errors.js';
+import { err, ok, type Result } from './result.js';
 
-/**
- * SDK-wide default referral code, applied when neither the request
- * nor the client explicitly specifies one. Callers can opt out by
- * passing `referralCode: undefined` on a request, or by passing
- * `defaultReferralCode: undefined` when constructing the client.
- */
-export const DEFAULT_REFERRAL_CODE = 3000n;
+export const OSERO_REFERRAL_CODE = 3000n;
 
-/**
- * Maximum value representable by the `uint256` referral slot used
- * by PSM3's swap entrypoints. Anything above this would overflow
- * viem's ABI encoder.
- */
-const MAX_UINT256 = (1n << 256n) - 1n;
-
-type HasReferralCode = { readonly referralCode?: bigint };
-
-/**
- * Resolves the effective referral code for an action invocation.
- *
- * Precedence (highest first):
- *  1. `request.referralCode` (explicit, including `undefined` → opt out).
- *  2. `config.defaultReferralCode` (explicit, including `undefined` → opt out at client level).
- *  3. {@link DEFAULT_REFERRAL_CODE}.
- */
-export function resolveReferralCode(
-  request: HasReferralCode,
-  config: ResolvedClientConfig,
-): bigint | undefined {
-  if ('referralCode' in request) {
-    return request.referralCode;
-  }
-  return config.defaultReferralCode;
+export function resolveReferral(
+  request: { readonly referral?: Referral },
+  configured: Referral,
+): Referral {
+  return 'referral' in request ? (request.referral ?? false) : configured;
 }
 
-/**
- * Validates that a resolved referral code is within the psm3Abi
- * `uint256` range (`[0, 2**256 - 1]`). Returns a typed
- * {@link ValidationError} instead of throwing so actions can
- * short-circuit via `errAsync` without ever letting viem's ABI
- * encoder raise synchronously.
- */
-export function validateReferralCode(
-  code: bigint | undefined,
-): ValidationError<{ field: string }> | undefined {
-  if (code === undefined) return undefined;
-  if (code < 0n) {
-    return ValidationError.forField(
-      'referralCode',
-      'referralCode must be greater than or equal to 0',
+export function referralCodeForRoute(
+  configured: Referral,
+  capability: ReferralCapability,
+): Result<bigint, ValidationError> {
+  if (configured === false) return ok(0n);
+  if (capability === 'none') {
+    return err(
+      ValidationError.forField('referral', 'referral attribution is not supported by this route'),
     );
   }
-  if (code > MAX_UINT256) {
-    return ValidationError.forField(
-      'referralCode',
-      'referralCode must fit in a uint256 (<= 2**256 - 1)',
+  if (capability === 'uint16' && configured.code > 65_535n) {
+    return err(
+      ValidationError.forField(
+        'referral.code',
+        'referral code must fit within uint16 for this route',
+      ),
     );
   }
-  return undefined;
+  return ok(configured.code);
+}
+
+export function referralCodeForApi(
+  configured: Referral,
+): Result<number | undefined, ValidationError> {
+  if (configured === false) return ok(undefined);
+  if (configured.code > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return err(
+      ValidationError.forField(
+        'referral.code',
+        'referral code is not safely representable by the hosted API JSON contract',
+      ),
+    );
+  }
+  return ok(Number(configured.code));
 }

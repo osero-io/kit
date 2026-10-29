@@ -1,131 +1,294 @@
 import type { Address, Hex } from 'viem';
 
+import type { OseroChainId, ProtocolKind, SwapMode, TokenSymbol } from './capabilities.js';
+import type { AdvisoryGasEstimate, AllowanceSnapshot, Slippage, TokenAmount } from './domain.js';
 import type {
+  AccountMismatchError,
+  BroadcastError,
   CancelError,
-  InsufficientBalanceError,
+  ChainMismatchError,
+  ConfigurationError,
+  ConfirmationError,
+  ProgressCallbackError,
+  QuoteExpiredError,
+  RpcError,
+  SimulationError,
   SigningError,
   TransactionError,
   UnexpectedError,
-  UnsupportedChainError,
+  UnsupportedCapabilityError,
   ValidationError,
 } from './errors.js';
 import type { ResultAsync } from './result.js';
 
-/**
- * Stable identifier for what an on-chain transaction is doing. Used as
- * a lightweight provenance tag on every {@link TransactionRequest} so
- * that adapters and callers can classify the step they're looking at
- * without having to decode calldata.
- */
 export type OperationType =
   | 'APPROVE_ERC20'
+  | 'SWAP_EXACT_IN'
+  | 'SWAP_EXACT_OUT'
   | 'MINT_USDS'
-  | 'MINT_SUSDS'
   | 'DEPOSIT_USDS_FOR_SUSDS'
+  | 'MINT_SUSDS_WITH_USDS'
   | 'REDEEM_USDS_FOR_USDC'
-  | 'REDEEM_SUSDS_FOR_USDC'
-  | 'REDEEM_SUSDS_FOR_USDS';
+  | 'REDEEM_SUSDS_FOR_USDS'
+  | 'WITHDRAW_USDS_FROM_SUSDS'
+  | 'RECOVER_CROSS_CHAIN_TRANSFER';
 
-/**
- * A fully-baked EVM transaction that can be handed to a wallet with
- * no further processing. The wallet is responsible only for gas
- * estimation, nonce selection, and signing.
- */
+export type ApprovalAuthorization = {
+  readonly kind: 'erc20-approval';
+  readonly token: Address;
+  readonly owner: Address;
+  readonly spender: Address;
+  readonly amount: bigint;
+};
+
 export type TransactionRequest = {
   readonly __typename: 'TransactionRequest';
+  readonly id: string;
   readonly chainId: number;
   readonly from: Address;
   readonly to: Address;
   readonly data: Hex;
   readonly value: bigint;
   readonly operation: OperationType;
+  readonly authorization?: ApprovalAuthorization;
+  readonly estimatedGas?: AdvisoryGasEstimate;
 };
 
-/**
- * A single ERC-20 approval prerequisite attached to an
- * {@link Erc20ApprovalRequired} plan. The `byTransaction` field is
- * the concrete transaction that performs the approval.
- */
-export type Erc20Approval = {
-  readonly token: Address;
-  readonly spender: Address;
-  readonly amount: bigint;
-  readonly byTransaction: TransactionRequest;
+export type ExecutorRequirements = {
+  readonly execution: 'sequential' | 'atomic-batch';
+  readonly authorization: 'transactions' | 'permit';
+  readonly sponsored: boolean;
+  readonly chainTransitions: boolean;
 };
 
-/**
- * An action whose final transaction cannot be sent until one or more
- * ERC-20 approvals have landed on-chain. The executor is expected to
- * submit every approval in order before broadcasting
- * {@link Erc20ApprovalRequired.originalTransaction | originalTransaction}.
- */
-export type Erc20ApprovalRequired = {
-  readonly __typename: 'Erc20ApprovalRequired';
-  readonly approvals: readonly Erc20Approval[];
-  readonly originalTransaction: TransactionRequest;
+export type ExecutionPlanMetadata = {
+  readonly source: 'local' | 'hosted-api' | 'custom';
+  readonly allowanceSnapshots?: readonly AllowanceSnapshot[];
+  readonly quoteId?: string;
 };
 
-/**
- * Either a self-contained tx or an approval-gated tx — i.e. anything
- * that an executor can process in a single linear phase.
- */
-export type ExecutionStep = TransactionRequest | Erc20ApprovalRequired;
+declare const quoteExpiryBrand: unique symbol;
 
-/**
- * A multi-phase action (e.g. mainnet USDC → USDS → sUSDS) whose
- * downstream steps depend on upstream ones having landed on-chain.
- * Steps are executed strictly in order and every step in `steps[i]`
- * must confirm before `steps[i+1]` starts.
- */
-export type MultiStepExecution = {
-  readonly __typename: 'MultiStepExecution';
-  readonly steps: readonly ExecutionStep[];
+export type QuoteExpiry = string & {
+  readonly [quoteExpiryBrand]: true;
 };
 
-/**
- * The full union of things an action can return. Adapters
- * ({@link ExecutionPlanHandler}) pattern-match on `__typename` to
- * dispatch to the right execution strategy.
- */
-export type ExecutionPlan = TransactionRequest | Erc20ApprovalRequired | MultiStepExecution;
+type ExecutionPlanBase = {
+  readonly __typename: 'ExecutionPlan';
+  readonly id: string;
+  readonly steps: readonly TransactionRequest[];
+  readonly requirements: ExecutorRequirements;
+  readonly metadata: ExecutionPlanMetadata;
+};
 
-/**
- * The outcome of running an {@link ExecutionPlan} end-to-end. `txHash`
- * is the hash of the *final* transaction in the plan — the tx that
- * produces the caller's intended state change.
- *
- * `operations` lists every semantic operation that ran, in order. For
- * a simple swap this is a single entry; for a mainnet sUSDS mint it
- * is `['APPROVE_ERC20', 'MINT_USDS', 'APPROVE_ERC20', 'DEPOSIT_USDS_FOR_SUSDS']`.
- */
+export type ExecutionPlan = ExecutionPlanBase &
+  (
+    | {
+        readonly version: 1;
+        readonly quoteExpiresAt?: never;
+      }
+    | {
+        readonly version: 2;
+        readonly quoteExpiresAt: QuoteExpiry;
+      }
+  );
+
+export type TransactionConfirmation = {
+  readonly status: 'success';
+  readonly transactionHash: Hex;
+  readonly blockNumber?: bigint;
+  readonly gasUsed?: bigint;
+  readonly effectiveGasPrice?: bigint;
+  readonly confirmations: number;
+};
+
+export type ConfirmedTransaction = {
+  readonly planId: string;
+  readonly stepId: string;
+  readonly stepIndex: number;
+  readonly operation: OperationType;
+  readonly submittedHash: Hex;
+  readonly hash: Hex;
+  readonly replacement?: {
+    readonly reason: string;
+    readonly originalHash: Hex;
+    readonly replacementHash: Hex;
+  };
+  readonly confirmation: TransactionConfirmation;
+};
+
 export type TransactionResult = {
+  readonly planId: string;
+  readonly transactions: readonly ConfirmedTransaction[];
+  /** Convenience alias for the final effective transaction hash. */
   readonly txHash: Hex;
-  readonly operations: readonly OperationType[];
 };
 
-/**
- * Every error an {@link ExecutionPlanHandler} can produce.
- */
-export type SendWithError = CancelError | SigningError | TransactionError | UnexpectedError;
+export type ExecutionResumeState = {
+  readonly planId: string;
+  readonly confirmed: readonly ConfirmedTransaction[];
+};
 
-/**
- * An executor function that takes an {@link ExecutionPlan} and runs it
- * against a concrete wallet (viem `WalletClient`, ethers `Signer`,
- * etc.). Adapters curry it so that `sendWith(wallet)` returns an
- * {@link ExecutionPlanHandler} ready to be chained with `.andThen()`.
- */
-export type ExecutionPlanHandler<T extends ExecutionPlan = ExecutionPlan> = (
-  result: T,
+export type ExecutionProgress =
+  | {
+      readonly type: 'preflight-complete';
+      readonly planId: string;
+      readonly totalSteps: number;
+      readonly resumedSteps: number;
+    }
+  | {
+      readonly type: 'step-started';
+      readonly planId: string;
+      readonly stepId: string;
+      readonly stepIndex: number;
+      readonly operation: OperationType;
+    }
+  | {
+      readonly type: 'step-submitted';
+      readonly planId: string;
+      readonly stepId: string;
+      readonly stepIndex: number;
+      readonly operation: OperationType;
+      readonly hash: Hex;
+    }
+  | {
+      readonly type: 'step-confirmed';
+      readonly transaction: ConfirmedTransaction;
+    }
+  | {
+      readonly type: 'plan-completed';
+      readonly result: TransactionResult;
+    };
+
+export type ProgressHandler = (progress: ExecutionProgress) => void | Promise<void>;
+
+export type ExecutorCapabilities = {
+  readonly name: string;
+  readonly sequentialTransactions: true;
+  readonly atomicBatch: boolean;
+  readonly permitAuthorization: boolean;
+  readonly sponsoredTransactions: boolean;
+  readonly chainSwitching: 'none' | 'explicit';
+  readonly simulation: 'none' | 'independent-steps' | 'full-plan';
+};
+
+export type ConfirmationOptions = {
+  readonly confirmations?: number;
+  readonly onProgress?: ProgressHandler;
+  readonly resume?: ExecutionResumeState;
+};
+
+export type SendWithError =
+  | ValidationError
+  | ConfigurationError
+  | AccountMismatchError
+  | ChainMismatchError
+  | UnsupportedCapabilityError
+  | QuoteExpiredError
+  | CancelError
+  | SimulationError
+  | SigningError
+  | BroadcastError
+  | ConfirmationError
+  | TransactionError
+  | ProgressCallbackError
+  | RpcError
+  | UnexpectedError;
+
+export type ExecutionPlanHandler = (
+  plan: ExecutionPlan,
 ) => ResultAsync<TransactionResult, SendWithError>;
 
-/**
- * The superset of errors that a plan-building action can return before
- * it is handed off to a wallet adapter. Actions surface validation
- * problems, unsupported chains, insufficient balance, and transport
- * failures through this union.
- */
-export type ActionError =
-  | ValidationError
-  | UnsupportedChainError
-  | InsufficientBalanceError
-  | UnexpectedError;
+export type SwapRoute = {
+  readonly chainId: OseroChainId;
+  readonly protocol: ProtocolKind;
+  readonly assetIn: TokenSymbol;
+  readonly assetOut: TokenSymbol;
+  readonly mode: SwapMode;
+};
+
+export type PreparedSwapRoute = SwapRoute & {
+  readonly steps: readonly OperationType[];
+};
+
+export type SwapSlippageProtection = {
+  readonly bound: 'minimum-output' | 'maximum-input';
+  readonly enforcedBy: 'calldata' | 'allowance' | 'none';
+};
+
+export type SwapQuoteCommon<
+  AssetIn extends TokenSymbol,
+  AssetOut extends TokenSymbol,
+  Route extends SwapRoute = SwapRoute,
+> = {
+  readonly assetIn: AssetIn;
+  readonly assetOut: AssetOut;
+  readonly slippage: Slippage;
+  readonly route: Route;
+  readonly slippageProtection: SwapSlippageProtection;
+  readonly quotedAt: {
+    readonly blockNumber: bigint;
+  };
+  readonly protocolFee: {
+    readonly kind: 'none' | 'lite-psm';
+    readonly tin?: bigint;
+    readonly tout?: bigint;
+  };
+};
+
+export type ExactInSwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = SwapQuoteCommon<AssetIn, AssetOut> & {
+  readonly mode: 'exact-in';
+  readonly amountIn: TokenAmount<AssetIn>;
+  readonly expectedAmountOut: TokenAmount<AssetOut>;
+  readonly minimumAmountOut: TokenAmount<AssetOut>;
+};
+
+export type ExactOutSwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = SwapQuoteCommon<AssetIn, AssetOut> & {
+  readonly mode: 'exact-out';
+  readonly amountOut: TokenAmount<AssetOut>;
+  readonly expectedAmountIn: TokenAmount<AssetIn>;
+  readonly maximumAmountIn: TokenAmount<AssetIn>;
+};
+
+export type SwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = ExactInSwapQuote<AssetIn, AssetOut> | ExactOutSwapQuote<AssetIn, AssetOut>;
+
+export type PreparedSwapQuoteCommon<
+  AssetIn extends TokenSymbol,
+  AssetOut extends TokenSymbol,
+> = SwapQuoteCommon<AssetIn, AssetOut, PreparedSwapRoute> & {
+  readonly plan: ExecutionPlan;
+};
+
+export type PreparedExactInSwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = PreparedSwapQuoteCommon<AssetIn, AssetOut> & {
+  readonly mode: 'exact-in';
+  readonly amountIn: TokenAmount<AssetIn>;
+  readonly expectedAmountOut: TokenAmount<AssetOut>;
+  readonly minimumAmountOut: TokenAmount<AssetOut>;
+};
+
+export type PreparedExactOutSwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = PreparedSwapQuoteCommon<AssetIn, AssetOut> & {
+  readonly mode: 'exact-out';
+  readonly amountOut: TokenAmount<AssetOut>;
+  readonly expectedAmountIn: TokenAmount<AssetIn>;
+  readonly maximumAmountIn: TokenAmount<AssetIn>;
+};
+
+export type PreparedSwapQuote<
+  AssetIn extends TokenSymbol = TokenSymbol,
+  AssetOut extends TokenSymbol = TokenSymbol,
+> = PreparedExactInSwapQuote<AssetIn, AssetOut> | PreparedExactOutSwapQuote<AssetIn, AssetOut>;
