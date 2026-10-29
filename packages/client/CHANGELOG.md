@@ -1,5 +1,11 @@
 # @osero/client
 
+## 1.0.1
+
+### Patch Changes
+
+- 0e0d10a: Allow `@privy-io/node` 0.36 as a peer dependency.
+
 ## 1.0.0
 
 ### Major Changes
