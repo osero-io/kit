@@ -519,8 +519,8 @@ output as a raw `bigint` without building a plan. Previews only need
 ### `mintUsds` — USDC → USDS
 
 ```ts
-import { mintUsds, previewMintUsds } from '@osero/client/actions';
 import type { Erc20ApprovalRequired } from '@osero/client';
+import { mintUsds, previewMintUsds } from '@osero/client/actions';
 
 type MintUsdsRequest = CommonRequest;
 type MintUsdsError = ValidationError | UnsupportedChainError | UnexpectedError;
@@ -546,8 +546,8 @@ mintUsds(client, request);
 ### `mintSUsds` — USDC → sUSDS
 
 ```ts
-import { mintSUsds, previewMintSUsds } from '@osero/client/actions';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '@osero/client';
+import { mintSUsds, previewMintSUsds } from '@osero/client/actions';
 
 type MintSUsdsRequest = CommonRequest;
 type MintSUsdsError = ValidationError | UnsupportedChainError | UnexpectedError;
@@ -587,8 +587,8 @@ mintSUsds(client, request);
 ### `redeemUsds` — USDS → USDC
 
 ```ts
-import { redeemUsds, previewRedeemUsds } from '@osero/client/actions';
 import type { Erc20ApprovalRequired } from '@osero/client';
+import { redeemUsds, previewRedeemUsds } from '@osero/client/actions';
 
 type RedeemUsdsRequest = CommonRequest;
 type RedeemUsdsError = ValidationError | UnsupportedChainError | UnexpectedError;
@@ -616,8 +616,8 @@ redeemUsds(client, request);
 ### `redeemSUsds` — sUSDS → USDC
 
 ```ts
-import { redeemSUsds, previewRedeemSUsds } from '@osero/client/actions';
 import type { Erc20ApprovalRequired, MultiStepExecution } from '@osero/client';
+import { redeemSUsds, previewRedeemSUsds } from '@osero/client/actions';
 
 type RedeemSUsdsRequest = CommonRequest;
 type RedeemSUsdsError = ValidationError | UnsupportedChainError | UnexpectedError;
@@ -1089,7 +1089,10 @@ import {
 ```ts
 // Returned by actions before handoff to sendWith:
 type ActionError =
-  ValidationError | UnsupportedChainError | InsufficientBalanceError | UnexpectedError;
+  | ValidationError
+  | UnsupportedChainError
+  | InsufficientBalanceError
+  | UnexpectedError;
 
 // Returned by sendWith:
 type SendWithError = CancelError | SigningError | TransactionError | UnexpectedError;
@@ -1109,7 +1112,10 @@ type OseroApiClientError =
 
 // executeSwap also returns wallet and bounded-lifecycle failures:
 type ExecuteSwapError =
-  OseroApiClientError | SendWithError | ApprovalLimitError | QuoteRefreshLimitError;
+  | OseroApiClientError
+  | SendWithError
+  | ApprovalLimitError
+  | QuoteRefreshLimitError;
 ```
 
 Each action also exports a per-action alias:

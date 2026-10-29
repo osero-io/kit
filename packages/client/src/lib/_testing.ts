@@ -170,12 +170,14 @@ export function zeroXRecoveryContextFixture(
   };
 }
 
+function unexpected(operation: string) {
+  return mockFn(() => Promise.reject(new Error(`Unexpected ${operation} call`)));
+}
+
 export function createMockClient(
   chainId: OseroChainId,
   overrides: Partial<MockPublicClient> = {},
 ): { readonly client: OseroClient; readonly publicClient: MockPublicClient } {
-  const unexpected = (operation: string) =>
-    mockFn(() => Promise.reject(new Error(`Unexpected ${operation} call`)));
   const publicClient: MockPublicClient = {
     chain: CHAINS[chainId].viemChain,
     transport: { type: 'mock' },
