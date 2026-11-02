@@ -108,7 +108,7 @@
     "typecheck": "tsc --build --emitDeclarationOnly"
   },
   "dependencies": {
-    "@sentry/core": "^10.73.0",
+    "@sentry/core": "^11.9.0",
     "neverthrow": "^8.2.0",
     "tslib": "^2.3.0"
   },
