@@ -15,8 +15,11 @@ export type ProtocolKind = 'ethereum-lite-psm' | 'psm3';
 export type SwapMode = 'exact-in' | 'exact-out';
 export type ReferralCapability = 'none' | 'uint16' | 'uint256';
 
-// viem versions at the supported peer-dependency floor predate the built-in
-// `unichain` export. Keep the definition at the capability source of truth.
+// viem has exported `unichain` since before the supported peer floor (2.28.0).
+// The definition stays inline on purpose: switching to viem's object would
+// change the `getChain(130)` metadata published since 1.0 (OP-stack formatters,
+// extra contracts, explorer API URL). Only the canonical Multicall3 deployment
+// is declared, because viem's `multicall` action requires it.
 const unichain = defineChain({
   id: 130,
   name: 'Unichain',
@@ -26,6 +29,12 @@ const unichain = defineChain({
   },
   blockExplorers: {
     default: { name: 'Uniscan', url: 'https://uniscan.xyz' },
+  },
+  contracts: {
+    multicall3: {
+      address: '0xcA11bde05977b3631167028862bE2a173976CA11',
+      blockCreated: 0,
+    },
   },
 });
 
