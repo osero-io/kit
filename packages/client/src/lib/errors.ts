@@ -217,6 +217,11 @@ export class UnsupportedCapabilityError extends OseroError<'UNSUPPORTED_CAPABILI
   constructor(
     readonly capability: string,
     readonly executor: string,
+    /**
+     * Set when the gap was discovered while a plan was executing rather than in
+     * preflight: names the step and lists the steps already confirmed.
+     */
+    readonly execution?: ExecutionFailureContext,
   ) {
     super(`${executor} does not support required capability: ${capability}`);
   }

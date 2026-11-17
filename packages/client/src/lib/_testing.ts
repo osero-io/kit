@@ -483,6 +483,41 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
       expect(harness.broadcast).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['sponsored transactions', { sponsored: true }, 'sponsored-transactions'],
+      ['permit authorization', { authorization: 'permit' }, 'permit-authorization'],
+      ['chain transitions', { chainTransitions: true }, 'chain-transitions'],
+    ] as const)(
+      'rejects a plan requiring %s before any wallet interaction',
+      async (_name, requirement, capability) => {
+        const direct = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        const curried = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        const valuePlan = contractPlan();
+        const required = createExecutionPlan({
+          steps: valuePlan.steps,
+          requirements: { ...valuePlan.requirements, ...requirement },
+        });
+        if (required.isErr()) throw required.error;
+
+        const directResult = await direct.execute(required.value, 'direct');
+        const curriedResult = await curried.execute(required.value, 'curried');
+
+        for (const result of [directResult, curriedResult]) {
+          expect(result.isErr()).toBe(true);
+          if (result.isErr()) {
+            expect(result.error.code).toBe('UNSUPPORTED_CAPABILITY');
+            if (result.error.code === 'UNSUPPORTED_CAPABILITY') {
+              expect(result.error.capability).toBe(capability);
+              // A preflight rejection happened before execution: there is no execution context.
+              expect(result.error.execution).toBeUndefined();
+            }
+          }
+        }
+        expect(direct.broadcast).not.toHaveBeenCalled();
+        expect(curried.broadcast).not.toHaveBeenCalled();
+      },
+    );
+
     it('rejects a hosted plan at quote expiry before broadcasting', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-07-22T20:00:00Z'));

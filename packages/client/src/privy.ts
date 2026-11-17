@@ -304,9 +304,13 @@ function sendSingleTransaction(
   ).andThen((hash) => {
     if (!isHash(hash)) {
       return errAsync(
+        // The Wallet API accepted the request, so something may already be in
+        // flight. The SDK cannot know about sponsorship before this call; report
+        // exactly where the plan stopped and what was confirmed before it.
         new UnsupportedCapabilityError(
           'standard transaction hash (sponsored/user-operation responses are unsupported)',
           'privy',
+          context.failure('broadcast'),
         ),
       );
     }

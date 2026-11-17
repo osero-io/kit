@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 
 import {
+  preflightExecutorCapabilities,
   runExecutionPlan,
   type SingleTransactionResult,
   type SingleTxExecutor,
@@ -242,5 +243,76 @@ describe('runExecutionPlan', () => {
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error).toBeInstanceOf(ProgressCallbackError);
     expect(executor).not.toHaveBeenCalled();
+  });
+});
+
+describe('executor chain support', () => {
+  it('does not restrict chains when an executor declares none', () => {
+    expect(preflightExecutorCapabilities(plan(), CAPABILITIES).isOk()).toBe(true);
+  });
+
+  it('accepts a plan whose every step is on a declared chain', () => {
+    const result = preflightExecutorCapabilities(plan(), {
+      ...CAPABILITIES,
+      supportedChainIds: [1, 8453],
+    });
+
+    expect(result.isOk()).toBe(true);
+  });
+
+  it('rejects a plan on an undeclared chain before any step executes', async () => {
+    const capabilities = { ...CAPABILITIES, supportedChainIds: [1, 10] };
+    const execute = vi.fn<SingleTxExecutor>();
+
+    const preflight = preflightExecutorCapabilities(plan(), capabilities);
+    const run = await runExecutionPlan(plan(), execute, capabilities);
+
+    for (const result of [preflight, run]) {
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(UnsupportedCapabilityError);
+        if (result.error instanceof UnsupportedCapabilityError) {
+          expect(result.error.capability).toBe('chain:8453');
+          expect(result.error.executor).toBe('test');
+        }
+      }
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('checks every step of a plan that declares chain transitions', () => {
+    const transitioning = createExecutionPlan({
+      steps: [step('one'), { ...step('two'), chainId: 10 }],
+      requirements: {
+        execution: 'sequential',
+        authorization: 'transactions',
+        sponsored: false,
+        chainTransitions: true,
+      },
+    });
+    if (transitioning.isErr()) throw transitioning.error;
+    const switching = { ...CAPABILITIES, chainSwitching: 'explicit' as const };
+
+    const allowed = preflightExecutorCapabilities(transitioning.value, {
+      ...switching,
+      supportedChainIds: [8453, 10],
+    });
+    const rejected = preflightExecutorCapabilities(transitioning.value, {
+      ...switching,
+      supportedChainIds: [8453],
+    });
+
+    expect(allowed.isOk()).toBe(true);
+    expect(rejected.isErr()).toBe(true);
+    if (rejected.isErr()) expect(rejected.error.capability).toBe('chain:10');
+  });
+
+  it('treats an empty declared chain set as supporting no chain', () => {
+    const result = preflightExecutorCapabilities(plan(), {
+      ...CAPABILITIES,
+      supportedChainIds: [],
+    });
+
+    expect(result.isErr()).toBe(true);
   });
 });

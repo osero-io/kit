@@ -78,6 +78,13 @@ export function preflightExecutorCapabilities(
   if (plan.requirements.chainTransitions && capabilities.chainSwitching === 'none') {
     return err(new UnsupportedCapabilityError('chain-transitions', capabilities.name));
   }
+  if (capabilities.supportedChainIds !== undefined) {
+    const supported = capabilities.supportedChainIds;
+    const unsupported = plan.steps.find((step) => !supported.includes(step.chainId));
+    if (unsupported !== undefined) {
+      return err(new UnsupportedCapabilityError(`chain:${unsupported.chainId}`, capabilities.name));
+    }
+  }
   return ok(undefined);
 }
 

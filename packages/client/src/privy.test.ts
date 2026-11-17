@@ -9,8 +9,17 @@ import {
   type AdapterContractFactory,
   type AdapterFault,
 } from './lib/_testing.js';
-import { ConfirmationError, TransactionError, ValidationError } from './lib/errors.js';
-import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
+import {
+  ConfirmationError,
+  TransactionError,
+  UnsupportedCapabilityError,
+  ValidationError,
+} from './lib/errors.js';
+import {
+  createExecutionPlan,
+  createTransactionRequest,
+  executionResumeStateFromError,
+} from './lib/plan.js';
 import { sendWith, type PrivyWallet } from './privy.js';
 
 type ReceiptWaitInput = {
@@ -241,6 +250,49 @@ describe('Privy stage behavior', () => {
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.code).toBe('UNSUPPORTED_CAPABILITY');
     expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
+  });
+
+  it('reports where a plan stopped when a later step returns a sponsored response', async () => {
+    const state = makePrivy();
+    state.sendTransaction
+      .mockResolvedValueOnce({ hash: hash(1) })
+      .mockResolvedValueOnce({ hash: 'user-operation-id' });
+    const valuePlan = twoStepPlan();
+
+    const result = await sendWith(state.privy, { id: 'wallet-1', address: ACCOUNT }, valuePlan, {
+      chainId: 8453,
+      receiptClient: receiptClient(8453),
+      idempotencyKeys: { swap: 'key-swap', 'swap-two': 'key-swap-two' },
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(UnsupportedCapabilityError);
+      if (result.error instanceof UnsupportedCapabilityError) {
+        expect(result.error.executor).toBe('privy');
+        expect(result.error.execution).toMatchObject({
+          planId: valuePlan.id,
+          stepId: 'swap-two',
+          stepIndex: 1,
+          operation: 'SWAP_EXACT_IN',
+          stage: 'broadcast',
+        });
+        expect(result.error.execution?.hash).toBeUndefined();
+        expect(result.error.execution?.completed).toEqual([
+          expect.objectContaining({
+            stepId: 'swap',
+            hash: hash(1),
+            submittedHash: hash(1),
+            confirmation: expect.objectContaining({ status: 'success' }),
+          }),
+        ]);
+        // The confirmed prefix can be resumed once the wallet is reconfigured.
+        const derived = executionResumeStateFromError(valuePlan, result.error);
+        expect(derived.isOk()).toBe(true);
+      }
+    }
+    // The receipt wait ran for the confirmed first step only.
+    expect(actions.waitForTransactionReceipt).toHaveBeenCalledTimes(1);
   });
 
   it('preserves submitted hash on receipt failure and maps reverts', async () => {
