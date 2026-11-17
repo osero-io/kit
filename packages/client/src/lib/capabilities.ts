@@ -269,3 +269,23 @@ export const CHAIN_CAPABILITIES: Readonly<Record<OseroChainId, ChainCapability>>
     routes: L2_ROUTES,
   },
 };
+
+/**
+ * How a route's quoted slippage bound is enforced when the plan executes.
+ * PSM3 takes the bound as a calldata argument. On mainnet only some routes can
+ * enforce one: an exact-output USDS spend is capped by the allowance, sUSDS to
+ * USDC carries a calldata bound, and the remaining routes cannot enforce any.
+ */
+export function slippageEnforcementFor(
+  protocol: ProtocolKind,
+  assetIn: TokenSymbol,
+  assetOut: TokenSymbol,
+  mode: SwapMode,
+): 'calldata' | 'allowance' | 'none' {
+  if (protocol === 'psm3') return 'calldata';
+  if (mode === 'exact-out' && assetIn === 'USDS' && (assetOut === 'USDC' || assetOut === 'sUSDS')) {
+    return 'allowance';
+  }
+  if (mode === 'exact-in' && assetIn === 'sUSDS' && assetOut === 'USDC') return 'calldata';
+  return 'none';
+}

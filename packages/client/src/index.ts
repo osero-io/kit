@@ -88,6 +88,11 @@ export {
   type TransactionRequestInput,
 } from './lib/plan.js';
 export type { Result, ResultAsync } from './lib/result.js';
+export {
+  listSwapRoutes,
+  type SupportedSwapRoute,
+  type SupportedSwapRouteMode,
+} from './lib/routes.js';
 export { configureTelemetry, isTelemetryEnabled, type TelemetryConfig } from './lib/telemetry.js';
 export {
   getToken,

@@ -3,6 +3,7 @@ import { litePsmAbi } from '../abis/litePsm.js';
 import { psm3Abi } from '../abis/psm3.js';
 import {
   CHAIN_CAPABILITIES,
+  slippageEnforcementFor,
   type OseroChainId,
   type RouteCapability,
   type TokenSymbol,
@@ -198,16 +199,12 @@ export function resolveSwapQuoteRequest(
     );
   }
 
-  const slippageEnforcedBy =
-    capability.protocol === 'psm3'
-      ? 'calldata'
-      : request.mode === 'exact-out' &&
-          assetIn === 'USDS' &&
-          (assetOut === 'USDC' || assetOut === 'sUSDS')
-        ? 'allowance'
-        : request.mode === 'exact-in' && assetIn === 'sUSDS' && assetOut === 'USDC'
-          ? 'calldata'
-          : 'none';
+  const slippageEnforcedBy = slippageEnforcementFor(
+    capability.protocol,
+    assetIn,
+    assetOut,
+    request.mode,
+  );
 
   return ok({
     chainId,
