@@ -50,7 +50,7 @@ type ReceiptWaitInput = {
 const actions = vi.hoisted(() => ({
   estimateGas: vi.fn<(...args: unknown[]) => Promise<bigint>>(),
   getCapabilities: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
-  getTransaction: vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
+  getBlock: vi.fn<(_client: unknown, input: unknown) => Promise<unknown>>(),
   getTransactionReceipt:
     vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   sendCalls: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
@@ -94,7 +94,7 @@ function resetActions(): void {
   actions.getCapabilities.mockReset().mockResolvedValue({
     atomic: { status: 'unsupported' },
   });
-  actions.getTransaction.mockReset().mockRejectedValue(new Error('transaction not found'));
+  actions.getBlock.mockReset().mockResolvedValue({ transactions: [] });
   actions.getTransactionReceipt.mockReset().mockImplementation(async (_client, input) => ({
     status: 'success',
     transactionHash: input.hash,
@@ -649,7 +649,62 @@ describe('eip5792 status failures', () => {
     expect(actions.sendTransaction).not.toHaveBeenCalled();
   });
 
-  it.each([500, 600])(
+  it.each([
+    [
+      'a partial revert (status 600)',
+      { atomic: true, statusCode: 600, receipts: [receipt(hash(4), 'reverted')] },
+    ],
+    [
+      'a partial revert where one call succeeded',
+      {
+        atomic: false,
+        statusCode: 600,
+        receipts: [receipt(hash(3)), receipt(hash(4), 'reverted')],
+      },
+    ],
+    [
+      'a complete-revert status that disclaims atomicity',
+      { atomic: false, statusCode: 500, receipts: [receipt(hash(4), 'reverted')] },
+    ],
+    [
+      'a complete-revert status carrying a successful receipt',
+      {
+        atomic: true,
+        statusCode: 500,
+        receipts: [receipt(hash(3)), receipt(hash(4), 'reverted')],
+      },
+    ],
+  ])(
+    'treats %s as unconfirmed, and refuses resume state that would resend the calls',
+    async (_name, status) => {
+      const valueWallet = atomicWallet();
+      const valuePlan = plan();
+      actions.waitForCallsStatus.mockResolvedValue(status);
+
+      const result = await sendWith(valueWallet, valuePlan);
+
+      expect(result.isErr()).toBe(true);
+      if (result.isOk()) return;
+      // Some calls may be on chain, so this is not a revert.
+      expect(result.error).toBeInstanceOf(ConfirmationError);
+      expect(result.error.message).toContain(BATCH_ID);
+      if (result.error instanceof ConfirmationError) {
+        expect(result.error.execution).toMatchObject({
+          stage: 'confirmation',
+          hash: hash(4),
+          batchId: BATCH_ID,
+          completed: [],
+        });
+      }
+      const derived = executionResumeStateFromError(valuePlan, result.error);
+      expect(derived.isErr()).toBe(true);
+      if (derived.isErr()) {
+        expect(derived.error.details).toMatchObject({ stage: 'confirmation', batchId: BATCH_ID });
+      }
+    },
+  );
+
+  it.each([500])(
     'maps reverted status %d to TransactionError carrying the steps confirmed before the batch',
     async (statusCode) => {
       const valueWallet = atomicWallet();
@@ -725,6 +780,28 @@ describe('eip5792 extra confirmations', () => {
       if (result.error instanceof ConfirmationError) {
         expect(result.error.execution).toMatchObject({ stage: 'confirmation', hash: hash(9) });
       }
+    }
+  });
+
+  it('treats an unreadable confirmation receipt as unconfirmed, not reverted', async () => {
+    const valueWallet = atomicWallet();
+    const valuePlan = plan();
+    actions.waitForTransactionReceipt.mockResolvedValue({ status: 'success' });
+
+    const result = await sendWith(valueWallet, valuePlan, { confirmations: 2 });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ConfirmationError);
+      if (result.error instanceof ConfirmationError) {
+        expect(result.error.execution).toMatchObject({
+          stage: 'confirmation',
+          hash: hash(9),
+          batchId: BATCH_ID,
+        });
+      }
+      // The wallet reported success, so resuming must not resend the batch.
+      expect(executionResumeStateFromError(valuePlan, result.error).isErr()).toBe(true);
     }
   });
 

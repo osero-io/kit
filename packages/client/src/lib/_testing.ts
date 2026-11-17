@@ -226,6 +226,22 @@ export type AdapterContractHarness = {
   readonly resumeReceiptLookupsPerStep?: number;
   /** Stages this adapter performs itself; a contract test for an absent stage is skipped. */
   readonly performs?: { readonly estimate: boolean };
+  /**
+   * The stage at which a mined, reverted receipt is reported. Defaults to
+   * `revert`. ethers' `wait()` throws for a reverted receipt, so that adapter
+   * reports it at `confirmation`.
+   */
+  readonly revertSurfacesAt?: 'revert' | 'confirmation';
+  /**
+   * A failure this adapter reports in a way that proves the step did not take
+   * effect, used to derive resume state. Defaults to a reverted receipt.
+   */
+  readonly provableFailure?: AdapterFault;
+  /**
+   * Whether this adapter's cancellation is an explicit wallet refusal, which
+   * proves nothing was sent. Defaults to true. Privy's is a client-side abort.
+   */
+  readonly cancelProvesNotSent?: boolean;
   execute(
     plan: ExecutionPlan,
     form: 'direct' | 'curried',
@@ -281,12 +297,13 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
   async function failedAfterFirstStep() {
     const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
     if (harness.fail === undefined) return undefined;
-    // A mined, reverted second step proves that step took no effect, so the
-    // failure can be turned into resume state without further checks.
-    harness.fail({ stage: 'receipt', kind: 'revert' }, 2);
+    // The second step fails in a way that proves it took no effect (by default
+    // a mined, reverted receipt), so the failure can be turned into resume
+    // state without further checks.
+    harness.fail(harness.provableFailure ?? { stage: 'receipt', kind: 'revert' }, 2);
     const valuePlan = contractPlan();
     const result = await harness.execute(valuePlan, 'direct');
-    if (result.isOk()) throw new Error('expected the injected revert to fail');
+    if (result.isOk()) throw new Error('expected the injected failure to fail the plan');
     return { valuePlan, error: result.error };
   }
 
@@ -638,7 +655,7 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
         expect(harness.broadcast).toHaveBeenCalledTimes(2);
       });
 
-      it('classifies a reverted receipt as a transaction error with its hash', async () => {
+      it('reports a reverted receipt with its hash at the stage this adapter documents', async () => {
         if (!supportsFaults()) return;
         const harness = harnessWithFault({ stage: 'receipt', kind: 'revert' });
 
@@ -646,14 +663,27 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
 
         expect(result.isErr()).toBe(true);
         if (result.isErr()) {
-          expect(result.error.code).toBe('TRANSACTION_REVERTED');
-          if (result.error.code === 'TRANSACTION_REVERTED') {
-            expect(result.error.txHash).toMatch(/^0x[0-9a-f]{64}$/);
-            expect(result.error.execution).toMatchObject({
-              stage: 'revert',
-              stepId: 'one',
-              hash: result.error.txHash,
-            });
+          if (harness.revertSurfacesAt === 'confirmation') {
+            // ethers' wait() throws for a reverted receipt; the adapter keeps
+            // main's mapping and reports it as a confirmation failure.
+            expect(result.error.code).toBe('CONFIRMATION_FAILED');
+            if (result.error.code === 'CONFIRMATION_FAILED') {
+              expect(result.error.execution).toMatchObject({
+                stage: 'confirmation',
+                stepId: 'one',
+              });
+              expect(result.error.execution?.hash).toMatch(/^0x[0-9a-f]{64}$/);
+            }
+          } else {
+            expect(result.error.code).toBe('TRANSACTION_REVERTED');
+            if (result.error.code === 'TRANSACTION_REVERTED') {
+              expect(result.error.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+              expect(result.error.execution).toMatchObject({
+                stage: 'revert',
+                stepId: 'one',
+                hash: result.error.txHash,
+              });
+            }
           }
         }
         expect(harness.broadcast).toHaveBeenCalledTimes(1);
@@ -778,6 +808,31 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
         expect(acknowledged.isOk()).toBe(true);
         if (acknowledged.isOk()) {
           expect(acknowledged.value.confirmed.map((step) => step.stepId)).toEqual(['one']);
+        }
+      });
+
+      it('derives resume state from a cancellation only when the wallet explicitly refused', async () => {
+        const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        if (harness.fail === undefined) return;
+        harness.fail({ stage: 'send', kind: 'cancel' }, 2);
+        const valuePlan = contractPlan();
+        const result = await harness.execute(valuePlan, 'direct');
+        if (result.isOk()) throw new Error('expected the injected cancellation to fail');
+        expect(result.error.code).toBe('CANCELLED');
+
+        const derived = executionResumeStateFromError(valuePlan, result.error);
+
+        if (harness.cancelProvesNotSent === false) {
+          // A client-side abort can land after the request was dispatched.
+          expect(derived.isErr()).toBe(true);
+          if (derived.isErr()) {
+            expect(derived.error.details).toMatchObject({ stage: 'signing', stepId: 'two' });
+          }
+        } else {
+          expect(derived.isOk()).toBe(true);
+          if (derived.isOk()) {
+            expect(derived.value.confirmed.map((step) => step.stepId)).toEqual(['one']);
+          }
         }
       });
 

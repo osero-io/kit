@@ -26,7 +26,7 @@ type ReceiptWaitInput = {
 
 const actions = vi.hoisted(() => ({
   estimateGas: vi.fn<(...args: unknown[]) => Promise<bigint>>(),
-  getTransaction: vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
+  getBlock: vi.fn<(_client: unknown, input: unknown) => Promise<unknown>>(),
   getTransactionReceipt:
     vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   sendTransaction: vi.fn<(...args: unknown[]) => Promise<Hex>>(),
@@ -64,7 +64,7 @@ function resetActions(): void {
     gasUsed: 50n,
     effectiveGasPrice: 2n,
   }));
-  actions.getTransaction.mockReset().mockRejectedValue(new Error('transaction not found'));
+  actions.getBlock.mockReset().mockResolvedValue({ transactions: [] });
   actions.getTransactionReceipt.mockReset().mockImplementation(async (_client, input) => ({
     status: 'success',
     transactionHash: input.hash,
@@ -343,6 +343,27 @@ function replaceFirstReceipt(
   });
 }
 
+/**
+ * A substitution viem resolves without naming a reason. As in viem, the waiter
+ * finds the replacement by reading its block through the client it was given.
+ */
+function substituteFirstReceipt(replacementHash: Hex, mined: Record<string, unknown>): void {
+  actions.getBlock.mockResolvedValue({ transactions: [{ hash: replacementHash, ...mined }] });
+  actions.waitForTransactionReceipt.mockImplementationOnce(async (client) => {
+    await (client as { getBlock(input: unknown): Promise<unknown> }).getBlock({
+      blockNumber: 124n,
+      includeTransactions: true,
+    });
+    return {
+      status: 'success',
+      transactionHash: replacementHash,
+      blockNumber: 124n,
+      gasUsed: 55n,
+      effectiveGasPrice: 3n,
+    };
+  });
+}
+
 describe('viem transaction replacement', () => {
   beforeEach(resetActions);
 
@@ -429,8 +450,7 @@ describe('viem transaction replacement', () => {
         'repriced',
       ],
     ] as const)('accepts %s as a repricing', async (_name, mined, reason) => {
-      replaceFirstReceipt(undefined, hash(99));
-      actions.getTransaction.mockResolvedValue({ hash: hash(99), ...mined });
+      substituteFirstReceipt(hash(99), mined);
 
       const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { confirmations: 2 });
 
@@ -442,8 +462,8 @@ describe('viem transaction replacement', () => {
           replacement: { reason, originalHash: hash(1), replacementHash: hash(99) },
         });
       }
-      expect(actions.getTransaction).toHaveBeenCalledTimes(1);
-      expect(actions.getTransaction).toHaveBeenCalledWith(expect.anything(), { hash: hash(99) });
+      // The only block read is the one the waiter made itself.
+      expect(actions.getBlock).toHaveBeenCalledTimes(1);
       expect(actions.sendTransaction).toHaveBeenCalledTimes(2);
     });
 
@@ -455,11 +475,11 @@ describe('viem transaction replacement', () => {
       ['another sender', { ...firstStep, from: OTHER }, 'replaced'],
       ['a contract creation', { ...firstStep, to: null }, 'replaced'],
       ['a transaction with yet another hash', { ...firstStep, hash: hash(98) }, 'replaced'],
+      ['a block entry that is not a transaction body', { from: ACCOUNT }, 'replaced'],
     ] as const)(
       'fails closed for %s and broadcasts nothing further',
       async (_name, mined, reason) => {
-        replaceFirstReceipt(undefined, hash(99));
-        actions.getTransaction.mockResolvedValue({ hash: hash(99), ...mined });
+        substituteFirstReceipt(hash(99), mined);
 
         const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { confirmations: 2 });
 
@@ -477,20 +497,37 @@ describe('viem transaction replacement', () => {
       },
     );
 
-    it('makes no extra read when the receipt belongs to the submitted hash', async () => {
+    it('fails closed when the waiter never read the block that mined the replacement', async () => {
+      replaceFirstReceipt(undefined, hash(99));
+
+      const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { confirmations: 2 });
+
+      expect(result.isErr() && result.error).toBeInstanceOf(ConfirmationError);
+      expect(actions.sendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads blocks through the client own getBlock when it has one', async () => {
+      const own = vi
+        .fn<(input: unknown) => Promise<unknown>>()
+        .mockResolvedValue({ transactions: [{ hash: hash(99), ...firstStep }] });
+      const decorated = { ...wallet(ACCOUNT, 8453), getBlock: own } as unknown as WalletClient;
+      substituteFirstReceipt(hash(99), firstStep);
+      actions.getBlock.mockClear();
+
+      const result = await sendWith(decorated, twoStepPlan(), { confirmations: 2 });
+
+      expect(result.isOk()).toBe(true);
+      expect(own).toHaveBeenCalledWith({ blockNumber: 124n, includeTransactions: true });
+      expect(actions.getBlock).not.toHaveBeenCalled();
+    });
+
+    it('makes no read of its own in any case', async () => {
+      replaceFirstReceipt('repriced', hash(99));
+
       const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { confirmations: 2 });
 
       expect(result.isOk()).toBe(true);
-      expect(actions.getTransaction).not.toHaveBeenCalled();
-    });
-
-    it('makes no extra read when viem names the reason itself', async () => {
-      replaceFirstReceipt('repriced', hash(99));
-
-      const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan());
-
-      expect(result.isOk()).toBe(true);
-      expect(actions.getTransaction).not.toHaveBeenCalled();
+      expect(actions.getBlock).not.toHaveBeenCalled();
     });
   });
 

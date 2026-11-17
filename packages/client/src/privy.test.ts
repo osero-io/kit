@@ -28,7 +28,7 @@ type ReceiptWaitInput = {
 };
 
 const actions = vi.hoisted(() => ({
-  getTransaction: vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
+  getBlock: vi.fn<(_client: unknown, input: unknown) => Promise<unknown>>(),
   getTransactionReceipt:
     vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   waitForTransactionReceipt:
@@ -77,7 +77,7 @@ function resetReceipts(): void {
     gasUsed: 50n,
     effectiveGasPrice: 2n,
   }));
-  actions.getTransaction.mockReset().mockRejectedValue(new Error('transaction not found'));
+  actions.getBlock.mockReset().mockResolvedValue({ transactions: [] });
   actions.getTransactionReceipt.mockReset().mockImplementation(async (_client, input) => ({
     status: 'success',
     transactionHash: input.hash,
@@ -138,6 +138,8 @@ const factory: AdapterContractFactory = (configuration = {}) => {
     resumeReceiptLookup: actions.getTransactionReceipt,
     // Privy selects gas inside its Wallet API; the SDK performs no estimate.
     performs: { estimate: false },
+    // APIUserAbortError is a client-side abort, not a refusal by the wallet.
+    cancelProvesNotSent: false,
     fail: (fault, step = 1) => injectPrivyFault(state, fault, step),
     execute(valuePlan, form, confirmations, extra) {
       const options = {
@@ -237,6 +239,45 @@ describe('Privy stage behavior', () => {
     if (cancelResult.isErr()) expect(cancelResult.error.code).toBe('CANCELLED');
     expect(broadcastResult.isErr()).toBe(true);
     if (broadcastResult.isErr()) expect(broadcastResult.error.code).toBe('BROADCAST_FAILED');
+  });
+
+  it('never derives resume state when the caller aborts after the Wallet API accepted the request', async () => {
+    // The abort ends the HTTP call on the client; Privy may already be broadcasting.
+    let accepted = 0;
+    const privy = {
+      wallets: () => ({
+        ethereum: () => ({
+          sendTransaction: async () => {
+            accepted += 1;
+            throw new APIUserAbortError({ message: 'caller aborted after dispatch' });
+          },
+        }),
+      }),
+    } as unknown as PrivyClient;
+    const valuePlan = singlePlan();
+
+    const result = await sendWith(privy, { id: 'wallet-1', address: ACCOUNT }, valuePlan, {
+      chainId: 8453,
+      receiptClient: receiptClient(8453),
+      idempotencyKeys: { swap: 'key-swap' },
+    });
+
+    expect(accepted).toBe(1);
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error.code).toBe('CANCELLED');
+      const refused = executionResumeStateFromError(valuePlan, result.error);
+      expect(refused.isErr()).toBe(true);
+      if (refused.isErr()) {
+        expect(refused.error).toBeInstanceOf(ValidationError);
+        expect(refused.error.details).toMatchObject({ stage: 'signing', stepId: 'swap' });
+      }
+      // Only the caller, having checked the wallet, can vouch that nothing was sent.
+      const vouched = executionResumeStateFromError(valuePlan, result.error, {
+        unresolvedStep: 'assume-not-executed',
+      });
+      expect(vouched.isOk()).toBe(true);
+    }
   });
 
   it('rejects sponsored responses without inventing a transaction hash', async () => {
@@ -499,6 +540,27 @@ function replaceFirstReceipt(reason: string | undefined, replacementHash: Hex): 
   });
 }
 
+/**
+ * A substitution viem resolves without naming a reason. As in viem, the waiter
+ * finds the replacement by reading its block through the client it was given.
+ */
+function substituteFirstReceipt(replacementHash: Hex, mined: Record<string, unknown>): void {
+  actions.getBlock.mockResolvedValue({ transactions: [{ hash: replacementHash, ...mined }] });
+  actions.waitForTransactionReceipt.mockImplementationOnce(async (client) => {
+    await (client as { getBlock(input: unknown): Promise<unknown> }).getBlock({
+      blockNumber: 124n,
+      includeTransactions: true,
+    });
+    return {
+      status: 'success',
+      transactionHash: replacementHash,
+      blockNumber: 124n,
+      gasUsed: 55n,
+      effectiveGasPrice: 3n,
+    };
+  });
+}
+
 describe('Privy transaction replacement', () => {
   beforeEach(resetReceipts);
 
@@ -528,14 +590,7 @@ describe('Privy transaction replacement', () => {
 
   it('accepts an unexplained substitution that is the same transaction at another fee', async () => {
     const state = makePrivy();
-    replaceFirstReceipt(undefined, hash(99));
-    actions.getTransaction.mockResolvedValue({
-      hash: hash(99),
-      from: ACCOUNT,
-      to: TARGET,
-      input: '0x1234',
-      value: 0n,
-    });
+    substituteFirstReceipt(hash(99), { from: ACCOUNT, to: TARGET, input: '0x1234', value: 0n });
 
     const result = await sendWith(state.privy, wallet, twoStepPlan(), {
       ...options,
@@ -555,14 +610,7 @@ describe('Privy transaction replacement', () => {
 
   it('fails closed when an unexplained substitution carries other calldata', async () => {
     const state = makePrivy();
-    replaceFirstReceipt(undefined, hash(99));
-    actions.getTransaction.mockResolvedValue({
-      hash: hash(99),
-      from: ACCOUNT,
-      to: TARGET,
-      input: '0xdead',
-      value: 0n,
-    });
+    substituteFirstReceipt(hash(99), { from: ACCOUNT, to: TARGET, input: '0xdead', value: 0n });
 
     const result = await sendWith(state.privy, wallet, twoStepPlan(), {
       ...options,

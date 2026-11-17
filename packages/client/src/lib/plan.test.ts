@@ -678,7 +678,9 @@ function failureContextFor(
 }
 
 const cancelledError = (context: ExecutionFailureContext) =>
-  CancelError.from(new Error('user rejected'), context);
+  CancelError.from(Object.assign(new Error('user rejected'), { code: 4001 }), context);
+const abortedError = (context: ExecutionFailureContext) =>
+  CancelError.from(new Error('Request was aborted.'), context);
 const signingError = (context: ExecutionFailureContext) =>
   SigningError.from(new Error('wallet error'), context);
 const broadcastError = (context: ExecutionFailureContext) =>
@@ -720,6 +722,7 @@ describe('resume state from a failed execution', () => {
       ['a replaced transaction', 'replacement', confirmationError, { hash: OTHER_HASH }],
       ['a broadcast that failed without a hash', 'broadcast', broadcastError, {}],
       ['a signing failure that was not a user rejection', 'signing', signingError, {}],
+      ['a cancellation that was a client-side abort', 'signing', abortedError, {}],
       ['a stage this SDK release does not know', 'future-stage', confirmationError, {}],
     ] as const)('refuses %s by default and names what to check', (_name, stage, build, extra) => {
       const { plan, state } = twoStepPlanWithState();
@@ -772,6 +775,33 @@ describe('resume state from a failed execution', () => {
 
       expect(derived.isOk()).toBe(true);
       if (derived.isOk()) expect(derived.value).toEqual(state);
+    });
+
+    it.each([
+      ['EIP-1193 code 4001', { code: 4001 }],
+      ['EIP-5792 code 5750', { code: 5750 }],
+      ['ethers ACTION_REJECTED', { code: 'ACTION_REJECTED' }],
+      ['a rejection nested in a wrapper error', { cause: { code: 4001 } }],
+    ])('treats a cancellation carrying %s as an explicit wallet refusal', (_name, evidence) => {
+      const { plan, state } = twoStepPlanWithState();
+      const error = CancelError.from(Object.assign(new Error('rejected'), evidence), {
+        ...failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
+        stage: 'signing',
+      });
+
+      expect(executionResumeStateFromError(plan, error).isOk()).toBe(true);
+    });
+
+    it('does not loop on a cancellation whose cause chain is circular', () => {
+      const { plan, state } = twoStepPlanWithState();
+      const loop: { cause?: unknown } = {};
+      loop.cause = loop;
+      const error = CancelError.from(Object.assign(new Error('aborted'), loop), {
+        ...failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
+        stage: 'signing',
+      });
+
+      expect(executionResumeStateFromError(plan, error).isErr()).toBe(true);
     });
 
     it('derives state when the failing step is itself among the completed steps', () => {

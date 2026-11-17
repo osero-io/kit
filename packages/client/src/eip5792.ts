@@ -575,17 +575,33 @@ function decodeConfirmedBatchReceipt(
   const lastReceipt = receipts.toReversed().find((receipt) => receipt !== null);
   const lastHash = lastReceipt?.transactionHash;
   if (value.statusCode === 500 || value.statusCode === 600) {
-    if (lastReceipt !== undefined && lastReceipt !== null) {
+    if (lastReceipt === undefined || lastReceipt === null) {
+      return err(unconfirmed(`Call batch ${batchId} failed without a transaction receipt`));
+    }
+    // A revert is reported only when the status proves nothing took effect:
+    // status 500 is a complete revert, the wallet did not disclaim atomicity,
+    // and no call succeeded. Status 600 is a partial revert: some calls may be
+    // on chain, so the outcome is unconfirmed rather than reverted.
+    const completeRevert =
+      value.statusCode === 500 &&
+      !('atomic' in value && value.atomic === false) &&
+      !receipts.some((receipt) => receipt?.status === 'success');
+    if (!completeRevert) {
       return err(
-        new TransactionError(
-          `Call batch ${batchId} failed at transaction ${lastReceipt.transactionHash}`,
-          lastReceipt.transactionHash,
-          failureContext(plan, lastStep, 'revert', completed, lastReceipt.transactionHash, batchId),
-          { cause: value },
+        unconfirmed(
+          `Call batch ${batchId} did not revert as a whole; some calls may have executed`,
+          lastHash,
         ),
       );
     }
-    return err(unconfirmed(`Call batch ${batchId} failed without a transaction receipt`));
+    return err(
+      new TransactionError(
+        `Call batch ${batchId} failed at transaction ${lastReceipt.transactionHash}`,
+        lastReceipt.transactionHash,
+        failureContext(plan, lastStep, 'revert', completed, lastReceipt.transactionHash, batchId),
+        { cause: value },
+      ),
+    );
   }
   if (
     value.statusCode !== 200 ||
@@ -739,8 +755,26 @@ async function executeAtomicBatch(
       ),
     );
   }
-  if (confirmed === null || confirmed.status !== 'success') {
-    const revertedHash = confirmed?.transactionHash ?? submittedHash;
+  if (confirmed === null) {
+    // The wallet reported success and the receipt cannot be read. That proves
+    // neither confirmation nor a revert.
+    return err(
+      new ConfirmationError(
+        `Transaction ${submittedHash} returned an unreadable receipt`,
+        failureContext(
+          execution.plan,
+          lastStep,
+          'confirmation',
+          execution.confirmed,
+          submittedHash,
+          batchId,
+        ),
+        { cause: receipt },
+      ),
+    );
+  }
+  if (confirmed.status !== 'success') {
+    const revertedHash = confirmed.transactionHash;
     return err(
       new TransactionError(
         `Transaction ${revertedHash} reverted`,

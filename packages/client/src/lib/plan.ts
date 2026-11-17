@@ -357,10 +357,33 @@ export type ExecutionResumeFromErrorOptions = {
 };
 
 /**
+ * Whether a cancellation was an explicit refusal by the wallet: EIP-1193 code
+ * 4001 (viem's `UserRejectedRequestError`), EIP-5792 code 5750, or ethers'
+ * `ACTION_REJECTED`. A wallet that refuses a request has not sent it.
+ *
+ * A cancellation without that evidence is not proof. Privy reports a
+ * client-side abort as a cancellation, and an abort can land after the request
+ * reached the Wallet API.
+ */
+function isExplicitWalletRejection(error: OseroError): boolean {
+  if (error.code !== 'CANCELLED') return false;
+  const seen = new Set<unknown>();
+  let current: unknown = error.cause;
+  while (typeof current === 'object' && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const code = 'code' in current ? current.code : undefined;
+    if (code === 4001 || code === 5750 || code === 'ACTION_REJECTED') return true;
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return false;
+}
+
+/**
  * Whether the failure proves its step did not take effect. Only these do: the
  * step was never sent (preflight, simulation, a progress callback before
- * submission, a user rejection), or it was mined and reverted. A progress
- * failure after confirmation lists its step as completed, so it is covered too.
+ * submission, an explicit wallet rejection), or it was mined and reverted. A
+ * progress failure after confirmation lists its step as completed, so it is
+ * covered too.
  */
 function failedStepProvablyNotExecuted(error: OseroError, stage: unknown): boolean {
   switch (stage) {
@@ -370,7 +393,7 @@ function failedStepProvablyNotExecuted(error: OseroError, stage: unknown): boole
     case 'progress':
       return true;
     case 'signing':
-      return error.code === 'CANCELLED';
+      return isExplicitWalletRejection(error);
     default:
       // broadcast, confirmation, replacement, and anything unrecognized.
       return false;
@@ -394,6 +417,10 @@ function failedStepProvablyNotExecuted(error: OseroError, stage: unknown): boole
  *   that failed. When that step may already have been submitted and its outcome
  *   is unknown, this returns a `ValidationError` instead of state that would
  *   send it again. See {@link ExecutionResumeFromErrorOptions.unresolvedStep}.
+ *
+ * The stage is trusted as the adapter reported it. The ethers adapter reports a
+ * reverted receipt at stage `confirmation`, so an ethers revert needs the
+ * caller's acknowledgement like any other unresolved step.
  */
 export function executionResumeStateFromError(
   plan: ExecutionPlan,

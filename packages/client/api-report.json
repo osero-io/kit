@@ -40,7 +40,7 @@
     "dist/lib/hostedSwap.d.ts": "fca5e13d1b51ef2fd62ed1eb1fd858fada2eced18623cc7447babc0679d6b49b",
     "dist/lib/math.d.ts": "3986b65c80e1aba320acaaca6e32e6aaa8237a328ce957921a2e515b5eafd10b",
     "dist/lib/OseroClient.d.ts": "886d7fee2761ed8473f86477932389e235282f53df20e819ebe7e0ab104250fe",
-    "dist/lib/plan.d.ts": "2b29f4662805c5c0efd148994ce3ef2bf657d3328926a36be692e2e6fc1a01ab",
+    "dist/lib/plan.d.ts": "718abe8e44e74a350ef6494f5dfa305a30925492952ce9a2562728b5f14924a2",
     "dist/lib/referrals.d.ts": "4057793c9de97af26f0848d6bac6b1458c8e359430cebce793beab14d7d94e6f",
     "dist/lib/result.d.ts": "c73c658251fe9f6dc9f1fe392124b4d0861fa046351ddef248a6ac2a5c4706c4",
     "dist/lib/routes.d.ts": "0c8613e20caaad0fd2958ee5a3aa3201373acf38ae7ec0f5cf5dcd126e0e1917",
@@ -50,7 +50,7 @@
     "dist/lib/types.d.ts": "f4eb0a658a10dcea739d29c62a088565934b31588d5ca9466beac866aa07c175",
     "dist/lib/validation.d.ts": "bff7c05e30c79b4583edbed06ed7ecf03384869b869a9940d7954e15b157c375",
     "dist/lib/version.d.ts": "4269369be11b9185926d4378e9833ace91b3cd5a85c6a81f9a3451cde49defc8",
-    "dist/lib/viemReceipt.d.ts": "cbb744e6351b41e474ff125ff2fe2e1a22b8b55d62bd63ce5b2079e1b2715760",
+    "dist/lib/viemReceipt.d.ts": "c9f7cbc160d5bbc76e23797a77740870ad1f9fc36badf5ce600ca7b474fc5f86",
     "dist/privy.d.ts": "10aca54d313e6ea8d976b57ee02273e672f434e124669368737ab01c8b0d689d",
     "dist/viem.d.ts": "39e60d5c5b724573f4b9ecc43236f6bdb2cee06cdb7d764687babd02fd1ad199"
   }

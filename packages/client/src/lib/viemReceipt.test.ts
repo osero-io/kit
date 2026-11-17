@@ -1,4 +1,5 @@
 import {
+  createClient,
   createPublicClient,
   createWalletClient,
   custom,
@@ -77,11 +78,9 @@ function scriptedNode(replacement: Mined) {
         head += 1n;
         return numberToHex(head);
       case 'eth_getTransactionByHash':
-        if (first === ORIGINAL) return rpcTransaction(ORIGINAL, SUBMITTED_AS_MINED, null);
-        if (first === REPLACEMENT && head >= replacedAt) {
-          return rpcTransaction(REPLACEMENT, replacement, replacedAt);
-        }
-        return null;
+        // viem reads the replacement from its block, never by hash. Neither may the adapter.
+        if (first !== ORIGINAL) throw new Error('unexpected read of a transaction by hash');
+        return rpcTransaction(ORIGINAL, SUBMITTED_AS_MINED, null);
       case 'eth_getTransactionReceipt':
         if (first !== REPLACEMENT || head < replacedAt) return null;
         return {
@@ -124,6 +123,7 @@ const SUBMITTED_AS_MINED: Mined = { to: TARGET, input: '0x1234', value: 0n };
 const REPRICED = SUBMITTED_AS_MINED;
 const CANCELLED: Mined = { to: ACCOUNT, input: '0x', value: 0n };
 const OTHER_CALL: Mined = { to: TARGET, input: '0xdeadbeef', value: 0n };
+const OTHER_VALUE: Mined = { to: TARGET, input: '0x1234', value: 1n };
 
 function publicClient(replacement: Mined) {
   const node = scriptedNode(replacement);
@@ -145,7 +145,6 @@ describe('waitForViemReceipt against the real viem waiter', () => {
 
     expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
     expect(outcome.replacement).toBe('repriced');
-    // viem named the reason through onReplaced, so the replacement is not read back.
     expect(node.calls.filter((method) => method === 'eth_getTransactionByHash')).toHaveLength(1);
   });
 
@@ -153,10 +152,11 @@ describe('waitForViemReceipt against the real viem waiter', () => {
     ['a repricing', REPRICED, 'repriced'],
     ['a cancellation', CANCELLED, 'cancelled'],
     ['a different call', OTHER_CALL, 'replaced'],
+    ['the same call with another value', OTHER_VALUE, 'replaced'],
   ] as const)(
     'classifies %s itself when two confirmations make viem skip onReplaced',
     async (_name, replacement, expected) => {
-      const { client } = publicClient(replacement);
+      const { client, node } = publicClient(replacement);
 
       const outcome = await waitForViemReceipt(client, {
         hash: ORIGINAL,
@@ -165,7 +165,8 @@ describe('waitForViemReceipt against the real viem waiter', () => {
       });
       // The premise, checked on a fresh node: viem's own callback stays silent here.
       let reportedByViem: string | undefined;
-      const direct = await publicClient(replacement).client.waitForTransactionReceipt({
+      const plain = publicClient(replacement);
+      const direct = await plain.client.waitForTransactionReceipt({
         hash: ORIGINAL,
         confirmations: 2,
         onReplaced: (response) => {
@@ -178,8 +179,37 @@ describe('waitForViemReceipt against the real viem waiter', () => {
       expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
       expect(outcome.receipt.blockNumber).toBe(START_BLOCK + 1n);
       expect(outcome.replacement).toBe(expected);
+      // Classifying costs nothing: the node saw exactly the requests of a plain viem wait.
+      expect(node.calls).toEqual(plain.node.calls);
+      expect(node.calls).toContain('eth_getBlockByNumber');
     },
   );
+
+  it('classifies through a client that is not decorated with public actions', async () => {
+    const node = scriptedNode(REPRICED);
+    const client = createClient({ chain: base, transport: node.transport, pollingInterval: 1 });
+
+    const outcome = await waitForViemReceipt(client, {
+      hash: ORIGINAL,
+      confirmations: 2,
+      submitted: SUBMITTED,
+    });
+
+    expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+    expect(outcome.replacement).toBe('repriced');
+  });
+
+  it('fails closed when the confirmed transaction was sent by another account', async () => {
+    const { client } = publicClient(REPRICED);
+
+    const outcome = await waitForViemReceipt(client, {
+      hash: ORIGINAL,
+      confirmations: 2,
+      submitted: { ...SUBMITTED, from: TARGET },
+    });
+
+    expect(outcome.replacement).toBe('replaced');
+  });
 
   it('fails closed without the submitted transaction to compare against', async () => {
     const { client } = publicClient(REPRICED);
