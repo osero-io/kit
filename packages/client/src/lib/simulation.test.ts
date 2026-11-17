@@ -1,4 +1,13 @@
+import {
+  ContractFunctionRevertedError,
+  custom,
+  encodeErrorResult,
+  ExecutionRevertedError,
+  type Hex,
+} from 'viem';
+
 import { createMockClient, mockFn, type MockPublicClient } from './_testing.js';
+import { parseSlippage } from './domain.js';
 import { RpcError, SimulationError, UnsupportedCapabilityError } from './errors.js';
 import { OseroClient, type OseroPublicClient } from './OseroClient.js';
 import {
@@ -7,7 +16,7 @@ import {
   createTransactionRequest,
 } from './plan.js';
 import { simulateExecutionPlan } from './simulation.js';
-import type { ExecutionPlan } from './types.js';
+import type { ExecutionPlan, PreparedSwapQuote } from './types.js';
 
 const ACCOUNT = '0x1111111111111111111111111111111111111111' as const;
 const OTHER_ACCOUNT = '0x2222222222222222222222222222222222222222' as const;
@@ -326,5 +335,333 @@ describe('simulateExecutionPlan read-only scope', () => {
     }
     for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
     for (const method of touched) expect(READ_ONLY_RPC_SURFACE).toContain(method);
+  });
+});
+
+const ERROR_STRING_ABI = [
+  { type: 'error', name: 'Error', inputs: [{ name: 'message', type: 'string' }] },
+] as const;
+const PANIC_ABI = [
+  { type: 'error', name: 'Panic', inputs: [{ name: 'code', type: 'uint256' }] },
+] as const;
+const CUSTOM_ERROR_DATA =
+  '0xdeadbeef000000000000000000000000000000000000000000000000000000000000002a';
+
+function revertData(message: string): Hex {
+  return encodeErrorResult({ abi: ERROR_STRING_ABI, errorName: 'Error', args: [message] });
+}
+
+async function failedSwapStep(cause: unknown) {
+  const estimateGas = mockFn().mockResolvedValueOnce(90n).mockRejectedValueOnce(cause);
+  const { client } = simulationClient({ estimateGas });
+  const result = await simulateExecutionPlan(client, executionPlan(), ACCOUNT);
+  if (result.isErr()) throw result.error;
+  const failed = result.value.steps[1]!.result;
+  if (failed.status !== 'failed') throw new Error('expected the swap step to fail');
+  return failed;
+}
+
+describe('simulation fee basis', () => {
+  it('labels an EIP-1559 fee cap and exposes it without changing gasPrice', async () => {
+    const { client } = simulationClient();
+
+    const result = await simulateExecutionPlan(client, executionPlan(), ACCOUNT);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.feeData).toEqual({
+        gasPrice: 4n,
+        source: 'rpc',
+        basis: 'max-fee-per-gas',
+        maxFeePerGas: 4n,
+      });
+      expect(result.value.steps[0]?.result).toMatchObject({ estimatedNativeFee: 400n });
+    }
+  });
+
+  it('labels a legacy gas price and omits the fee cap', async () => {
+    const { client } = simulationClient({
+      estimateFeesPerGas: mockFn(async () => ({ gasPrice: 3n })),
+    });
+
+    const result = await simulateExecutionPlan(client, executionPlan(), ACCOUNT);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.feeData).toEqual({ gasPrice: 3n, source: 'rpc', basis: 'gas-price' });
+      expect('maxFeePerGas' in result.value.feeData).toBe(false);
+    }
+  });
+});
+
+describe('simulation revert details', () => {
+  it('reports the reason from a viem contract revert error', async () => {
+    const failed = await failedSwapStep(
+      new ContractFunctionRevertedError({
+        abi: [],
+        functionName: 'swapExactIn',
+        message: 'PSM3/amountOut-too-low',
+      }),
+    );
+
+    expect(failed.revert).toEqual({ reason: 'PSM3/amountOut-too-low' });
+    expect(failed.error).toBeInstanceOf(SimulationError);
+  });
+
+  it('decodes a standard Error(string) from raw revert data deep in the cause chain', async () => {
+    const data = revertData('PSM3/zero-liquidity');
+    const rpc = Object.assign(new Error('execution reverted'), { code: 3, data });
+    const failed = await failedSwapStep(new Error('estimate failed', { cause: rpc }));
+
+    expect(failed.revert).toEqual({ reason: 'PSM3/zero-liquidity', data });
+  });
+
+  it('reads revert data nested one level inside an RPC error payload', async () => {
+    const data = revertData('nested');
+    const failed = await failedSwapStep(
+      Object.assign(new Error('rpc error'), { data: { message: 'reverted', data } }),
+    );
+
+    expect(failed.revert).toEqual({ reason: 'nested', data });
+  });
+
+  it('decodes a Panic code', async () => {
+    const data = encodeErrorResult({ abi: PANIC_ABI, errorName: 'Panic', args: [17n] });
+    const failed = await failedSwapStep(Object.assign(new Error('reverted'), { data }));
+
+    expect(failed.revert).toEqual({ reason: 'Panic(17)', data });
+  });
+
+  it('keeps custom error data raw instead of guessing a reason', async () => {
+    const failed = await failedSwapStep(
+      Object.assign(new Error('reverted'), { data: CUSTOM_ERROR_DATA }),
+    );
+
+    expect(failed.revert).toEqual({ data: CUSTOM_ERROR_DATA });
+  });
+
+  it('reads the reason a node reports without revert data', async () => {
+    const failed = await failedSwapStep(
+      new ExecutionRevertedError({ message: 'execution reverted: SUsds/insufficient-balance' }),
+    );
+
+    expect(failed.revert).toEqual({ reason: 'SUsds/insufficient-balance' });
+  });
+
+  it.each([
+    ['a plain error', new Error('swap would revert')],
+    ['empty revert data', Object.assign(new Error('reverted'), { data: '0x' })],
+    ['a non-error rejection', 'boom'],
+    [
+      'a self-referential cause',
+      (() => {
+        const loop: { cause?: unknown } = {};
+        loop.cause = loop;
+        return loop;
+      })(),
+    ],
+  ])('reports no revert details for %s', async (_name, cause) => {
+    const failed = await failedSwapStep(cause);
+
+    expect(failed.revert === undefined || failed.revert.reason === undefined).toBe(true);
+    if (cause instanceof Error && !('data' in cause)) expect('revert' in failed).toBe(false);
+  });
+
+  it('decodes a revert that travelled through a real viem public client', async () => {
+    const data = revertData('PSM3/swap-paused');
+    const transport = custom({
+      request: async ({ method }: { method: string }) => {
+        switch (method) {
+          case 'eth_blockNumber':
+            return '0x7b';
+          case 'eth_getBalance':
+            return '0xf4240';
+          case 'eth_gasPrice':
+            return '0x3';
+          case 'eth_maxPriorityFeePerGas':
+            return '0x1';
+          case 'eth_getBlockByNumber':
+            return { baseFeePerGas: '0x1', number: '0x7b', hash: null, transactions: [] };
+          case 'eth_call':
+            return `0x${'0'.repeat(63)}7`;
+          case 'eth_estimateGas':
+            throw Object.assign(new Error('execution reverted: PSM3/swap-paused'), {
+              code: 3,
+              data,
+            });
+          default:
+            throw new Error(`unexpected RPC ${method}`);
+        }
+      },
+    });
+    const client = OseroClient.create({ transports: { 8453: transport } });
+
+    const result = await simulateExecutionPlan(client, executionPlan(), ACCOUNT);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      for (const step of result.value.steps) {
+        expect(step.result.status).toBe('failed');
+        if (step.result.status === 'failed') {
+          expect(step.result.revert?.reason).toBe('PSM3/swap-paused');
+        }
+      }
+    }
+  });
+});
+
+describe('simulation quote bounds', () => {
+  const slippage = parseSlippage({ bps: '5' });
+  if (slippage.isErr()) throw slippage.error;
+  const common = {
+    assetIn: 'USDC',
+    assetOut: 'sUSDS',
+    slippage: slippage.value,
+    route: {
+      chainId: 8453,
+      protocol: 'psm3',
+      assetIn: 'USDC',
+      assetOut: 'sUSDS',
+      mode: 'exact-in',
+      steps: ['APPROVE_ERC20', 'SWAP_EXACT_IN'],
+    },
+    slippageProtection: { bound: 'minimum-output', enforcedBy: 'calldata' },
+    quotedAt: { blockNumber: 120n },
+    protocolFee: { kind: 'none' },
+  } as const;
+
+  function exactInQuote(plan: ExecutionPlan): PreparedSwapQuote {
+    return {
+      ...common,
+      mode: 'exact-in',
+      amountIn: { symbol: 'USDC', raw: 10n },
+      expectedAmountOut: { symbol: 'sUSDS', raw: 9_000n },
+      minimumAmountOut: { symbol: 'sUSDS', raw: 8_995n },
+      plan,
+    };
+  }
+
+  it('echoes exact-input bounds for the simulated plan', async () => {
+    const { client } = simulationClient();
+    const plan = executionPlan();
+
+    const result = await simulateExecutionPlan(client, plan, ACCOUNT, {
+      quote: exactInQuote(plan),
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.quote).toEqual({
+        mode: 'exact-in',
+        assetIn: 'USDC',
+        assetOut: 'sUSDS',
+        slippageProtection: { bound: 'minimum-output', enforcedBy: 'calldata' },
+        quotedAtBlock: 120n,
+        amountIn: { symbol: 'USDC', raw: 10n },
+        expectedAmountOut: { symbol: 'sUSDS', raw: 9_000n },
+        minimumAmountOut: { symbol: 'sUSDS', raw: 8_995n },
+      });
+    }
+  });
+
+  it('echoes exact-output bounds with the maximum input', async () => {
+    const { client } = simulationClient();
+    const plan = executionPlan();
+    const quote: PreparedSwapQuote = {
+      ...common,
+      route: { ...common.route, mode: 'exact-out' },
+      slippageProtection: { bound: 'maximum-input', enforcedBy: 'calldata' },
+      mode: 'exact-out',
+      amountOut: { symbol: 'sUSDS', raw: 9_000n },
+      expectedAmountIn: { symbol: 'USDC', raw: 10n },
+      maximumAmountIn: { symbol: 'USDC', raw: 11n },
+      plan,
+    };
+
+    const result = await simulateExecutionPlan(client, plan, ACCOUNT, { quote });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.quote).toMatchObject({
+        mode: 'exact-out',
+        amountOut: { symbol: 'sUSDS', raw: 9_000n },
+        expectedAmountIn: { symbol: 'USDC', raw: 10n },
+        maximumAmountIn: { symbol: 'USDC', raw: 11n },
+        slippageProtection: { bound: 'maximum-input' },
+      });
+    }
+  });
+
+  it('adds no quote field when no quote is supplied', async () => {
+    const { client } = simulationClient();
+
+    const bare = await simulateExecutionPlan(client, executionPlan(), ACCOUNT);
+    const empty = await simulateExecutionPlan(client, executionPlan(), ACCOUNT, {});
+
+    for (const result of [bare, empty]) {
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) expect('quote' in result.value).toBe(false);
+    }
+  });
+
+  it('rejects a quote for a different plan before any RPC call', async () => {
+    const { client, publicClient } = simulationClient();
+    const plan = executionPlan();
+    const otherStep = createTransactionRequest({
+      id: 'swap',
+      chainId: 8453,
+      from: ACCOUNT,
+      to: TARGET,
+      data: '0xbeef',
+      operation: 'SWAP_EXACT_IN',
+    });
+    if (otherStep.isErr()) throw otherStep.error;
+    const other = createExecutionPlan({ steps: [otherStep.value] });
+    if (other.isErr()) throw other.error;
+
+    const result = await simulateExecutionPlan(client, plan, ACCOUNT, {
+      quote: exactInQuote(other.value),
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error.code).toBe('VALIDATION_ERROR');
+      if (result.error.code === 'VALIDATION_ERROR') {
+        expect(result.error.field).toBe('options.quote');
+      }
+    }
+    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+    expect(publicClient.estimateGas).not.toHaveBeenCalled();
+  });
+
+  it('rejects a plan that borrows the quoted plan id for different transactions', async () => {
+    const { client, publicClient } = simulationClient();
+    const quoted = executionPlan();
+    const impostor = {
+      ...quoted,
+      steps: [quoted.steps[0]!, { ...quoted.steps[1]!, data: '0xbeef' as const }],
+    };
+
+    const result = await simulateExecutionPlan(client, impostor, ACCOUNT, {
+      quote: exactInQuote(quoted),
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(publicClient.estimateGas).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['null options', null],
+    ['a null quote', { quote: null }],
+    ['a quote without a plan', { quote: {} }],
+  ])('rejects %s as a validation result', async (_name, options) => {
+    const { client, publicClient } = simulationClient();
+
+    const result = await simulateExecutionPlan(client, executionPlan(), ACCOUNT, options as never);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
   });
 });
