@@ -14,7 +14,8 @@ pnpm + Turborepo TypeScript monorepo, compiled with TypeScript 7. The only publi
 - `pnpm test` — `turbo run test`: run the Vitest suite. Coverage: `pnpm turbo run test -- --coverage` (written to `packages/client/test-output/vitest/coverage`)
 - `pnpm check` — everything CI runs: `turbo run format:check lint build typecheck test`
 - Scope any task to one package with a turbo filter: `pnpm turbo run build --filter=@osero/client`
-- Run a single test: `pnpm --filter @osero/client test -t "<test name>"` or point vitest at a file: `pnpm --filter @osero/client test src/lib/actions/mintUsds.test.ts`
+- Run a single test: `pnpm --filter @osero/client test -t "<test name>"` or point vitest at a file: `pnpm --filter @osero/client test src/lib/actions/prepareSwap.test.ts`
+- `pnpm browser:check` — bundle the browser-supported entrypoints of the built SDK with esbuild and fail on any Node built-in import (run after `pnpm build`; CI runs it)
 - `pnpm lint` / `pnpm lint:fix` — oxlint across workspace
 - `pnpm format:check` / `pnpm format` — oxfmt
 - `pnpm --filter @osero/examples dry-run:inspect-plan` — safe local plan-building example (no broadcast)
@@ -32,17 +33,18 @@ Changesets drives independent package versioning. When touching anything under `
 
 The SDK's central abstraction is the **`ExecutionPlan`** (`packages/client/src/lib/types.ts`): a wallet-agnostic, inspectable description of the transactions needed to fulfil a local action or hosted API quote. This is what makes the SDK viem/ethers/Privy-neutral — action/API clients never touch a wallet, adapters never touch PSM or routing logic.
 
-Three plan variants, discriminated by `__typename`:
+A plan is one flat, versioned object: `{ __typename: 'ExecutionPlan', version, id, steps, requirements, metadata }`.
 
-- `TransactionRequest` — one fully-encoded tx ready to sign.
-- `Erc20ApprovalRequired` — a main tx gated behind ordered ERC-20 approvals. Approvals confirm before `originalTransaction` broadcasts.
-- `MultiStepExecution` — ordered phases where each step must confirm before the next starts. Used for mainnet sUSDS mints (approve → mint USDS → approve → deposit into sUSDS).
+- `steps` is an ordered list of `TransactionRequest`s. Each step has a stable `id`, an `operation` tag, and fully encoded calldata. An ERC-20 approval is an ordinary step (`operation: 'APPROVE_ERC20'`) that carries `authorization` metadata, not a wrapper around another transaction. Each step must confirm before the next is sent.
+- `requirements` states what an executor must support (`execution: 'sequential' | 'atomic-batch'`, authorization kind, sponsorship, chain transitions). Adapters reject a plan they cannot satisfy before broadcasting.
+- `version` is `1` for plans without a quote expiry and `2` for plans that carry `quoteExpiresAt` (hosted quotes and recovery deadlines). `id` is a hash of the executable contents; see `computeExecutionPlanId` in `src/lib/validation.ts`. Plan identity and the serialization format are frozen: `tests/fixtures/execution-plans.v1_0_1.json` pins them.
 
 ### Flow
 
-1. `OseroClient.create({ transports, defaultSlippageBps })` — stateless; lazily builds viem public clients per chain in `getPublicClient(chainId)` (memoised in a `Map`). `_setPublicClientForTesting` is how tests inject fakes.
-2. Actions in `src/lib/actions/` (`mintUsds`, `mintSUsds`, `redeemUsds`, `redeemSUsds`, plus `preview*` helpers) take `(client, request)` and return `ResultAsync<ExecutionPlan, ActionError>` — they branch on `chain.isMainnet` because mainnet uses Sky's `UsdsPsmWrapper` + Lite PSM while L2s use Spark's PSM3.
+1. `OseroClient.create({ transports, publicClients, allowPublicRpc, defaultSlippage, referral })` — stateless; lazily builds viem public clients per chain in `getPublicClient(chainId)` (memoised in a `Map`). There is no implicit public RPC: a chain needs a transport, an injected public client, or `allowPublicRpc: true`. Tests inject fakes through `publicClients` (see `createMockClient` in `src/lib/_testing.ts`).
+2. Local actions in `src/lib/actions/` are `quoteSwap` and `prepareSwap` (plus `simulateExecutionPlan` from `src/lib/simulation.ts`). They take `(client, request)` with `assetIn`, `assetOut`, and an `exact-in` or `exact-out` mode, and return `ResultAsync` of a quote or of a prepared quote that includes the `ExecutionPlan`. Which pairs and modes exist on each chain comes from the capability matrix in `src/lib/capabilities.ts`; the route builder branches on the chain's `protocol` (`'ethereum-lite-psm'` on mainnet, which uses Sky's `UsdsPsmWrapper` + Lite PSM and the sUSDS ERC-4626 vault, or `'psm3'` on L2s, which use Spark's PSM3).
 3. `OseroApiClient` in `src/lib/api.ts` calls the hosted API, passes asset refs through (the hosted API validates assets, pairs, and policy), and returns a discriminated Hosted Swap Workflow. The quote retains its diagnostic API Execution Plan, while `walletExecutionPlan` contains only the currently safe actions. Hosted execution transactions use operation `SWAP_EXACT_IN`; local actions keep specific mint/redeem operation tags.
+4. Wallet adapters (`src/viem.ts`, `src/ethers.ts`, `src/privy.ts`, `src/eip5792.ts`) export `sendWith`. They share `runExecutionPlan` and the capability preflight in `src/lib/adapters.ts`. Their defaults and per-stage error mappings are specified in `docs/osero-sdk/adapters.md`; keep that page in sync when changing adapter behaviour.
 
 ### Plan construction
 
@@ -50,7 +52,7 @@ Never hand-build plan objects. Use the constructors in `src/lib/plan.ts` so sche
 
 ### Errors & results
 
-Never throw from an action path. Errors are typed classes in `src/lib/errors.ts` (`ValidationError`, `UnsupportedChainError`, `InsufficientBalanceError`, `TransactionError`, `SigningError`, `CancelError`, `UnexpectedError`) and returned via `neverthrow`. Re-exports of `Result`/`ResultAsync` come from `src/lib/result.ts` — import from there, not directly from `neverthrow`, so the dependency stays swappable.
+Never throw from an action path. Errors are typed classes in `src/lib/errors.ts` that extend `OseroError` and carry a literal `code` (for example `ValidationError`, `ConfigurationError`, `UnsupportedChainError`, `AccountMismatchError`, `ChainMismatchError`, `UnsupportedCapabilityError`, `InsufficientAllowanceError`, `QuoteExpiredError`, `SimulationError`, `SigningError`, `BroadcastError`, `ConfirmationError`, `TransactionError`, `CancelError`, `RpcError`, the `Api*Error` classes, `TimeoutError`, `UnexpectedError`) and returned via `neverthrow`. Execution errors carry an `execution` context with the stage, the hash when one exists, and the confirmed prefix. The exported error unions and `OseroErrorCode` are frozen public API: reuse an existing class rather than adding a member. `UnexpectedError` is for genuine defects only. Re-exports of `Result`/`ResultAsync` come from `src/lib/result.ts` — import from there, not directly from `neverthrow`, so the dependency stays swappable.
 
 ### Telemetry
 
@@ -58,7 +60,7 @@ Never throw from an action path. Errors are typed classes in `src/lib/errors.ts`
 
 ### Chain/token/API registries
 
-`src/lib/chains.ts` (`SUPPORTED_CHAIN_IDS`, `CHAINS`, `isSupportedChainId`), `src/lib/tokens.ts`, and `src/lib/addresses.ts` are the single source of truth for local action builders — any new local PSM chain requires updating all three plus the `PSM_ADDRESSES` entry (and a `litePsm` entry if mainnet-style). `isMainnet` is semantic (only chain ID 1) because it switches the action flow, not a geographic flag.
+`src/lib/capabilities.ts` (`SUPPORTED_CHAIN_IDS`, `CHAIN_CAPABILITIES`) is the single source of truth for local action builders: chain metadata, token addresses, protocol addresses, the SSR source, and the supported route matrix all live in one `ChainCapability` entry per chain. `src/lib/chains.ts`, `src/lib/tokens.ts`, and `src/lib/addresses.ts` (`PSM_ADDRESSES`) are derived views of it, so a new local PSM chain is added in `capabilities.ts` only (with a `litePsm` address if it is mainnet-style). The route flow switches on `protocol` (`'ethereum-lite-psm'` or `'psm3'`), which is semantic rather than geographic. `CHAIN_CAPABILITIES` itself is internal and not exported from any entrypoint; `listSwapRoutes(chainId)` in `src/lib/routes.ts` is its narrow public view.
 
 Hosted API vocabulary is different: the client ships **no gate**. The `OSERO_API_KNOWN_*` exports in `src/lib/api.ts` are advisory snapshots that only power editor autocomplete and offline UI hints — refresh them when the hosted API's vocabulary changes, but never validate a request or response against them. Decoders must stay structural (wire grammar and execution safety only); do not add membership checks or registry cross-checks. Adding hosted assets is an API-repo change (the SDK optionally refreshes the `KNOWN_*` rows for autocomplete). The local action registries above stay strict — they gate local plan building.
 
@@ -71,7 +73,7 @@ Hosted API vocabulary is different: the client ships **no gate**. The `OSERO_API
 
 ## Package exports
 
-`@osero/client` ships six subpath exports: `.` (types, client, registries), `./actions`, `./api`, `./viem`, `./ethers`, `./privy`. The `package.json` `exports` map has an `osero-sdk` condition pointing at raw `.ts` source for in-repo consumers (examples), and `import`/`default` for the built `./dist/*.js` for published consumers. Keep those in sync when adding a new entrypoint.
+`@osero/client` ships eight subpath exports: `.` (types, client, registries, plans, errors), `./actions`, `./api`, `./contracts`, `./viem`, `./eip5792`, `./ethers`, `./privy`. Everything exported from them is frozen public API: additions must be optional and additive, and `pnpm api:report:check` gates the emitted declarations. The `package.json` `exports` map has an `osero-sdk` condition pointing at raw `.ts` source for in-repo consumers (examples), and `import`/`default` for the built `./dist/*.js` for published consumers. Keep those in sync when adding a new entrypoint.
 
 ## Agent skills
 

@@ -206,7 +206,7 @@ Update exhaustive `OperationType` switches too. V1 adds `SWAP_EXACT_IN`, `SWAP_E
 
 ### Persistence and recovery
 
-Use canonical serializers instead of raw `JSON.stringify` so bigint and checksum validation remain correct:
+Use the canonical plan serializers instead of raw `JSON.stringify` so bigint and checksum validation remain correct:
 
 ```ts
 import {
@@ -226,6 +226,8 @@ if (resumed.isErr()) throw resumed.error;
 ```
 
 A confirmation failure carries the submitted hash and confirmed prefix. Persist that context before retrying. Adapters verify receipts for the prefix before skipping steps.
+
+From 1.1.0, build resume state from the failure with `executionResumeStateFromError(plan, error)`, which refuses a failure whose step may already have been submitted until you have checked it, and persist it with `serializeExecutionResumeState` / `deserializeExecutionResumeState`, which use the same bigint-safe canonical JSON as the plan serializers. On 1.0.x there is no resume-state serializer: assemble an `ExecutionResumeState` from the `transaction` in each `step-confirmed` progress event and store it with an encoding that preserves `bigint` fields.
 
 ## Wallet adapters
 
@@ -334,6 +336,10 @@ if (result.isErr()) {
 ```
 
 Operational APIs remain non-throwing even when user callbacks or transport/provider methods throw. Static constructors can throw `ConfigurationError` for invalid configuration.
+
+Two 0.x exports have no 1.0 replacement. `InsufficientBalanceError` was removed because no SDK path ever produced it; the SDK does not preflight token balances. An underfunded swap is visible beforehand in the balance observations of `simulateExecutionPlan`, and otherwise surfaces from the executor, for example as `SimulationError` from the viem or ethers gas estimate. The aggregate `ActionError` type was removed with the pair-specific actions; use the union returned by the function you call, such as `PrepareSwapError`, `QuoteSwapError`, or `SendWithError`.
+
+Which error each adapter returns at each execution stage is specified in the [adapter behaviour contract](./adapters.md).
 
 ## Hosted API
 
@@ -453,7 +459,7 @@ The locator is encoded as `"<chainId>:<lowercase-address>"`. The hosted API—no
 
 Previously local policy failures now come from the server as `ApiRequestError` with `code === 'API_REQUEST_FAILED'` and, when supplied, a stable `apiCode` such as `SWAP_ASSET_NOT_SUPPORTED`, `SWAP_PAIR_NOT_SUPPORTED`, `SLIPPAGE_INVALID`, or `SLIPPAGE_OUT_OF_RANGE`.
 
-Responses accept unknown future assets, chains, protocols, and Quote Providers. Keep a default branch when displaying these open vocabularies. Fields required for transaction safety and normalized Transfer Status states remain strict.
+Responses accept unknown future assets, chains, protocols, and Quote Providers. Keep a default branch when displaying these open vocabularies. Fields required for transaction safety remain strict. A normalized Transfer Status state the installed release does not know is decoded as `unknown`.
 
 ### Replace old quote field access
 
@@ -629,6 +635,8 @@ The response is no longer nested under `bridge`:
 | `status.bridge.error`             | `status.error`                           |
 | `status.bridge.providerStatus`    | provider-native `status.providerDetails` |
 
+From 1.1.0, `waitForTransferStatus({ sourceTransactionHash, statusContext }, options)` waits the same way from a persisted status request, so a restarted process does not need the quote.
+
 `waitForSwapCompletion()` defaults to a 5-second polling interval and a 30-minute timeout; pass explicit values when those defaults do not match product policy. It supports `AbortSignal`, awaits async `onStatus` callbacks, and invokes the callback only when the complete status observation changes. It keeps polling both `pending` and `unknown`.
 
 Both `completed` and `failed` are successful terminal `Result` values. A failed bridge transfer is not an SDK transport error, so inspect `status.state` and `status.error`. Same-chain quotes have `statusContext === null` and do not need polling; quote-aware status methods reject them locally before an HTTP request.
@@ -732,5 +740,5 @@ Deep imports under `@osero/client/src/*` or `@osero/client/dist/lib/*` are not p
 - [ ] Recovery Actions are submitted through `prepareRecoveryExecutionPlan()` with an explicit submitter, and only from an `action-required` recovery.
 - [ ] Status polling resumes after a Recovery Action is submitted.
 - [ ] Quote display does not subtract Provider Details fees from `quote.expectedOutput` again.
-- [ ] Persisted plans and resume state use canonical serializers.
+- [ ] Persisted plans and resume state use the canonical serializers (`serializeExecutionPlan`, and `serializeExecutionResumeState` from 1.1.0).
 - [ ] UI copy does not present independent simulation as guaranteed execution.

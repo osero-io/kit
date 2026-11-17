@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 const workspaceRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = fileURLToPath(new URL('../packages/client/', import.meta.url));
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+// The consumer installs every peer at its supported floor, so the declared
+// ranges are tested at their lower bound rather than at whatever is newest.
 const consumerViemVersion = process.env['OSERO_CONSUMER_VIEM_VERSION'] ?? '2.28.0';
+const consumerEthersVersion = process.env['OSERO_CONSUMER_ETHERS_VERSION'] ?? '6.14.0';
+const consumerPrivyVersion = process.env['OSERO_CONSUMER_PRIVY_VERSION'] ?? '0.19.0';
 
 function run(args, cwd, environment = {}) {
   const result = spawnSync(pnpm, args, {
@@ -199,7 +203,7 @@ for (const subpath of ['ethers', 'privy']) {
           // snapshot is checked separately before this consumer compile.
           skipLibCheck: true,
         },
-        include: ['consumer.ts', 'removed.ts'],
+        include: ['consumer.ts', 'additions.ts', 'removed.ts'],
       },
       null,
       2,
@@ -219,6 +223,66 @@ void handler;
 `,
   );
   await writeFile(
+    join(consumerRoot, 'additions.ts'),
+    `import {
+  deserializeExecutionResumeState,
+  executionResumeStateFromError,
+  listSwapRoutes,
+  serializeExecutionResumeState,
+  type CompletedExecutionStep,
+  type ExecutionFailureContext,
+  type ExecutionPlan,
+  type ExecutionResumeState,
+  type ExecutorCapabilities,
+  type OseroError,
+  type Result,
+  type SupportedSwapRoute,
+} from '@osero/client';
+import type { PlanSimulation, PrepareSwapRequest, SimulateExecutionPlanOptions } from '@osero/client/actions';
+import type { OseroApiClient, OseroApiTransferStatusRequest } from '@osero/client/api';
+
+// Types a consumer wrote against 1.0 must still compile: every field added since is optional.
+const completed: CompletedExecutionStep = {
+  planId: 'plan-x',
+  stepId: 'swap',
+  stepIndex: 0,
+  operation: 'SWAP_EXACT_IN',
+  hash: '0x00',
+};
+const failure: ExecutionFailureContext = {
+  planId: 'plan-x',
+  stepId: 'swap',
+  stepIndex: 0,
+  operation: 'SWAP_EXACT_IN',
+  stage: 'confirmation',
+  completed: [completed],
+};
+const capabilities: ExecutorCapabilities = {
+  name: 'custom',
+  sequentialTransactions: true,
+  atomicBatch: false,
+  permitAuthorization: false,
+  sponsoredTransactions: false,
+  chainSwitching: 'none',
+  simulation: 'none',
+};
+const feeData: PlanSimulation['feeData'] = { gasPrice: 1n, source: 'rpc' };
+declare const plan: ExecutionPlan;
+declare const error: OseroError;
+declare const state: ExecutionResumeState;
+declare const api: OseroApiClient;
+declare const statusRequest: OseroApiTransferStatusRequest;
+const routes: readonly SupportedSwapRoute[] = listSwapRoutes(8453);
+const derived: Result<ExecutionResumeState, OseroError> = executionResumeStateFromError(plan, error);
+const serialized: Result<string, OseroError> = serializeExecutionResumeState(state);
+const restored: Result<ExecutionResumeState, OseroError> = deserializeExecutionResumeState('{}');
+const waiting = api.waitForTransferStatus(statusRequest, { timeoutMs: 1_000 });
+const gasEstimates: PrepareSwapRequest['gasEstimates'] = 'independent-steps';
+const simulationOptions: SimulateExecutionPlanOptions = {};
+void [failure, capabilities, feeData, routes, derived, serialized, restored, waiting, gasEstimates, simulationOptions];
+`,
+  );
+  await writeFile(
     join(consumerRoot, 'removed.ts'),
     `// @ts-expect-error internal configuration is not a root export
 import { resolveConfig } from '@osero/client';
@@ -228,7 +292,20 @@ import { flattenExecutionPlan } from '@osero/client';
 import { OseroApiClient } from '@osero/client';
 // @ts-expect-error legacy pair-specific actions were removed at the v1 cutover
 import { mintUsds } from '@osero/client/actions';
-void [resolveConfig, flattenExecutionPlan, OseroApiClient, mintUsds];
+// @ts-expect-error removed in 1.0: no SDK path ever produced it
+import { InsufficientBalanceError } from '@osero/client';
+// @ts-expect-error the aggregate action error type was removed in 1.0
+import type { ActionError } from '@osero/client';
+// @ts-expect-error the capability matrix is internal; listSwapRoutes is the public view
+import { CHAIN_CAPABILITIES } from '@osero/client';
+// @ts-expect-error neverthrow helpers are not part of the root contract; only the Result types are
+import { ok } from '@osero/client';
+// @ts-expect-error neverthrow helpers are not part of the root contract; only the Result types are
+import { errAsync } from '@osero/client';
+// @ts-expect-error testing helpers are not published
+import { createMockClient } from '@osero/client';
+declare const actionError: ActionError;
+void [resolveConfig, flattenExecutionPlan, OseroApiClient, mintUsds, InsufficientBalanceError, CHAIN_CAPABILITIES, ok, errAsync, createMockClient, actionError];
 `,
   );
   run(['exec', 'tsc', '--project', 'tsconfig.json'], consumerRoot);
@@ -240,8 +317,8 @@ void [resolveConfig, flattenExecutionPlan, OseroApiClient, mintUsds];
       '--prefer-offline',
       '--ignore-scripts',
       '--config.auto-install-peers=false',
-      'ethers@6.16.0',
-      '@privy-io/node@0.19.0',
+      `ethers@${consumerEthersVersion}`,
+      `@privy-io/node@${consumerPrivyVersion}`,
     ],
     consumerRoot,
   );
@@ -261,8 +338,50 @@ void [resolveConfig, flattenExecutionPlan, OseroApiClient, mintUsds];
   );
   runNode(['runtime-all.mjs'], consumerRoot);
 
+  // With the optional peers installed at their floors, the two remaining
+  // adapters must also typecheck from a consumer, not merely load.
+  await writeFile(
+    join(consumerRoot, 'consumer-peers.ts'),
+    `import type { ExecutionPlan, ExecutionPlanHandler, SendWithError, TransactionResult, Result } from '@osero/client';
+import {
+  ETHERS_EXECUTOR_CAPABILITIES,
+  sendWith as sendWithEthers,
+  type SendWithOptions as EthersSendWithOptions,
+} from '@osero/client/ethers';
+import {
+  PRIVY_EXECUTOR_CAPABILITIES,
+  sendWith as sendWithPrivy,
+  type PrivyExecutorClient,
+  type PrivyWallet,
+  type SendWithOptions as PrivySendWithOptions,
+} from '@osero/client/privy';
+import { PrivyClient } from '@privy-io/node';
+import { JsonRpcProvider, Wallet, type Signer } from 'ethers';
+
+declare const plan: ExecutionPlan;
+const signer: Signer = new Wallet('0x' + '11'.repeat(32), new JsonRpcProvider('http://127.0.0.1:8545'));
+const ethersOptions: EthersSendWithOptions = { confirmations: 1, gasBufferBps: 1_500 };
+const ethersHandler: ExecutionPlanHandler = sendWithEthers(signer, ethersOptions);
+const ethersResult: PromiseLike<Result<TransactionResult, SendWithError>> = sendWithEthers(signer, plan, ethersOptions);
+
+declare const privy: PrivyClient;
+// The real Privy client at the peer floor must satisfy the adapter's structural seam.
+const executorClient: PrivyExecutorClient = privy;
+const wallet: PrivyWallet = { id: 'wallet', address: '0x1111111111111111111111111111111111111111' };
+const privyOptions: PrivySendWithOptions = { chainId: 8453, allowPublicRpc: true };
+const privyHandler: ExecutionPlanHandler = sendWithPrivy(executorClient, wallet, privyOptions);
+const privyResult: PromiseLike<Result<TransactionResult, SendWithError>> = sendWithPrivy(privy, wallet, plan, privyOptions);
+void [ETHERS_EXECUTOR_CAPABILITIES, PRIVY_EXECUTOR_CAPABILITIES, ethersHandler, ethersResult, privyHandler, privyResult];
+`,
+  );
+  await writeFile(
+    join(consumerRoot, 'tsconfig.peers.json'),
+    `${JSON.stringify({ extends: './tsconfig.json', include: ['consumer-peers.ts'] }, null, 2)}\n`,
+  );
+  run(['exec', 'tsc', '--project', 'tsconfig.peers.json'], consumerRoot);
+
   console.log(
-    `Validated ${metadata.files.length} packed files, every public subpath, optional-peer isolation, and TypeScript 5.9 consumer resolution`,
+    `Validated ${metadata.files.length} packed files, every public subpath, optional-peer isolation, and TypeScript 5.9 consumer resolution against viem ${consumerViemVersion}, ethers ${consumerEthersVersion}, and @privy-io/node ${consumerPrivyVersion}`,
   );
 } finally {
   await rm(temporaryRoot, { force: true, recursive: true });

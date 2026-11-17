@@ -3,6 +3,7 @@ import type { Hex } from 'viem';
 import {
   ProgressCallbackError,
   UnsupportedCapabilityError,
+  type CompletedExecutionStep,
   type ExecutionFailureContext,
   type ExecutionStage,
 } from './errors.js';
@@ -42,6 +43,47 @@ export type SingleTxExecutor = (
   context: SingleTransactionContext,
 ) => ResultAsync<SingleTransactionResult, SendWithError>;
 
+function withoutBigints(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map(withoutBigints);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, withoutBigints(nested)]),
+    );
+  }
+  return value;
+}
+
+/**
+ * A confirmed step as it is recorded on an execution failure. It keeps the
+ * receipt evidence so the failure can be turned back into resume state.
+ *
+ * The receipt evidence holds bigints, which `JSON.stringify` rejects. Before
+ * that evidence was added, `JSON.stringify(error.execution)` worked, and error
+ * handlers commonly log it. A non-enumerable `toJSON` keeps it working by
+ * writing bigints as decimal strings, as `OseroError.toJSON` does. The live
+ * object keeps its bigints.
+ */
+export function toCompletedExecutionStep(
+  transaction: ConfirmedTransaction,
+): CompletedExecutionStep {
+  const step: CompletedExecutionStep = {
+    planId: transaction.planId,
+    stepId: transaction.stepId,
+    stepIndex: transaction.stepIndex,
+    operation: transaction.operation,
+    hash: transaction.hash,
+    submittedHash: transaction.submittedHash,
+    ...(transaction.replacement === undefined ? {} : { replacement: transaction.replacement }),
+    confirmation: transaction.confirmation,
+  };
+  Object.defineProperty(step, 'toJSON', {
+    enumerable: false,
+    value: () => withoutBigints(step),
+  });
+  return step;
+}
+
 export function preflightExecutorCapabilities(
   plan: ExecutionPlan,
   capabilities: ExecutorCapabilities,
@@ -57,6 +99,13 @@ export function preflightExecutorCapabilities(
   }
   if (plan.requirements.chainTransitions && capabilities.chainSwitching === 'none') {
     return err(new UnsupportedCapabilityError('chain-transitions', capabilities.name));
+  }
+  if (capabilities.supportedChainIds !== undefined) {
+    const supported = capabilities.supportedChainIds;
+    const unsupported = plan.steps.find((step) => !supported.includes(step.chainId));
+    if (unsupported !== undefined) {
+      return err(new UnsupportedCapabilityError(`chain:${unsupported.chainId}`, capabilities.name));
+    }
   }
   return ok(undefined);
 }
@@ -115,13 +164,7 @@ export function runExecutionPlan(
         operation: step.operation,
         stage,
         ...(hash === undefined ? {} : { hash }),
-        completed: confirmed.map((transaction) => ({
-          planId: transaction.planId,
-          stepId: transaction.stepId,
-          stepIndex: transaction.stepIndex,
-          operation: transaction.operation,
-          hash: transaction.hash,
-        })),
+        completed: confirmed.map(toCompletedExecutionStep),
       }),
     });
 

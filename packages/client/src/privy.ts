@@ -11,11 +11,12 @@ import {
   toHex,
   type Transport,
 } from 'viem';
-import { getTransactionReceipt, waitForTransactionReceipt } from 'viem/actions';
+import { getTransactionReceipt } from 'viem/actions';
 
 import {
   preflightExecutorCapabilities,
   runExecutionPlan,
+  toCompletedExecutionStep,
   type SingleTransactionContext,
   type SingleTransactionResult,
   type SingleTxExecutor,
@@ -44,9 +45,11 @@ import type {
 } from './lib/types.js';
 import {
   validateConfirmations,
+  validateExecutionPlan,
   validateExecutorBinding,
   validateResumeState,
 } from './lib/validation.js';
+import { nonRepricedReplacementError, waitForViemReceipt } from './lib/viemReceipt.js';
 
 const MAX_PRIVY_IDEMPOTENCY_KEY_LENGTH = 256;
 
@@ -193,10 +196,24 @@ function resolveOptions(
 }
 
 function validateIdempotencyKeys(
-  plan: ExecutionPlan,
+  unvalidatedPlan: ExecutionPlan,
   keys: Readonly<Record<string, string>> | undefined,
 ): Result<void, ValidationError> {
   if (keys === undefined) return ok(undefined);
+  if (typeof keys !== 'object' || keys === null) {
+    return err(
+      ValidationError.forField(
+        'idempotencyKeys',
+        'idempotencyKeys must be an object keyed by plan step id',
+      ),
+    );
+  }
+  // Keys are matched against step ids, so the plan must be structurally valid
+  // before it is read here; otherwise a malformed plan would throw instead of
+  // returning its ValidationError.
+  const validated = validateExecutionPlan(unvalidatedPlan);
+  if (validated.isErr()) return err(validated.error);
+  const plan = validated.value;
   const providedStepIds = Object.keys(keys);
   if (providedStepIds.length !== plan.steps.length) {
     return err(
@@ -276,7 +293,7 @@ function sendSingleTransaction(
   context: SingleTransactionContext,
   options: ResolvedOptions,
 ): ResultAsync<SingleTransactionResult, SendWithError> {
-  const expiry = checkExecutionPlanExpiry(plan);
+  const expiry = checkExecutionPlanExpiry(plan, context.failure('preflight'));
   if (expiry.isErr()) return errAsync(expiry.error);
   return ResultAsync.fromPromise(
     sendPrivyTransaction(privy, wallet, request, options.idempotencyKeys?.[request.id]),
@@ -287,22 +304,42 @@ function sendSingleTransaction(
   ).andThen((hash) => {
     if (!isHash(hash)) {
       return errAsync(
+        // The Wallet API accepted the request, so something may already be in
+        // flight. The SDK cannot know about sponsorship before this call; report
+        // exactly where the plan stopped and what was confirmed before it.
         new UnsupportedCapabilityError(
           'standard transaction hash (sponsored/user-operation responses are unsupported)',
           'privy',
+          context.failure('broadcast'),
         ),
       );
     }
     const submittedHash = hash;
     const confirmation = async (): Promise<SingleTransactionResult> => {
       await context.notifySubmitted(submittedHash);
-      const receipt = await waitForTransactionReceipt(options.receiptClient, {
+      const { receipt, replacement } = await waitForViemReceipt(options.receiptClient, {
         hash: submittedHash,
         confirmations: context.confirmations,
+        submitted: {
+          from: request.from,
+          to: request.to,
+          data: request.data,
+          value: request.value,
+        },
         ...(options.confirmationTimeoutMs === undefined
           ? {}
           : { timeout: options.confirmationTimeoutMs }),
       });
+      // Same rule as the viem and ethers adapters: only a same-transaction fee
+      // bump may stand in for the submitted hash.
+      if (replacement !== undefined && replacement !== 'repriced') {
+        throw nonRepricedReplacementError(
+          submittedHash,
+          replacement,
+          receipt.transactionHash,
+          context.failure('replacement', submittedHash),
+        );
+      }
       if (receipt.status === 'reverted') {
         throw new TransactionError(
           `Transaction ${receipt.transactionHash} reverted`,
@@ -313,6 +350,15 @@ function sendSingleTransaction(
       return {
         submittedHash,
         hash: receipt.transactionHash,
+        ...(replacement === undefined
+          ? {}
+          : {
+              replacement: {
+                reason: replacement,
+                originalHash: submittedHash,
+                replacementHash: receipt.transactionHash,
+              },
+            }),
         confirmation: {
           status: 'success',
           transactionHash: receipt.transactionHash,
@@ -324,7 +370,7 @@ function sendSingleTransaction(
       };
     };
     return ResultAsync.fromPromise(confirmation(), (cause) => {
-      if (cause instanceof TransactionError) return cause;
+      if (cause instanceof ConfirmationError || cause instanceof TransactionError) return cause;
       return ConfirmationError.from(cause, context.failure('confirmation', submittedHash));
     });
   });
@@ -348,13 +394,7 @@ function verifyResumeReceipts(
         operation: step.operation,
         stage: 'confirmation' as const,
         hash: transaction.hash,
-        completed: completed.map((value) => ({
-          planId: value.planId,
-          stepId: value.stepId,
-          stepIndex: value.stepIndex,
-          operation: value.operation,
-          hash: value.hash,
-        })),
+        completed: completed.map(toCompletedExecutionStep),
       };
       const receipt = await ResultAsync.fromPromise(
         getTransactionReceipt(options.receiptClient, { hash: transaction.hash }),
@@ -436,7 +476,9 @@ export function sendWith(
   planOrOptions: ExecutionPlan | SendWithOptions,
   maybeOptions?: SendWithOptions,
 ): ExecutionPlanHandler | ResultAsync<TransactionResult, SendWithError> {
-  if ('chainId' in planOrOptions) {
+  // Guard the `in` check: a null or non-object plan must reach validation and
+  // come back as a ValidationError instead of throwing here.
+  if (typeof planOrOptions === 'object' && planOrOptions !== null && 'chainId' in planOrOptions) {
     return (plan) => observedExecutePlan(privy, wallet, plan, planOrOptions);
   }
   return observedExecutePlan(privy, wallet, planOrOptions, maybeOptions);

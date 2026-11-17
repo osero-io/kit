@@ -19,6 +19,9 @@ export {
   type AllowanceObservation,
   type PlanSimulation,
   type SimulatedExecutionStep,
+  type SimulatedQuoteBounds,
+  type SimulatedStepRevert,
+  type SimulateExecutionPlanOptions,
   type SimulationErrorType,
   type TokenBalanceObservation,
 } from '../simulation.js';
