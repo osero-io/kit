@@ -44,6 +44,7 @@ import { parseSlippage, referral, UINT256_MAX } from './domain.js';
 import {
   ApiRequestError,
   ApiResponseError,
+  ApiTransportError,
   ApprovalLimitError,
   BroadcastError,
   ConfigurationError,
@@ -2860,5 +2861,337 @@ describe('0x Transfer Status and recovery', () => {
 
     expect(result.isOk()).toBe(true);
     if (result.isOk()) expect(result.value.recoveryContext?.reason).toBe(reason);
+  });
+});
+
+/** A fetch that stays in flight until its request signal aborts, like a real transport. */
+function hangingFetch(): {
+  readonly fetch: OseroApiFetch;
+  readonly started: Promise<void>;
+  readonly signals: AbortSignal[];
+} {
+  const signals: AbortSignal[] = [];
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const fetch: OseroApiFetch = (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal ?? undefined;
+      if (signal !== undefined) {
+        signals.push(signal);
+        signal.addEventListener(
+          'abort',
+          () => reject(new DOMException('The operation was aborted.', 'AbortError')),
+          { once: true },
+        );
+      }
+      markStarted();
+    });
+  return { fetch, started, signals };
+}
+
+describe('hosted transport failures', () => {
+  it('maps a network failure to ApiTransportError with the request context', async () => {
+    const cause = new TypeError('fetch failed');
+    const fetch = mockFn(async (): Promise<Response> => {
+      throw cause;
+    });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      baseUrl: 'https://contract.test/v1/',
+      fetch,
+    });
+
+    const assets = await client.getSupportedAssets();
+    const quote = await client.getSwapQuote(quoteRequest());
+
+    for (const [result, method, url] of [
+      [assets, 'GET', 'https://contract.test/v1/swap/assets'],
+      [quote, 'POST', 'https://contract.test/v1/swap/quote'],
+    ] as const) {
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ApiTransportError);
+        expect(result.error.code).toBe('API_TRANSPORT_FAILED');
+        expect(result.error.cause).toBe(cause);
+        if (result.error instanceof ApiTransportError) {
+          expect(result.error.method).toBe(method);
+          expect(result.error.url).toBe(url);
+        }
+      }
+    }
+    // A transport failure is never retried implicitly.
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps a failure while reading the response body to ApiTransportError', async () => {
+    const cause = new Error('socket closed');
+    const fetch: OseroApiFetch = async () =>
+      ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        text: () => Promise.reject(cause),
+      }) as unknown as Response;
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSupportedAssets();
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ApiTransportError);
+      expect(result.error.cause).toBe(cause);
+    }
+  });
+
+  it('maps an abort while the fetch is in flight to CancelError', async () => {
+    const controller = new AbortController();
+    const transport = hangingFetch();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.getSwapQuote(quoteRequest(), { signal: controller.signal });
+    await transport.started;
+    controller.abort('user navigated away');
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error.code).toBe('CANCELLED');
+      expect(result.error).not.toBeInstanceOf(ApiTransportError);
+    }
+    expect(transport.signals).toHaveLength(1);
+    expect(transport.signals[0]?.aborted).toBe(true);
+  });
+});
+
+function quoteWithExecutionGas(gasLimit: string | null): OseroApiSwapQuoteResponse {
+  return changedQuote(
+    ['executionPlan', 'executionStep', 'transaction', 'gasLimit'],
+    gasLimit,
+  ) as OseroApiSwapQuoteResponse;
+}
+
+function quoteWithApprovalGas(gasLimit: string | null): OseroApiSwapQuoteResponse {
+  const quote = structuredClone(quoteWithApproval()) as unknown as {
+    executionPlan: { approvalSteps: { transaction: { gasLimit: string | null } }[] };
+  };
+  quote.executionPlan.approvalSteps[0]!.transaction.gasLimit = gasLimit;
+  return quote as unknown as OseroApiSwapQuoteResponse;
+}
+
+const gasQuoteRequest = () =>
+  quoteRequest({ fromAssetId: 'ethereum:usds', amount: amount(QUOTE_INPUT_RAW) });
+
+describe('advisory gas from hosted quotes', () => {
+  it.each([
+    ['null', null],
+    ['"0"', '0'],
+  ])('attaches no estimatedGas to the execution step when gasLimit is %s', async (_name, gas) => {
+    const transport = fetchSequence({ body: quoteWithExecutionGas(gas) });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(gasQuoteRequest());
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      const step = result.value.walletExecutionPlan.steps[0]!;
+      expect(step.estimatedGas).toBeUndefined();
+      expect('estimatedGas' in step).toBe(false);
+      // The API Execution Plan keeps what the API said.
+      expect(result.value.quote.executionPlan.executionStep.transaction.gasLimit).toBe(gas);
+    }
+  });
+
+  it.each([
+    ['null', null],
+    ['"0"', '0'],
+  ])('attaches no estimatedGas to the approval step when gasLimit is %s', async (_name, gas) => {
+    const transport = fetchSequence({ body: quoteWithApprovalGas(gas) });
+    const rpc = publicClient(0n, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.getSwapQuote(gasQuoteRequest());
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('approval-required');
+      const step = result.value.walletExecutionPlan.steps[0]!;
+      expect(step.operation).toBe('APPROVE_ERC20');
+      expect('estimatedGas' in step).toBe(false);
+    }
+  });
+
+  it('carries a positive gasLimit as advisory hosted-api metadata without changing identity', async () => {
+    const withGas = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: fetchSequence({ body: quoteWithExecutionGas('250000') }).fetch,
+    });
+    const withoutGas = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: fetchSequence({ body: quoteWithExecutionGas(null) }).fetch,
+    });
+
+    const estimated = await withGas.getSwapQuote(gasQuoteRequest());
+    const bare = await withoutGas.getSwapQuote(gasQuoteRequest());
+
+    expect(estimated.isOk()).toBe(true);
+    expect(bare.isOk()).toBe(true);
+    if (estimated.isOk() && bare.isOk()) {
+      expect(estimated.value.walletExecutionPlan.steps[0]?.estimatedGas).toEqual({
+        gas: 250_000n,
+        source: 'hosted-api',
+      });
+      // Advisory gas is metadata: it is not part of what the wallet signs or of the plan id.
+      expect(estimated.value.walletExecutionPlan.id).toBe(bare.value.walletExecutionPlan.id);
+    }
+  });
+});
+
+describe('Transfer Status polling on a fake clock', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00.000Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('polls once per interval through every transition until completion', async () => {
+    const transport = fetchSequence(
+      { body: ensoTransferStatusFixture('pending', 'submitted') },
+      { body: ensoTransferStatusFixture('pending', 'submitted') },
+      { body: ensoTransferStatusFixture('pending', 'bridging') },
+      { body: ensoTransferStatusFixture('unknown', 'future-provider-state') },
+      { body: ensoTransferStatusFixture('completed', 'delivered') },
+    );
+    const seen: string[] = [];
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 60_000,
+      onStatus: (status) => {
+        const details = status.providerDetails as { readonly status?: string };
+        seen.push(`${status.state}:${details.status}`);
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(transport.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(transport.calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(transport.calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(transport.calls).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pending;
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.state).toBe('completed');
+    expect(transport.calls).toHaveLength(5);
+    // An unchanged status is not reported twice.
+    expect(seen).toEqual([
+      'pending:submitted',
+      'pending:bridging',
+      'unknown:future-provider-state',
+      'completed:delivered',
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('times out at the deadline without an extra request', async () => {
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 12_000,
+    });
+    await vi.advanceTimersByTimeAsync(11_999);
+    expect(transport.calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(TimeoutError);
+      if (result.error instanceof TimeoutError) {
+        expect(result.error.operation).toBe('waitForSwapCompletion');
+        expect(result.error.timeoutMs).toBe(12_000);
+      }
+    }
+    expect(transport.calls).toHaveLength(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stops immediately when aborted during the sleep between polls', async () => {
+    const controller = new AbortController();
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(transport.calls).toHaveLength(1);
+    controller.abort('stop during sleep');
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('CANCELLED');
+    // The pending sleep timer is cleared and no further poll is ever issued.
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  it('cancels the in-flight status request when aborted mid-fetch', async () => {
+    const controller = new AbortController();
+    const transport = hangingFetch();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await transport.started;
+    controller.abort('stop during fetch');
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('CANCELLED');
+    expect(transport.signals).toHaveLength(1);
+    expect(transport.signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('times out and aborts a status request that never answers', async () => {
+    const transport = hangingFetch();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 8_000,
+    });
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(transport.signals[0]?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(TimeoutError);
+    expect(transport.signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

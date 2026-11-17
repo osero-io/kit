@@ -315,6 +315,96 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
     });
 
     it.each(['direct', 'curried'] as const)(
+      'rejects account and chain mismatches identically with %s invocation',
+      async (form) => {
+        const wrongAccount = factory({
+          account: '0x3333333333333333333333333333333333333333',
+          chainId: 8453,
+        });
+        const wrongChain = factory({ account: CONTRACT_ACCOUNT, chainId: 1 });
+
+        const accountResult = await wrongAccount.execute(contractPlan(), form);
+        const chainResult = await wrongChain.execute(contractPlan(), form);
+
+        expect(accountResult.isErr()).toBe(true);
+        if (accountResult.isErr()) {
+          expect(accountResult.error.code).toBe('ACCOUNT_MISMATCH');
+          if (accountResult.error.code === 'ACCOUNT_MISMATCH') {
+            expect(accountResult.error.expectedAccount).toBe(CONTRACT_ACCOUNT);
+            expect(accountResult.error.actualAccount).toBe(
+              '0x3333333333333333333333333333333333333333',
+            );
+          }
+        }
+        expect(chainResult.isErr()).toBe(true);
+        if (chainResult.isErr()) {
+          expect(chainResult.error.code).toBe('CHAIN_MISMATCH');
+          if (chainResult.error.code === 'CHAIN_MISMATCH') {
+            expect(chainResult.error.expectedChainId).toBe(8453);
+            expect(chainResult.error.actualChainId).toBe(1);
+          }
+        }
+        expect(wrongAccount.broadcast).not.toHaveBeenCalled();
+        expect(wrongChain.broadcast).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['direct', 'curried'] as const)(
+      'rejects a malformed later step before broadcasting with %s invocation',
+      async (form) => {
+        const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        const valid = contractPlan();
+        const malformed = {
+          ...valid,
+          steps: [valid.steps[0]!, { ...valid.steps[1]!, data: '0x123' }],
+        } as ExecutionPlan;
+
+        const result = await harness.execute(malformed, form);
+
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error.code).toBe('VALIDATION_ERROR');
+          if (result.error.code === 'VALIDATION_ERROR') {
+            expect(result.error.field).toBe('plan.steps[1].data');
+          }
+        }
+        expect(harness.broadcast).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['direct', 'curried'] as const)(
+      'rejects a plan requiring chain transitions before broadcasting with %s invocation',
+      async (form) => {
+        const sameChain = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        const mixedChain = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        const valuePlan = contractPlan();
+        const requirements = { ...valuePlan.requirements, chainTransitions: true };
+        const declared = createExecutionPlan({ steps: valuePlan.steps, requirements });
+        const transitioning = createExecutionPlan({
+          steps: [valuePlan.steps[0]!, { ...valuePlan.steps[1]!, chainId: 10 }],
+          requirements,
+        });
+        if (declared.isErr()) throw declared.error;
+        if (transitioning.isErr()) throw transitioning.error;
+
+        const declaredResult = await sameChain.execute(declared.value, form);
+        const transitioningResult = await mixedChain.execute(transitioning.value, form);
+
+        for (const result of [declaredResult, transitioningResult]) {
+          expect(result.isErr()).toBe(true);
+          if (result.isErr()) {
+            expect(result.error.code).toBe('UNSUPPORTED_CAPABILITY');
+            if (result.error.code === 'UNSUPPORTED_CAPABILITY') {
+              expect(result.error.capability).toBe('chain-transitions');
+            }
+          }
+        }
+        expect(sameChain.broadcast).not.toHaveBeenCalled();
+        expect(mixedChain.broadcast).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['direct', 'curried'] as const)(
       'rejects invalid confirmations before broadcasting with %s invocation',
       async (form) => {
         const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
