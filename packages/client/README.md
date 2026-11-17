@@ -426,7 +426,7 @@ This manual path is appropriate for frontends that need explicit prompts, persis
 
 Use `executeSwap(request, handler)` for bounded high-level execution. It submits at most one approval-only Wallet Execution Plan at a time, performs Quote Refresh after confirmation or expiry, and then submits the fresh execution-only plan. The defaults allow three approval transactions and five total Quote Refreshes; `approvalTransactionLimit` and `quoteRefreshLimit` accept deliberate positive-integer overrides.
 
-Every allowance check reads at the chain head, which the SDK requests from your public client with `cacheTime: 0`, so a head that viem has cached cannot hide an approval that has just confirmed. Inside `executeSwap`, the check that follows a confirmed approval also never reads below that approval's receipt block. If the RPC still reports an older head, the SDK asks again for up to about one second and then reads at the receipt block. An RPC that cannot serve that block returns `RpcError`; the approval is not requested a second time.
+Every allowance check reads at the chain head, which the SDK requests from your public client with `cacheTime: 0`, so a response that viem has cached cannot hide an approval that has just confirmed. Inside `executeSwap`, the check that follows a confirmed approval also never reads below that approval's receipt block. If the RPC still reports an older head, the SDK asks again for up to about one second and then reads at the receipt block. An RPC that cannot serve that block returns `RpcError`; the approval is not requested a second time.
 
 ```ts
 const execution = await api.executeSwap(request, sendWith(walletClient), {
