@@ -118,6 +118,20 @@ describe('simulateExecutionPlan', () => {
     expect(publicClient.estimateGas).toHaveBeenCalledTimes(2);
   });
 
+  it('pins its reads to an uncached head', async () => {
+    const { client, publicClient } = simulationClient();
+
+    const result = await simulateExecutionPlan(client, executionPlan(), ACCOUNT);
+
+    expect(result.isOk()).toBe(true);
+    // viem serves getBlockNumber from a cache unless cacheTime is 0; a cached head can predate
+    // the transaction the caller has just sent.
+    expect(publicClient.getBlockNumber.mock.calls).toEqual([[{ cacheTime: 0 }]]);
+    expect(publicClient.getBalance).toHaveBeenCalledWith(
+      expect.objectContaining({ blockNumber: 123n }),
+    );
+  });
+
   it('keeps a step simulation failure inside an otherwise useful report', async () => {
     const estimateGas = mockFn()
       .mockResolvedValueOnce(90n)

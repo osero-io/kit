@@ -51,6 +51,7 @@ import {
   type TelemetryTrace,
 } from './telemetry.js';
 import type {
+  ConfirmedTransaction,
   ExecutionPlan,
   ExecutionPlanHandler,
   SendWithError,
@@ -61,6 +62,13 @@ import { validateQuoteExpiry } from './validation.js';
 export const DEFAULT_OSERO_API_BASE_URL = 'https://api.osero.org/v1/';
 export const DEFAULT_APPROVAL_TRANSACTION_LIMIT = 3;
 export const DEFAULT_QUOTE_REFRESH_LIMIT = 5;
+
+/**
+ * How long an allowance check waits for an RPC whose head is still behind an approval that has
+ * already confirmed: at most this many extra head requests, this far apart.
+ */
+const APPROVAL_BLOCK_REPOLL_LIMIT = 4;
+const APPROVAL_BLOCK_REPOLL_DELAY_MS = 250;
 
 export {
   ApiRequestError,
@@ -1005,6 +1013,7 @@ export class OseroApiClient {
     refreshContext: OseroApiRefreshContext,
     options: OseroApiRequestOptions | undefined,
     trace: TelemetryTrace | undefined,
+    approvalBlockFloors?: ReadonlyMap<number, bigint>,
   ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
     return this.requestJson({
       method: 'POST',
@@ -1022,7 +1031,9 @@ export class OseroApiClient {
           referralCode: refreshContext.referralCode,
           provider: refreshContext.provider,
         }),
-    }).andThen((response) => this.prepareHostedWorkflow(response, options?.signal));
+    }).andThen((response) =>
+      this.prepareHostedWorkflow(response, options?.signal, approvalBlockFloors),
+    );
   }
 
   executeSwap(
@@ -1040,6 +1051,9 @@ export class OseroApiClient {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       };
       const approvalResults: TransactionResult[] = [];
+      // Per chain, the highest block an approval of this run confirmed in. A later allowance
+      // check never reads below it, so a confirmed approval is never requested a second time.
+      const approvalBlockFloors = new Map<number, bigint>();
       const emit = async (
         progress: OseroApiHostedSwapProgress,
         executionResult?: TransactionResult,
@@ -1111,6 +1125,7 @@ export class OseroApiClient {
           current.quote.refreshContext,
           requestOptions,
           trace,
+          approvalBlockFloors,
         );
         if (refreshed.isErr()) return err(refreshed.error);
         const refreshReceived = await emit({
@@ -1150,6 +1165,11 @@ export class OseroApiClient {
           }
           if (approvalResult.isErr()) return err(approvalResult.error);
           approvalResults.push(approvalResult.value);
+          recordApprovalBlockFloors(
+            approvalBlockFloors,
+            workflow.walletExecutionPlan,
+            approvalResult.value,
+          );
           const confirmed = await emit({
             type: 'approval-confirmed',
             quote: workflow.quote,
@@ -1423,6 +1443,7 @@ export class OseroApiClient {
   private prepareHostedWorkflow(
     response: OseroApiSwapQuoteResponse,
     signal?: AbortSignal,
+    approvalBlockFloors?: ReadonlyMap<number, bigint>,
   ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
     const preparation = async (): Promise<
       Result<OseroApiHostedSwapWorkflow, OseroApiClientError>
@@ -1476,10 +1497,10 @@ export class OseroApiClient {
                 ),
               );
             }
-            const block = await awaitResultWithCancellation(
-              ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
-                RpcError.from({ cause, operation: 'getBlockNumber', chainId }),
-              ),
+            const block = await readAllowanceBlockNumber(
+              publicClient.value,
+              chainId,
+              approvalBlockFloors?.get(chainId),
               signal,
             );
             if (signal?.aborted) return err(CancelError.from(signal.reason));
@@ -1758,6 +1779,64 @@ function isAbortFailure(cause: unknown, signal: AbortSignal | undefined): boolea
     signal?.aborted === true ||
     (cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'TimeoutError'))
   );
+}
+
+/**
+ * Records the block each confirmed approval landed in, keyed by the chain of its plan step. The
+ * receipt block is optional on a result, and a handler is caller code, so anything that is not a
+ * block number for a known step is skipped: the allowance check then relies on the fresh head.
+ */
+function recordApprovalBlockFloors(
+  floors: Map<number, bigint>,
+  plan: ExecutionPlan,
+  result: TransactionResult,
+): void {
+  const transactions: unknown = result?.transactions;
+  if (!Array.isArray(transactions)) return;
+  for (const transaction of transactions as readonly Partial<ConfirmedTransaction>[]) {
+    const blockNumber = transaction?.confirmation?.blockNumber;
+    if (typeof blockNumber !== 'bigint' || blockNumber < 0n) continue;
+    const chainId = plan.steps.find((step) => step.id === transaction.stepId)?.chainId;
+    if (chainId === undefined) continue;
+    const floor = floors.get(chainId);
+    if (floor === undefined || blockNumber > floor) floors.set(chainId, blockNumber);
+  }
+}
+
+/**
+ * Selects the block an allowance is read at.
+ *
+ * The head is requested with `cacheTime: 0`. viem otherwise answers `getBlockNumber` from a cache
+ * for the client's `cacheTime` (its polling interval by default), and a cached head can predate
+ * an approval that has just confirmed, which reads as a missing allowance.
+ *
+ * `floor` is the block of an approval confirmed earlier in the same `executeSwap`. The read is
+ * never below it: an RPC whose head is still behind gets a short, bounded time to catch up, and
+ * after that the read is pinned to the floor, so a node that cannot serve that block fails the
+ * read instead of reporting a stale allowance.
+ */
+async function readAllowanceBlockNumber(
+  publicClient: OseroApiPublicClient,
+  chainId: number,
+  floor: bigint | undefined,
+  signal: AbortSignal | undefined,
+): Promise<Result<bigint, RpcError | CancelError>> {
+  // oxlint-disable no-await-in-loop -- Each head request waits for the previous one.
+  for (let repoll = 0; ; repoll += 1) {
+    const latest = await awaitResultWithCancellation(
+      ResultAsync.fromPromise(publicClient.getBlockNumber({ cacheTime: 0 }), (cause) =>
+        RpcError.from({ cause, operation: 'getBlockNumber', chainId }),
+      ),
+      signal,
+    );
+    if (signal?.aborted) return err(CancelError.from(signal.reason));
+    if (latest.isErr()) return err(latest.error);
+    if (floor === undefined || latest.value >= floor) return ok(latest.value);
+    if (repoll >= APPROVAL_BLOCK_REPOLL_LIMIT) return ok(floor);
+    const slept = await sleep(APPROVAL_BLOCK_REPOLL_DELAY_MS, signal);
+    if (slept.isErr()) return err(slept.error);
+  }
+  // oxlint-enable no-await-in-loop
 }
 
 function awaitResultWithCancellation<Value, ErrorType>(

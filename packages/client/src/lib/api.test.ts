@@ -51,10 +51,11 @@ import {
   ProgressCallbackError,
   QuoteExpiredError,
   QuoteRefreshLimitError,
+  RpcError,
   TimeoutError,
 } from './errors.js';
 import { errAsync } from './result.js';
-import type { ExecutionPlanHandler } from './types.js';
+import type { ExecutionPlanHandler, TransactionResult } from './types.js';
 
 const WALLET: Address = '0x1111111111111111111111111111111111111111';
 const OTHER_WALLET: Address = '0x9999999999999999999999999999999999999999';
@@ -1932,6 +1933,301 @@ describe('Hosted Swap Workflow execution', () => {
     if (failedRefresh.isErr()) expect(failedRefresh.error).toBeInstanceOf(ApiRequestError);
     expect(wallet.calls).toHaveLength(1);
     expect(approvalTransport.calls).toHaveLength(2);
+  });
+});
+
+/** An RPC client for mainnet built from the two calls the hosted workflow makes. */
+function rpcClient(calls: {
+  readonly getBlockNumber: (args?: { readonly cacheTime?: number }) => Promise<bigint>;
+  readonly readContract: (args: { readonly blockNumber?: bigint }) => Promise<bigint>;
+}): { readonly client: PublicClient; readonly getBlockNumber: Mock; readonly readContract: Mock } {
+  const getBlockNumber = mockFn(calls.getBlockNumber);
+  const readContract = mockFn(calls.readContract);
+  const client = { chain: { ...base, id: 1 }, getBlockNumber, readContract };
+  return { client: client as unknown as PublicClient, getBlockNumber, readContract };
+}
+
+/** The block each allowance read was pinned to, in call order. */
+function allowanceBlocks(readContract: Mock): unknown[] {
+  return readContract.mock.calls.map(([args]) => (args as { blockNumber?: bigint }).blockNumber);
+}
+
+/** Reports `blockNumber` as the receipt block of a single-step wallet result. */
+function withReceiptBlock(result: TransactionResult, blockNumber: bigint): TransactionResult {
+  const transaction = result.transactions[0]!;
+  return {
+    ...result,
+    transactions: [{ ...transaction, confirmation: { ...transaction.confirmation, blockNumber } }],
+  };
+}
+
+/**
+ * A wallet that confirms every plan and, when `blockNumber` is given, reports it as the receipt
+ * block. `onConfirm` runs once per confirmed plan, before the result is returned.
+ */
+function confirmingWallet(options: {
+  readonly blockNumber?: bigint;
+  readonly onConfirm?: () => void;
+}): { readonly handler: ExecutionPlanHandler; readonly operations: () => string[][] } {
+  const wallet = executionHandler();
+  const handler: ExecutionPlanHandler = (plan) =>
+    wallet.handler(plan).map((result) => {
+      options.onConfirm?.();
+      return options.blockNumber === undefined
+        ? result
+        : withReceiptBlock(result, options.blockNumber);
+    });
+  return {
+    handler,
+    operations: () => wallet.calls.map((plan) => plan.steps.map((step) => step.operation)),
+  };
+}
+
+/** Runs the fake clock until `pending` settles, however many timers it schedules. */
+async function settleOnFakeClock<Value>(pending: PromiseLike<Value>): Promise<Value> {
+  const state = { settled: false };
+  const done = Promise.resolve(pending).finally(() => {
+    state.settled = true;
+  });
+  // oxlint-disable-next-line no-await-in-loop -- Each tick depends on the previous one.
+  while (!state.settled) await vi.advanceTimersByTimeAsync(250);
+  return done;
+}
+
+describe('allowance block selection', () => {
+  const REQUIRED = 1_000_000_000_000_000_000n;
+  const FRESH_HEAD = [{ cacheTime: 0 }];
+  const swapRequest = () =>
+    quoteRequest({ fromAssetId: 'ethereum:usds', amount: amount(REQUIRED) });
+
+  afterEach(() => vi.useRealTimers());
+
+  it('requests an uncached head for the initial quote and for a refresh', async () => {
+    const approvalQuote = quoteWithApproval();
+    const transport = fetchSequence({ body: approvalQuote });
+    const rpc = publicClient(REQUIRED, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const initial = await client.getSwapQuote(swapRequest());
+    if (initial.isErr()) throw initial.error;
+    const refreshed = await client.refreshSwapQuote(initial.value.quote.refreshContext);
+
+    expect(refreshed.isOk()).toBe(true);
+    expect(rpc.getBlockNumber.mock.calls).toEqual([FRESH_HEAD, FRESH_HEAD]);
+  });
+
+  it('sends one approval when the cached head predates the approval', async () => {
+    const approvalQuote = quoteWithApproval();
+    const transport = fetchSequence({ body: approvalQuote });
+    const CACHED_HEAD = 100n;
+    let head = CACHED_HEAD;
+    let approvedAt: bigint | undefined;
+    // Models viem: the head is served from a cache unless the caller opts out with cacheTime 0.
+    const rpc = rpcClient({
+      getBlockNumber: async (args) => (args?.cacheTime === 0 ? head : CACHED_HEAD),
+      readContract: async ({ blockNumber }) =>
+        approvedAt !== undefined && blockNumber !== undefined && blockNumber >= approvedAt
+          ? REQUIRED
+          : 0n,
+    });
+    // The receipt carries no block number, so only the uncached head keeps the read fresh.
+    const wallet = confirmingWallet({
+      onConfirm: () => {
+        head += 1n;
+        approvedAt ??= head;
+      },
+    });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), wallet.handler);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.approvalResults).toHaveLength(1);
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([100n, 101n]);
+  });
+
+  it('never reads the allowance below the block of the confirmed approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    // The RPC head stays behind the approval for as long as the SDK waits.
+    const rpc = rpcClient({
+      getBlockNumber: async () => 150n,
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 200n ? REQUIRED : 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), wallet.handler));
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.approvalResults).toHaveLength(1);
+      expect(result.value.executionResult.transactions[0]?.operation).toBe('SWAP_EXACT_IN');
+    }
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 200n]);
+    expect(rpc.readContract).toHaveBeenLastCalledWith(
+      expect.objectContaining({ functionName: 'allowance', blockNumber: 200n }),
+    );
+    // One head request for the initial quote, then one plus four bounded re-polls.
+    expect(rpc.getBlockNumber.mock.calls).toEqual(Array.from({ length: 6 }, () => FRESH_HEAD));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reads at the head once a lagging RPC catches up with the approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    const heads = [150n, 150n, 199n, 203n];
+    let headIndex = 0;
+    const rpc = rpcClient({
+      getBlockNumber: async () => {
+        const head = heads[Math.min(headIndex, heads.length - 1)]!;
+        headIndex += 1;
+        return head;
+      },
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 200n ? REQUIRED : 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), wallet.handler));
+
+    expect(result.isOk()).toBe(true);
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 203n]);
+    expect(rpc.getBlockNumber).toHaveBeenCalledTimes(4);
+  });
+
+  it('reads at the fresh head without waiting when the receipt has no block number', async () => {
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    let head = 150n;
+    const rpc = rpcClient({
+      getBlockNumber: async () => head,
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 151n ? REQUIRED : 0n,
+    });
+    const wallet = confirmingWallet({
+      onConfirm: () => {
+        head = 151n;
+      },
+    });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), wallet.handler);
+
+    expect(result.isOk()).toBe(true);
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 151n]);
+    expect(rpc.getBlockNumber.mock.calls).toEqual([FRESH_HEAD, FRESH_HEAD]);
+  });
+
+  it('ignores a wallet result that reports no usable receipt block', async () => {
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    const rpc = publicClient([0n, REQUIRED], 1);
+    const wallet = executionHandler();
+    // A handler is caller code and may return less than its declared result.
+    const handler: ExecutionPlanHandler = (plan) =>
+      wallet.handler(plan).map(({ planId, txHash }) => ({ planId, txHash }) as never);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), handler);
+
+    expect(result.isOk()).toBe(true);
+    expect(wallet.calls).toHaveLength(2);
+    expect(rpc.getBlockNumber).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed when the RPC cannot serve the block of the confirmed approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    const rpc = rpcClient({
+      getBlockNumber: async () => 150n,
+      readContract: async ({ blockNumber }) => {
+        if (blockNumber === 200n) throw new Error('header not found');
+        return 0n;
+      },
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), wallet.handler));
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(RpcError);
+      if (result.error instanceof RpcError) {
+        expect(result.error.operation).toBe('readContract');
+        expect(result.error.functionName).toBe('allowance');
+        expect(result.error.chainId).toBe(1);
+      }
+    }
+    // The approval is not requested again and nothing is executed.
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 200n]);
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  it('cancels while waiting for a lagging RPC to reach the approval block', async () => {
+    const controller = new AbortController();
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    let headRequests = 0;
+    const rpc = rpcClient({
+      getBlockNumber: async () => {
+        headRequests += 1;
+        // The second head request is the first one after the approval; the SDK then waits
+        // before asking again, and the caller aborts during that wait.
+        if (headRequests === 2) setTimeout(() => controller.abort('stop waiting'), 5);
+        return 150n;
+      },
+      readContract: async () => 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), wallet.handler, {
+      signal: controller.signal,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('CANCELLED');
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20']]);
+    expect(rpc.getBlockNumber).toHaveBeenCalledTimes(2);
+    expect(rpc.readContract).toHaveBeenCalledTimes(1);
   });
 });
 

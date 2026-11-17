@@ -286,6 +286,23 @@ describe('approval policy', () => {
     }
   });
 
+  it('decides the approval at an uncached head', async () => {
+    const { client, publicClient } = setup(8453, 0n);
+
+    const result = await prepareSwap(client, {
+      mode: 'exact-in',
+      chainId: 8453,
+      account: ACCOUNT,
+      amountIn: amount('USDC'),
+      assetOut: 'USDS',
+      referral: false,
+    });
+
+    expect(result.isOk()).toBe(true);
+    // A cached head can predate an approval the caller has just confirmed.
+    expect(publicClient.getBlockNumber.mock.calls).toEqual([[{ cacheTime: 0 }]]);
+  });
+
   it('requires explicit max policy and never defaults to unlimited approval', async () => {
     const { client } = setup(8453, 0n);
     const result = await prepareSwap(client, {
