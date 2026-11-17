@@ -28,11 +28,16 @@ pnpm add @privy-io/node
 
 Requirements:
 
-- Node.js 20 or newer
 - ESM
 - viem `>=2.28.0 <3`
 - ethers v6 for `@osero/client/ethers`
 - `@privy-io/node` v0.19 for `@osero/client/privy`
+
+Supported runtimes:
+
+- **Node.js 20 or newer** for every entrypoint.
+- **Modern browsers** that provide ES modules, `BigInt`, and a global `fetch`, for `@osero/client`, `/actions`, `/api`, `/contracts`, `/viem`, `/eip5792`, and `/ethers`. The SDK's own source imports no Node.js built-in module.
+- `@osero/client/privy` wraps the server-side `@privy-io/node` SDK and is supported on Node.js only.
 
 ## Public entrypoints
 
@@ -187,13 +192,15 @@ The chain capability matrix determines which pair/mode combinations are deployed
 
 ## Approval policy
 
-`prepareSwap` and hosted quote preparation accept:
+`prepareSwap` accepts an `approvalPolicy`:
 
 - `exact` (default): add an approval only when current allowance is insufficient; approve the required amount
 - `max`: explicit opt-in to `uint256.max` approval
 - `none`: never add an approval; insufficient allowance returns `InsufficientAllowanceError`
 
 Allowance observations, block number, required amount, policy, and selected approval amount are recorded in plan metadata. They are evidence from preparation time, not a guarantee that execution cannot race or revert.
+
+Hosted quotes take no approval policy. An Approval Step is authored by the API as an exact approval of the returned spender for the returned amount. The SDK verifies that its calldata is exactly `approve(spender, requiredAmount)` and includes it in the Wallet Execution Plan only when the current allowance is insufficient.
 
 ## Execute with viem
 
@@ -230,6 +237,8 @@ Before transaction 1, every adapter validates the complete plan, connected accou
 
 The viem and ethers executors perform a fresh gas estimate and apply a bounded buffer. Hosted/local `estimatedGas` remains advisory and never becomes an automatic hard gas limit.
 
+Gas buffers, confirmation and timeout defaults, replacement handling, and the error each stage returns differ slightly between adapters. They are specified in the [adapter behaviour contract](../../docs/osero-sdk/adapters.md). Two defaults to know: the ethers adapter waits for a receipt without a timeout unless you pass `confirmationTimeoutMs`, and a transaction that was cancelled or replaced by a different transaction fails the step in every adapter.
+
 ## Execute with ethers
 
 ```ts
@@ -241,7 +250,7 @@ const result = await sendWith(signer, prepared.value.plan, {
 });
 ```
 
-The signer must already be attached to the plan chain. The adapter does not switch networks. Repriced replacement transactions preserve both the submitted hash and effective replacement hash in `ConfirmedTransaction`.
+The signer must already be attached to the plan chain. The adapter does not switch networks. Repriced replacement transactions preserve both the submitted hash and effective replacement hash in `ConfirmedTransaction`; a cancelled or otherwise replaced transaction returns `ConfirmationError` at stage `replacement`.
 
 ## Execute with Privy
 
@@ -272,7 +281,7 @@ A confirmation failure includes:
 - submitted transaction hash when one exists
 - the ordered confirmed prefix
 
-Persist plans and resume state with canonical serializers:
+Persist plans with the canonical serializers. Resume state has no serializer yet: it is a plain `ExecutionResumeState` (`{ planId, confirmed }`) that the application assembles and stores itself, using an encoding that preserves `bigint` fields. Build `confirmed` from the `transaction` carried by each `step-confirmed` progress event; the `completed` list on an execution error identifies the confirmed steps but does not carry their receipts.
 
 ```ts
 import {
@@ -453,7 +462,7 @@ const usdc = await getTokenBalance(client, {
 const apy = await getSUsdsApy(client, { chainId: 8453 });
 ```
 
-`multicall: 'prefer'` falls back to isolated reads only when the aggregate call itself cannot execute. Per-contract failures retain token and operation context. `ssrToApy` uses stable log-domain compounding and returns a validation `Result` for invalid or numerically unrepresentable rates.
+`multicall: 'prefer'` falls back to isolated reads only when the aggregate call itself cannot execute. `getTokenBalances` is all-or-nothing: if any one of the three token reads fails, the whole call returns that `RpcError` and no partial balances. Per-contract failures retain token and operation context. `ssrToApy` uses stable log-domain compounding and returns a validation `Result` for invalid or numerically unrepresentable rates.
 
 ## Errors
 
@@ -491,7 +500,7 @@ if (result.isErr()) {
 | Base         |  8453 | Spark PSM3              |
 | Arbitrum One | 42161 | Spark PSM3              |
 
-Use `listChains()` and `CHAIN_CAPABILITIES`-backed discovery APIs rather than copying addresses. Raw ABIs and intentionally supported addresses are available through `@osero/client/contracts`.
+Use `listChains()`, `getChain()`, `listTokens()`, and `getToken()` rather than copying addresses. Raw ABIs and intentionally supported addresses are available through `@osero/client/contracts`.
 
 ## Telemetry
 

@@ -206,7 +206,7 @@ Update exhaustive `OperationType` switches too. V1 adds `SWAP_EXACT_IN`, `SWAP_E
 
 ### Persistence and recovery
 
-Use canonical serializers instead of raw `JSON.stringify` so bigint and checksum validation remain correct:
+Use the canonical plan serializers instead of raw `JSON.stringify` so bigint and checksum validation remain correct:
 
 ```ts
 import {
@@ -226,6 +226,8 @@ if (resumed.isErr()) throw resumed.error;
 ```
 
 A confirmation failure carries the submitted hash and confirmed prefix. Persist that context before retrying. Adapters verify receipts for the prefix before skipping steps.
+
+Only plans have serializers. Resume state is a plain `ExecutionResumeState` that the application assembles from the `transaction` in each `step-confirmed` progress event and stores with an encoding that preserves `bigint` fields.
 
 ## Wallet adapters
 
@@ -334,6 +336,10 @@ if (result.isErr()) {
 ```
 
 Operational APIs remain non-throwing even when user callbacks or transport/provider methods throw. Static constructors can throw `ConfigurationError` for invalid configuration.
+
+Two 0.x exports have no 1.0 replacement. `InsufficientBalanceError` was removed because no SDK path ever produced it; the SDK does not preflight token balances. An underfunded swap is visible beforehand in the balance observations of `simulateExecutionPlan`, and otherwise surfaces from the executor, for example as `SimulationError` from the viem or ethers gas estimate. The aggregate `ActionError` type was removed with the pair-specific actions; use the union returned by the function you call, such as `PrepareSwapError`, `QuoteSwapError`, or `SendWithError`.
+
+Which error each adapter returns at each execution stage is specified in the [adapter behaviour contract](./adapters.md).
 
 ## Hosted API
 
@@ -732,5 +738,5 @@ Deep imports under `@osero/client/src/*` or `@osero/client/dist/lib/*` are not p
 - [ ] Recovery Actions are submitted through `prepareRecoveryExecutionPlan()` with an explicit submitter, and only from an `action-required` recovery.
 - [ ] Status polling resumes after a Recovery Action is submitted.
 - [ ] Quote display does not subtract Provider Details fees from `quote.expectedOutput` again.
-- [ ] Persisted plans and resume state use canonical serializers.
+- [ ] Persisted plans use the canonical serializers, and persisted resume state keeps its `bigint` fields.
 - [ ] UI copy does not present independent simulation as guaranteed execution.
