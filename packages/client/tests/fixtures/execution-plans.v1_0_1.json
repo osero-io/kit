@@ -1,0 +1,22 @@
+{
+  "description": "Execution plans serialized by @osero/client 1.0.1 (origin/main @ 2392165). Frozen: do not regenerate.",
+  "generatedWith": {
+    "package": "@osero/client",
+    "version": "1.0.1",
+    "commit": "2392165"
+  },
+  "plans": [
+    {
+      "name": "v1-local-approval-and-swap",
+      "version": 1,
+      "id": "plan-bc1bce0078990d2224432be27e7e9637348c7701bcf01aa6d6e21b679ef00ef3",
+      "serialized": "{\"__typename\":\"ExecutionPlan\",\"id\":\"plan-bc1bce0078990d2224432be27e7e9637348c7701bcf01aa6d6e21b679ef00ef3\",\"steps\":[{\"__typename\":\"TransactionRequest\",\"id\":\"approve-input\",\"chainId\":8453,\"from\":\"0xABcdEFABcdEFabcdEfAbCdefabcdeFABcDEFabCD\",\"to\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"data\":\"0x095ea7b30000000000000000000000001601843c5e9bc251a3272907010afa41fa18347e0000000000000100000000000000000000000000000000000000000000003039\",\"value\":{\"$bigint\":\"0\"},\"operation\":\"APPROVE_ERC20\",\"authorization\":{\"kind\":\"erc20-approval\",\"token\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"owner\":\"0xABcdEFABcdEFabcdEfAbCdefabcdeFABcDEFabCD\",\"spender\":\"0x1601843c5E9bC251A3272907010AFa41Fa18347E\",\"amount\":{\"$bigint\":\"1606938044258990275541962092341162602522202993782792835313721\"}},\"estimatedGas\":{\"gas\":{\"$bigint\":\"55000\"},\"source\":\"local-simulation\",\"observedAtBlock\":{\"$bigint\":\"48589000\"}}},{\"__typename\":\"TransactionRequest\",\"id\":\"swap\",\"chainId\":8453,\"from\":\"0xABcdEFABcdEFabcdEfAbCdefabcdeFABcDEFabCD\",\"to\":\"0x1601843c5E9bC251A3272907010AFa41Fa18347E\",\"data\":\"0x1a019e37000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\"value\":{\"$bigint\":\"0\"},\"operation\":\"SWAP_EXACT_IN\",\"estimatedGas\":{\"gas\":{\"$bigint\":\"210000\"},\"source\":\"hosted-api\"}}],\"requirements\":{\"execution\":\"sequential\",\"authorization\":\"transactions\",\"sponsored\":false,\"chainTransitions\":false},\"metadata\":{\"source\":\"local\",\"allowanceSnapshots\":[{\"token\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"owner\":\"0xABcdEFABcdEFabcdEfAbCdefabcdeFABcDEFabCD\",\"spender\":\"0x1601843c5E9bC251A3272907010AFa41Fa18347E\",\"allowance\":{\"$bigint\":\"0\"},\"requiredAmount\":{\"$bigint\":\"1606938044258990275541962092341162602522202993782792835313721\"},\"approvalAmount\":{\"$bigint\":\"1606938044258990275541962092341162602522202993782792835313721\"},\"policy\":\"exact\",\"observedAtBlock\":{\"$bigint\":\"48589000\"}}]},\"version\":1}"
+    },
+    {
+      "name": "v2-hosted-with-quote-expiry",
+      "version": 2,
+      "id": "plan-dba92159f6fc34986a27e8116b27376e8b6c4e8c7ca7e8dcd2820fdd0b2a8864",
+      "serialized": "{\"__typename\":\"ExecutionPlan\",\"id\":\"plan-dba92159f6fc34986a27e8116b27376e8b6c4e8c7ca7e8dcd2820fdd0b2a8864\",\"steps\":[{\"__typename\":\"TransactionRequest\",\"id\":\"execute-swap\",\"chainId\":1,\"from\":\"0xABcdEFABcdEFabcdEfAbCdefabcdeFABcDEFabCD\",\"to\":\"0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD\",\"data\":\"0x1234abcd\",\"value\":{\"$bigint\":\"1000000000000000000\"},\"operation\":\"SWAP_EXACT_IN\",\"estimatedGas\":{\"gas\":{\"$bigint\":\"250000\"},\"source\":\"hosted-api\"}}],\"requirements\":{\"execution\":\"sequential\",\"authorization\":\"transactions\",\"sponsored\":false,\"chainTransitions\":false},\"metadata\":{\"source\":\"hosted-api\",\"quoteId\":\"quote-frozen-fixture\"},\"version\":2,\"quoteExpiresAt\":\"2030-01-01T00:01:00.000Z\"}"
+    }
+  ]
+}

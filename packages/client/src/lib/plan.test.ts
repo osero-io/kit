@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import {
   decodeFunctionData,
   encodeFunctionData,
@@ -18,6 +20,7 @@ import {
   serializeExecutionPlan,
 } from './plan.js';
 import type { ConfirmedTransaction, ExecutionPlan, TransactionRequest } from './types.js';
+import { computeExecutionPlanId, validateExecutionPlan } from './validation.js';
 
 const ACCOUNT_LOWER = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as const;
 const ACCOUNT = getAddress(ACCOUNT_LOWER);
@@ -485,4 +488,64 @@ describe('canonical persistence and recovery', () => {
     }
     expect(skippedSecond.isErr()).toBe(true);
   });
+});
+
+/**
+ * Plans serialized by the published 1.0.1 build (origin/main @ 2392165). The
+ * file is generated once from that build and must never be regenerated: it
+ * proves that plans persisted by an earlier release keep deserializing,
+ * validating, and hashing to the same identity.
+ */
+const FROZEN_PLANS = JSON.parse(
+  readFileSync(
+    new URL('../../tests/fixtures/execution-plans.v1_0_1.json', import.meta.url),
+    'utf8',
+  ),
+) as {
+  readonly plans: readonly {
+    readonly name: string;
+    readonly version: 1 | 2;
+    readonly id: string;
+    readonly serialized: string;
+  }[];
+};
+
+describe('plan identity frozen at 1.0.1', () => {
+  it('covers one version 1 plan and one version 2 plan with quote expiry', () => {
+    expect(FROZEN_PLANS.plans.map((plan) => plan.version)).toEqual([1, 2]);
+    expect(FROZEN_PLANS.plans[1]?.serialized).toContain('"quoteExpiresAt"');
+  });
+
+  it.each(FROZEN_PLANS.plans)(
+    'deserializes, validates, and re-identifies the $name plan identically',
+    ({ id, serialized, version }) => {
+      const restored = deserializeExecutionPlan(serialized);
+
+      expect(restored.isOk()).toBe(true);
+      if (restored.isErr()) return;
+      const plan = restored.value;
+      expect(plan.version).toBe(version);
+      expect(plan.id).toBe(id);
+      expect(computeExecutionPlanId(plan.steps, plan.requirements, plan.quoteExpiresAt)).toBe(id);
+      expect(validateExecutionPlan(plan).isOk()).toBe(true);
+
+      // Rebuilding the plan from its parts through the public constructor yields the same identity.
+      const rebuilt = createExecutionPlan({
+        steps: plan.steps,
+        requirements: plan.requirements,
+        metadata: plan.metadata,
+        ...(plan.quoteExpiresAt === undefined ? {} : { quoteExpiresAt: plan.quoteExpiresAt }),
+      });
+      expect(rebuilt.isOk()).toBe(true);
+      if (rebuilt.isOk()) {
+        expect(rebuilt.value.id).toBe(id);
+        expect(rebuilt.value.version).toBe(version);
+      }
+
+      // The serialization format itself is byte-stable.
+      const reserialized = serializeExecutionPlan(plan);
+      expect(reserialized.isOk()).toBe(true);
+      if (reserialized.isOk()) expect(reserialized.value).toBe(serialized);
+    },
+  );
 });
