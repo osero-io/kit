@@ -77,10 +77,10 @@ submitted. The message is `Transaction <hash> was <reason> and cannot be treated
 
 - **viem and Privy** observe viem's `onReplaced` callback. viem calls it only when one confirmation
   is requested; with more, it returns the replacement's receipt without naming a reason. In that
-  case the adapter reads the confirmed transaction once (`eth_getTransactionByHash`) and compares it
-  with what it submitted. The same sender, target, calldata, and value under another hash is a
-  repricing. Anything else, including a failed read, fails closed as `cancelled` or `replaced`. The
-  extra read happens only when the confirmed hash differs from the submitted one.
+  case the adapter compares the transaction viem found in the mined block with what it submitted.
+  The same sender, target, calldata, and value under another hash is a repricing. Anything else,
+  including a replacement the adapter could not observe, fails closed as `cancelled` or `replaced`.
+  The comparison uses the block viem already read for the wait, so it adds no RPC request.
 - **ethers** reads the `TRANSACTION_REPLACED` error. A replacement flagged `cancelled`, or with any
   reason other than `repriced`, fails.
 - **EIP-5792** applies the rule to the extra-confirmation wait (`confirmations` greater than `1`).
@@ -117,16 +117,22 @@ The Privy adapter binds to `wallet.address` and the required `chainId` option.
 
 ### Per step
 
-| Stage          | viem                                                                                                       | ethers                                                                                                                                            | Privy                                                 |
-| -------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `simulation`   | Estimate failed: `SimulationError`                                                                         | Estimate failed: `SimulationError`                                                                                                                | Not performed                                         |
-| `signing`      | User rejection: `CancelError`. Any send error viem does not classify as an execution error: `SigningError` | `ACTION_REJECTED`: `CancelError`. Any send error not listed under broadcast: `SigningError`                                                       | Caller abort (`APIUserAbortError`): `CancelError`     |
-| `broadcast`    | viem `TransactionExecutionError` that is not a user rejection: `BroadcastError`                            | `INSUFFICIENT_FUNDS`, `NONCE_EXPIRED`, `REPLACEMENT_UNDERPRICED`, `NETWORK_ERROR`, `SERVER_ERROR`, or a malformed returned hash: `BroadcastError` | **Every other Wallet API error: `BroadcastError`**    |
-| `confirmation` | Receipt wait failed or timed out: `ConfirmationError`                                                      | Receipt wait failed, timed out, or returned no receipt: `ConfirmationError`                                                                       | Receipt wait failed or timed out: `ConfirmationError` |
-| `replacement`  | Not repriced: `ConfirmationError`                                                                          | Not repriced: `ConfirmationError`                                                                                                                 | Not repriced: `ConfirmationError`                     |
-| `revert`       | Receipt status `reverted`: `TransactionError`                                                              | Receipt status `0`: `TransactionError`                                                                                                            | Receipt status `reverted`: `TransactionError`         |
+| Stage          | viem                                                                                                       | ethers                                                                                                                                               | Privy                                                 |
+| -------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `simulation`   | Estimate failed: `SimulationError`                                                                         | Estimate failed: `SimulationError`                                                                                                                   | Not performed                                         |
+| `signing`      | User rejection: `CancelError`. Any send error viem does not classify as an execution error: `SigningError` | `ACTION_REJECTED`: `CancelError`. Any send error not listed under broadcast: `SigningError`                                                          | Caller abort (`APIUserAbortError`): `CancelError`     |
+| `broadcast`    | viem `TransactionExecutionError` that is not a user rejection: `BroadcastError`                            | `INSUFFICIENT_FUNDS`, `NONCE_EXPIRED`, `REPLACEMENT_UNDERPRICED`, `NETWORK_ERROR`, `SERVER_ERROR`, or a malformed returned hash: `BroadcastError`    | **Every other Wallet API error: `BroadcastError`**    |
+| `confirmation` | Receipt wait failed or timed out: `ConfirmationError`                                                      | Receipt wait failed, timed out, returned no receipt, or returned a reverted receipt: `ConfirmationError`                                             | Receipt wait failed or timed out: `ConfirmationError` |
+| `replacement`  | Not repriced: `ConfirmationError`                                                                          | Not repriced: `ConfirmationError`                                                                                                                    | Not repriced: `ConfirmationError`                     |
+| `revert`       | Receipt status `reverted`: `TransactionError`                                                              | Only a repriced replacement whose receipt has status `0`: `TransactionError`. An ordinary reverted receipt is reported at `confirmation` (see below) | Receipt status `reverted`: `TransactionError`         |
 
-Two mappings are worth knowing when you branch on `code`:
+Three mappings are worth knowing when you branch on `code`:
+
+- In ethers, a reverted transaction is normally `ConfirmationError` (`CONFIRMATION_FAILED`), not
+  `TransactionError`. ethers v6 `wait()` throws `CALL_EXCEPTION` for a receipt with status `0`, and
+  the adapter reports every `wait()` failure other than a replacement at stage `confirmation`. The
+  error carries the transaction hash and the ethers error, whose `receipt` shows the revert, as
+  `cause`. viem, Privy, and EIP-5792 report a revert as `TransactionError`.
 
 - In viem and ethers, a send failure the adapter cannot recognise is reported as `SigningError`
   (`SIGNING_FAILED`), not `BroadcastError`. Do not read `SIGNING_FAILED` as proof that nothing
@@ -138,23 +144,24 @@ Two mappings are worth knowing when you branch on `code`:
 
 ### EIP-5792 atomic batch
 
-| Stage          | Condition                                                                                                      | Error                                           |
-| -------------- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| preflight      | Wallet cannot batch atomically and fallback is disabled or the plan requires `atomic-batch`                    | `UnsupportedCapabilityError`                    |
-| `signing`      | `wallet_sendCalls` rejected with code `4001` (user rejection) or `5750` (upgrade declined)                     | `CancelError`                                   |
-| `signing`      | `wallet_sendCalls` rejected with code `4100` (unauthorized)                                                    | `SigningError`                                  |
-| `broadcast`    | Any other `wallet_sendCalls` failure, or a response without a usable batch ID                                  | `BroadcastError`                                |
-| `confirmation` | The status wait failed or timed out                                                                            | `ConfirmationError`, message names the batch ID |
-| `confirmation` | The wallet returned a malformed status, a failure without a receipt, or a status that is not an atomic success | `ConfirmationError`, message names the batch ID |
-| `revert`       | Status `500` or `600` with a receipt                                                                           | `TransactionError` with that transaction hash   |
-| `replacement`  | During the extra-confirmation wait, the batch transaction was cancelled or replaced                            | `ConfirmationError`                             |
+| Stage          | Condition                                                                                                                                                                                                                                      | Error                                           |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| preflight      | Wallet cannot batch atomically and fallback is disabled or the plan requires `atomic-batch`                                                                                                                                                    | `UnsupportedCapabilityError`                    |
+| `signing`      | `wallet_sendCalls` rejected with code `4001` (user rejection) or `5750` (upgrade declined)                                                                                                                                                     | `CancelError`                                   |
+| `signing`      | `wallet_sendCalls` rejected with code `4100` (unauthorized)                                                                                                                                                                                    | `SigningError`                                  |
+| `broadcast`    | Any other `wallet_sendCalls` failure, or a response without a usable batch ID                                                                                                                                                                  | `BroadcastError`                                |
+| `confirmation` | The status wait failed or timed out                                                                                                                                                                                                            | `ConfirmationError`, message names the batch ID |
+| `confirmation` | The wallet returned a malformed status, a failure without a receipt, or a partial revert (status `600`, or a `500` that disclaims atomicity or carries a successful receipt), an unreadable receipt, or a status that is not an atomic success | `ConfirmationError`, message names the batch ID |
+| `revert`       | Status `500` (complete revert) with a receipt, atomicity not disclaimed, and no successful receipt                                                                                                                                             | `TransactionError` with that transaction hash   |
+| `replacement`  | During the extra-confirmation wait, the batch transaction was cancelled or replaced                                                                                                                                                            | `ConfirmationError`                             |
 
 `wallet_sendCalls` code `5760` (atomicity not supported) is not an error by itself: the adapter falls
 back to sequential viem execution unless fallback is disabled.
 
 For every batch failure after submission, `execution.completed` lists the steps that were confirmed
-before the batch (a resumed prefix), never the batched steps themselves. An atomic batch either
-confirms every pending step or none.
+before the batch (a resumed prefix), never the batched steps themselves. The adapter asks the wallet
+for atomic execution and accepts only an atomic success. If a wallet nevertheless reports a partial
+revert, the outcome is unknown rather than reverted: some calls may be on chain.
 
 When a progress callback throws during an atomic batch, the batch is still confirmed and the
 returned `ProgressCallbackError` lists every batched step in `execution.completed`, whichever event
@@ -197,14 +204,14 @@ from its errors.
 Resuming sends the failed step again, so the helper returns state only when the failure proves that
 step did not take effect. By stage:
 
-| Stage of the failure                       | Derived by default | Why                                                                  |
-| ------------------------------------------ | ------------------ | -------------------------------------------------------------------- |
-| `preflight`, `simulation`                  | Yes                | The step was never sent.                                             |
-| `signing` with `CancelError`               | Yes                | The user rejected it.                                                |
-| `revert`                                   | Yes                | The step was mined and reverted. An atomic batch reverts whole.      |
-| `progress`                                 | Yes                | The step is either unsent or listed as completed.                    |
-| `signing` with any other error             | No                 | An unrecognised send error does not prove nothing was sent.          |
-| `broadcast`, `confirmation`, `replacement` | No                 | A transaction or batch may be in flight or mined under another hash. |
+| Stage of the failure                        | Derived by default | Why                                                                                                                 |
+| ------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `preflight`, `simulation`                   | Yes                | The step was never sent.                                                                                            |
+| `signing` with an explicit wallet rejection | Yes                | The wallet refused the request: EIP-1193 code `4001`, EIP-5792 code `5750`, or ethers `ACTION_REJECTED`.            |
+| `revert`                                    | Yes                | The step was mined and reverted. A batch is reported as reverted only when it reverted as a whole.                  |
+| `progress`                                  | Yes                | The step is either unsent or listed as completed.                                                                   |
+| `signing` with any other error              | No                 | An unrecognised send error, or a cancellation that is a client-side abort (Privy), does not prove nothing was sent. |
+| `broadcast`, `confirmation`, `replacement`  | No                 | A transaction or batch may be in flight or mined under another hash.                                                |
 
 For the "No" rows the helper returns a `ValidationError` whose `details` carry the `stage` and any
 `hash` or `batchId`. After checking that the step did not execute, pass

@@ -459,7 +459,7 @@ The locator is encoded as `"<chainId>:<lowercase-address>"`. The hosted API—no
 
 Previously local policy failures now come from the server as `ApiRequestError` with `code === 'API_REQUEST_FAILED'` and, when supplied, a stable `apiCode` such as `SWAP_ASSET_NOT_SUPPORTED`, `SWAP_PAIR_NOT_SUPPORTED`, `SLIPPAGE_INVALID`, or `SLIPPAGE_OUT_OF_RANGE`.
 
-Responses accept unknown future assets, chains, protocols, and Quote Providers. Keep a default branch when displaying these open vocabularies. Fields required for transaction safety and normalized Transfer Status states remain strict.
+Responses accept unknown future assets, chains, protocols, and Quote Providers. Keep a default branch when displaying these open vocabularies. Fields required for transaction safety remain strict. A normalized Transfer Status state the installed release does not know is decoded as `unknown`.
 
 ### Replace old quote field access
 

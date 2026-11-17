@@ -1168,6 +1168,7 @@ These are known and are not open findings.
 - **Top-level `null` arguments (F01).** The Result contract covers malformed values inside a well-typed call. Passing `null` or a non-object where TypeScript requires an object can still throw `TypeError` from: `sendWith` in the viem, ethers, and Privy adapters when the wallet client, signer, or Privy wallet is `null`; `simulateExecutionPlan` when the plan is `null` or has no `steps` array; `getTokenBalance`, `getTokenBalances`, and `getSsr` when the request is `null`; and `OseroApiClient.refreshSwapQuote`, `getSwapStatusForQuote`, and `waitForSwapCompletion` when the Refresh Context, quote, or options object is `null`.
 - **Lite PSM fee rounding (mainnet USDC to USDS and USDC to sUSDS).** The Lite PSM `tin` fee is 0 today, and the quote is exact. With a nonzero `tin` the SDK quote can be 1 wei of USDS lower than the amount the contract delivers. If the Lite PSM is halted (`tin` set to the maximum `uint256`), `quoteSwap` and `prepareSwap` do not report the halt: they return a nonsensical expected amount, and the prepared swap transaction reverts on chain. `simulateExecutionPlan` reports the failing step, and the viem and ethers adapters' gas estimate stops the swap step before it is broadcast, but an approval step ahead of it may already have been sent.
 - **Replacement detection scope (F04, F16).** Replacement is detected by the adapter's receipt wait. For Privy it covers only a response that carries a standard transaction hash. For EIP-5792 it covers the extra-confirmation wait, where any change of the batch transaction's hash fails because a wallet-built transaction cannot be compared with what was submitted; replacement of a batch before the wallet reports a terminal status is not observable.
+- **ethers reports a reverted transaction as a confirmation failure (F05, F16).** ethers v6 `wait()` throws for a reverted receipt, and the ethers adapter reports that as `ConfirmationError` at stage `confirmation` with the hash, not as `TransactionError`. This is the 1.0 behaviour, documented in `docs/osero-sdk/adapters.md`. The viem, Privy, and EIP-5792 adapters report `TransactionError`.
 - **EIP-5792 `step-submitted` needs a transaction hash.** A batch ID is not a transaction hash, so a batch whose status wait times out has emitted `step-started` but no `step-submitted`. The batch ID is in the error message and, from 1.1.0, in `execution.batchId`.
 
 ### Server-side dependencies
@@ -1183,7 +1184,7 @@ These would change public API or established behaviour and are intentionally not
 
 - renaming `PlanSimulation.feeData.gasPrice`, which holds the EIP-1559 fee cap when one exists;
 - giving the ethers adapter a default receipt timeout;
-- reclassifying the viem, ethers, and Privy send-error mappings described under F16;
+- reclassifying the viem, ethers, and Privy send-error mappings described under F16, and reporting an ethers revert as `TransactionError`;
 - widening any exported union, including `OseroApiTransferState`, the error unions, `OseroErrorCode`, and `ExecutionStage`;
 - changing the signature of `waitForSwapCompletion`;
 - removing local routes whose PSM3 pool holds no USDS on a given chain.

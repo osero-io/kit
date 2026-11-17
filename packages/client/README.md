@@ -340,8 +340,8 @@ if (restoredPlan.isOk() && restoredResume.isOk()) {
 
 Resuming sends every step after the confirmed prefix, starting with the step that failed. `executionResumeStateFromError` therefore refuses to return state that could send a step twice:
 
-- **The failed step provably did not take effect**: it was never sent (preflight, a failed gas estimate, a user rejection), or it was mined and reverted. Resume state is returned.
-- **The failed step may already have been submitted**: a receipt wait timed out, a broadcast failed ambiguously, the transaction was replaced, a resume proof could not be verified, or an EIP-5792 batch status never arrived. A `ValidationError` is returned, and its `details` carry the `stage` and any `hash` or `batchId`. Check that transaction or batch first. If it did not execute, pass `{ unresolvedStep: 'assume-not-executed' }` to get the confirmed prefix. If it did execute, do not resume from the prefix: that would execute the step again.
+- **The failed step provably did not take effect**: it was never sent (preflight, a failed gas estimate, an explicit wallet rejection), or it was mined and reverted. Resume state is returned.
+- **The failed step may already have been submitted**: a receipt wait timed out, a broadcast failed ambiguously, the transaction was replaced, a resume proof could not be verified, an EIP-5792 batch status never arrived, or a Privy request was aborted. With the ethers adapter this also covers a reverted transaction, which ethers reports as a confirmation failure. A `ValidationError` is returned, and its `details` carry the `stage` and any `hash` or `batchId`. Check that transaction or batch first. If it did not execute, pass `{ unresolvedStep: 'assume-not-executed' }` to get the confirmed prefix. If it did execute, do not resume from the prefix: that would execute the step again.
 - **The error cannot be trusted as evidence**: it carries no execution context, belongs to another plan, or lists a completed step without its confirmation, as an error from a custom executor might. A `ValidationError` is returned.
 
 `deserializeExecutionResumeState` validates the shape of the state; whether it matches a plan is checked when it is used. Adapters re-fetch receipts for a supplied confirmed prefix before skipping it. Resume state must match the plan ID, step order, operation, and hashes exactly. `resumeExecutionPlan(plan, state)` performs the same match without a wallet and returns the pending steps.
@@ -400,7 +400,7 @@ const quote = await api.getSwapQuote({
 });
 ```
 
-Hosted decoding accepts future asset, protocol, and Quote Provider vocabulary, but executable fields and normalized Transfer Status states are strict. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
+Hosted decoding accepts future asset, protocol, and Quote Provider vocabulary, but executable fields are strict. A normalized Transfer Status state this release does not know is decoded as `unknown`, and `waitForSwapCompletion` keeps polling on it. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
 
 Every normalized quote includes an API Execution Plan for inspection and diagnostics. Do not pass `workflow.quote.executionPlan` to a wallet adapter: its later actions become stale after any Approval Step. The discriminated Hosted Swap Workflow exposes only the currently safe Wallet Execution Plan:
 
