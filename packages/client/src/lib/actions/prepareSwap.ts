@@ -21,7 +21,7 @@ import {
   type InsufficientAllowanceError,
 } from '../errors.js';
 import { USDC_TO_USDS_SCALE } from '../math.js';
-import type { OseroClient } from '../OseroClient.js';
+import type { OseroClient, OseroPublicClient } from '../OseroClient.js';
 import { createExecutionPlan, createTransactionRequest } from '../plan.js';
 import { referralCodeForRoute, resolveReferral } from '../referrals.js';
 import { err, errAsync, ok, ResultAsync, type Result } from '../result.js';
@@ -57,6 +57,21 @@ export type PrepareSwapBaseRequest = {
    * then sizes the USDS approval and deposit as the 1:1 scaled USDC amount.
    */
   readonly execution?: ExecutorRequirements['execution'];
+  /**
+   * Opt in to advisory local gas estimates on the plan. Defaults to `'none'`,
+   * which makes no extra RPC call.
+   *
+   * `'independent-steps'` estimates, at the quote block, only the steps that do
+   * not depend on an earlier step of the same plan. In a sequential plan that is
+   * the first step: a swap that follows an approval cannot be estimated until the
+   * approval has executed. The estimate is attached as
+   * `estimatedGas: { gas, source: 'local-simulation', observedAtBlock }`.
+   *
+   * A failed estimate omits the field and never fails `prepareSwap`. Estimates
+   * are advisory metadata: they are not part of the plan id and adapters never
+   * use them as a gas limit.
+   */
+  readonly gasEstimates?: 'none' | 'independent-steps';
 };
 
 export type ExactInSwapRequest<
@@ -121,10 +136,19 @@ export function prepareSwap(
     const evaluation = await evaluateSwapQuote(publicClient.value, resolved.value, block.value);
     if (evaluation.isErr()) return err(evaluation.error);
 
-    if (resolved.value.protocol === 'psm3') {
-      return preparePsm3Swap(client, resolved.value, block.value, evaluation.value);
-    }
-    return prepareEthereumSwap(client, resolved.value, block.value, evaluation.value);
+    const prepared =
+      resolved.value.protocol === 'psm3'
+        ? await preparePsm3Swap(client, resolved.value, block.value, evaluation.value)
+        : await prepareEthereumSwap(client, resolved.value, block.value, evaluation.value);
+    if (prepared.isErr() || resolved.value.gasEstimates === 'none') return prepared;
+    return ok(
+      await withIndependentGasEstimates(
+        publicClient.value,
+        prepared.value,
+        resolved.value.account,
+        block.value,
+      ),
+    );
   };
 
   return observeResult(new ResultAsync(preparation()), {
@@ -140,7 +164,57 @@ type ResolvedRequest = ResolvedSwapQuoteRequest & {
   readonly referralCode: bigint;
   readonly approvalPolicy: ApprovalPolicy;
   readonly execution: ExecutorRequirements['execution'];
+  readonly gasEstimates: 'none' | 'independent-steps';
 };
+
+/**
+ * Attaches an advisory estimate to the steps that can be estimated on current
+ * chain state, which is only the first step: every later step of a sequential
+ * plan runs on state the earlier steps have not produced yet.
+ *
+ * This never fails preparation. Any estimation problem, or any doubt that the
+ * rebuilt plan is the same plan, returns the prepared quote untouched.
+ */
+async function withIndependentGasEstimates(
+  publicClient: OseroPublicClient,
+  prepared: PreparedSwapQuote,
+  account: Address,
+  blockNumber: bigint,
+): Promise<PreparedSwapQuote> {
+  const [first, ...rest] = prepared.plan.steps;
+  if (first === undefined || typeof publicClient.estimateGas !== 'function') return prepared;
+  let gas: unknown;
+  try {
+    gas = await publicClient.estimateGas({
+      account,
+      to: first.to,
+      data: first.data,
+      value: first.value,
+      blockNumber,
+    });
+  } catch {
+    return prepared;
+  }
+  if (typeof gas !== 'bigint' || gas <= 0n) return prepared;
+
+  const rebuilt = createExecutionPlan({
+    steps: [
+      {
+        ...first,
+        estimatedGas: { gas, source: 'local-simulation', observedAtBlock: blockNumber },
+      },
+      ...rest,
+    ],
+    requirements: prepared.plan.requirements,
+    metadata: prepared.plan.metadata,
+    ...(prepared.plan.quoteExpiresAt === undefined
+      ? {}
+      : { quoteExpiresAt: prepared.plan.quoteExpiresAt }),
+  });
+  // Advisory gas is not part of plan identity, so the id must be unchanged.
+  if (rebuilt.isErr() || rebuilt.value.id !== prepared.plan.id) return prepared;
+  return { ...prepared, plan: rebuilt.value };
+}
 
 function validateRequest(
   client: OseroClient,
@@ -179,6 +253,13 @@ function validateRequest(
     );
   }
 
+  const gasEstimates = request.gasEstimates ?? 'none';
+  if (gasEstimates !== 'none' && gasEstimates !== 'independent-steps') {
+    return err(
+      ValidationError.forField('gasEstimates', 'gasEstimates must be none or independent-steps'),
+    );
+  }
+
   if (quoted.value.slippageEnforcedBy === 'none' && request.allowUnprotectedSlippage !== true) {
     return err(
       ValidationError.forField(
@@ -196,6 +277,7 @@ function validateRequest(
     referralCode: referralCode.value,
     approvalPolicy,
     execution,
+    gasEstimates,
   });
 }
 
