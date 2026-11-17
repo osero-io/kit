@@ -145,6 +145,12 @@ function sendSingleTransaction(
         const { receipt, replacement } = await waitForViemReceipt(walletClient, {
           hash: submittedHash,
           confirmations: context.confirmations,
+          submitted: {
+            from: walletClient.account.address,
+            to: request.to,
+            data: request.data,
+            value: request.value,
+          },
           ...(options.confirmationTimeoutMs === undefined
             ? {}
             : { timeout: options.confirmationTimeoutMs }),
