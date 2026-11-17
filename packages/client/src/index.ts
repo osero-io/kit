@@ -85,6 +85,7 @@ export {
   resumeExecutionPlan,
   serializeExecutionPlan,
   serializeExecutionResumeState,
+  type ExecutionResumeFromErrorOptions,
   type TransactionRequestInput,
 } from './lib/plan.js';
 export type { Result, ResultAsync } from './lib/result.js';

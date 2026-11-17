@@ -11,8 +11,14 @@ import {
 import { erc20Abi } from './abis/erc20.js';
 import { toCompletedExecutionStep } from './adapters.js';
 import {
+  BroadcastError,
+  CancelError,
   ConfirmationError,
+  ProgressCallbackError,
   QuoteExpiredError,
+  SigningError,
+  SimulationError,
+  TransactionError,
   UnexpectedError,
   ValidationError,
   type ExecutionFailureContext,
@@ -671,13 +677,28 @@ function failureContextFor(
   };
 }
 
+const cancelledError = (context: ExecutionFailureContext) =>
+  CancelError.from(new Error('user rejected'), context);
+const signingError = (context: ExecutionFailureContext) =>
+  SigningError.from(new Error('wallet error'), context);
+const broadcastError = (context: ExecutionFailureContext) =>
+  BroadcastError.from(new Error('rpc timeout'), context);
+const confirmationError = (context: ExecutionFailureContext) =>
+  new ConfirmationError('receipt timeout', context);
+const simulationError = (context: ExecutionFailureContext) =>
+  SimulationError.from(new Error('estimate failed'), context);
+const revertedError = (context: ExecutionFailureContext) =>
+  new TransactionError('reverted', OTHER_HASH, context);
+const progressError = (context: ExecutionFailureContext) =>
+  ProgressCallbackError.from(new Error('callback failed'), context);
+
 describe('resume state from a failed execution', () => {
   it('derives state that resume accepts from a failure carrying confirmations', () => {
     const { plan, state } = twoStepPlanWithState();
-    const error = new ConfirmationError(
-      'receipt timeout',
-      failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
-    );
+    const error = new TransactionError('step two reverted', OTHER_HASH, {
+      ...failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
+      stage: 'revert',
+    });
 
     const derived = executionResumeStateFromError(plan, error);
 
@@ -687,9 +708,105 @@ describe('resume state from a failed execution', () => {
     expect(resumeExecutionPlan(plan, derived.value).isOk()).toBe(true);
   });
 
+  describe('when the failed step may already have been submitted', () => {
+    it.each([
+      ['a receipt wait that timed out', 'confirmation', confirmationError, { hash: OTHER_HASH }],
+      [
+        'an EIP-5792 batch whose status never arrived',
+        'confirmation',
+        confirmationError,
+        { batchId: 'batch-7' },
+      ],
+      ['a replaced transaction', 'replacement', confirmationError, { hash: OTHER_HASH }],
+      ['a broadcast that failed without a hash', 'broadcast', broadcastError, {}],
+      ['a signing failure that was not a user rejection', 'signing', signingError, {}],
+      ['a stage this SDK release does not know', 'future-stage', confirmationError, {}],
+    ] as const)('refuses %s by default and names what to check', (_name, stage, build, extra) => {
+      const { plan, state } = twoStepPlanWithState();
+      const context = {
+        ...failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
+        hash: undefined,
+        ...extra,
+        stage,
+      } as unknown as ExecutionFailureContext;
+      const error = build(context);
+
+      const refused = executionResumeStateFromError(plan, error);
+      const explicit = executionResumeStateFromError(plan, error, { unresolvedStep: 'reject' });
+      const acknowledged = executionResumeStateFromError(plan, error, {
+        unresolvedStep: 'assume-not-executed',
+      });
+
+      for (const result of [refused, explicit]) {
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error.field).toBe('error.execution.stage');
+          expect(result.error.details).toMatchObject({
+            stage,
+            stepId: 'two',
+            stepIndex: 1,
+            ...extra,
+          });
+          expect(result.error.message).toContain("unresolvedStep: 'assume-not-executed'");
+        }
+      }
+      // Acknowledging returns the confirmed prefix: resuming would send step two again.
+      expect(acknowledged.isOk()).toBe(true);
+      if (acknowledged.isOk()) expect(acknowledged.value).toEqual(state);
+    });
+
+    it.each([
+      ['a quote that expired before the step was sent', 'preflight', confirmationError],
+      ['a failed gas estimate', 'simulation', simulationError],
+      ['a user rejection', 'signing', cancelledError],
+      ['a mined transaction that reverted', 'revert', revertedError],
+      ['a progress callback that failed before submission', 'progress', progressError],
+    ] as const)('derives state without acknowledgement for %s', (_name, stage, build) => {
+      const { plan, state } = twoStepPlanWithState();
+      const error = build({
+        ...failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
+        stage,
+      });
+
+      const derived = executionResumeStateFromError(plan, error);
+
+      expect(derived.isOk()).toBe(true);
+      if (derived.isOk()) expect(derived.value).toEqual(state);
+    });
+
+    it('derives state when the failing step is itself among the completed steps', () => {
+      const { plan, state } = twoStepPlanWithState();
+      // A progress callback that failed after its step confirmed names that step.
+      const error = new ConfirmationError('reported after confirmation', {
+        ...failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
+        stepId: 'one',
+        stepIndex: 0,
+      });
+
+      expect(executionResumeStateFromError(plan, error).isOk()).toBe(true);
+    });
+
+    it.each([
+      ['a non-object', 'yes'],
+      ['null', null],
+      ['an unknown choice', { unresolvedStep: 'always' }],
+    ])('rejects %s as options', (_name, options) => {
+      const { plan } = twoStepPlanWithState();
+      const error = new ConfirmationError('receipt timeout', failureContextFor(plan, []));
+
+      const result = executionResumeStateFromError(plan, error, options as never);
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) expect(result.error.field).toMatch(/^options/);
+    });
+  });
+
   it('derives an empty prefix when the first step failed', () => {
     const { plan } = twoStepPlanWithState();
-    const error = new ConfirmationError('receipt timeout', failureContextFor(plan, []));
+    const error = SimulationError.from(new Error('estimate failed'), {
+      ...failureContextFor(plan, []),
+      stage: 'simulation',
+    });
 
     const derived = executionResumeStateFromError(plan, error);
 

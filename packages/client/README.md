@@ -324,6 +324,9 @@ if (result.isErr()) {
     const savedPlan = serializeExecutionPlan(plan);
     const savedResume = serializeExecutionResumeState(resume.value);
     // Store both strings. They are bigint-safe canonical JSON.
+  } else {
+    // Nothing is safe to resume automatically yet. For an unresolved step,
+    // resume.error.details names the stage and the hash or batch id to check.
   }
 }
 
@@ -335,11 +338,15 @@ if (restoredPlan.isOk() && restoredResume.isOk()) {
 }
 ```
 
-`executionResumeStateFromError` does not guess. It returns a `ValidationError` when the error carries no execution context, belongs to another plan, or lists a completed step without its confirmation, as an error from a custom executor might. `deserializeExecutionResumeState` validates the shape of the state; whether it matches a plan is checked when it is used.
+Resuming sends every step after the confirmed prefix, starting with the step that failed. `executionResumeStateFromError` therefore refuses to return state that could send a step twice:
 
-Adapters re-fetch receipts for a supplied confirmed prefix before skipping it. Resume state must match the plan ID, step order, operation, and hashes exactly. `resumeExecutionPlan(plan, state)` performs the same match without a wallet and returns the pending steps.
+- **The failed step provably did not take effect**: it was never sent (preflight, a failed gas estimate, a user rejection), or it was mined and reverted. Resume state is returned.
+- **The failed step may already have been submitted**: a receipt wait timed out, a broadcast failed ambiguously, the transaction was replaced, a resume proof could not be verified, or an EIP-5792 batch status never arrived. A `ValidationError` is returned, and its `details` carry the `stage` and any `hash` or `batchId`. Check that transaction or batch first. If it did not execute, pass `{ unresolvedStep: 'assume-not-executed' }` to get the confirmed prefix. If it did execute, do not resume from the prefix: that would execute the step again.
+- **The error cannot be trusted as evidence**: it carries no execution context, belongs to another plan, or lists a completed step without its confirmation, as an error from a custom executor might. A `ValidationError` is returned.
 
-An ambiguous failure is not a reason to resend. When a confirmation times out, check the hash on `error.execution.hash` (or, for an EIP-5792 batch, the wallet's status for `error.execution.batchId`) before deciding anything. A quote that expires partway through a plan returns `QuoteExpiredError` whose `execution.completed` lists the steps already confirmed.
+`deserializeExecutionResumeState` validates the shape of the state; whether it matches a plan is checked when it is used. Adapters re-fetch receipts for a supplied confirmed prefix before skipping it. Resume state must match the plan ID, step order, operation, and hashes exactly. `resumeExecutionPlan(plan, state)` performs the same match without a wallet and returns the pending steps.
+
+A quote that expires partway through a plan returns `QuoteExpiredError` whose `execution.completed` lists the steps already confirmed. `JSON.stringify(error.execution)` is safe for logging: bigint receipt fields are written as decimal strings.
 
 ## Honest simulation
 
@@ -574,7 +581,7 @@ for (const route of listSwapRoutes(1)) {
 }
 ```
 
-A mode whose `slippageProtection.enforcedBy` is `'none'` cannot enforce its quoted bound on chain, and `prepareSwap` requires `allowUnprotectedSlippage: true` for it. A mode whose `referral` is `'none'` rejects a referral code. The listing describes what is deployed, not current liquidity, and returns an empty list for a chain without local routes. Hosted API pairs are listed by `OseroApiClient.getSupportedAssets()` instead.
+A mode whose `slippageProtection.enforcedBy` is `'none'` cannot enforce its quoted bound on chain, and `prepareSwap` requires `allowUnprotectedSlippage: true` for it. A mode enforced by `'allowance'` is capped by an allowance of exactly the maximum input: with `approvalPolicy: 'exact'` the plan sets the allowance to that amount even when a larger one exists, `'none'` fails unless the allowance already equals it, and `'max'` is rejected. A mode whose `referral` is `'none'` rejects a referral code. The listing describes what is deployed, not current liquidity, and returns an empty list for a chain without local routes. Hosted API pairs are listed by `OseroApiClient.getSupportedAssets()` instead.
 
 ## Telemetry
 

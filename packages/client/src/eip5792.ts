@@ -458,8 +458,9 @@ type BatchEvent =
  *   nothing is invented before then);
  * - only after the batch is confirmed: `step-confirmed` and `plan-completed`.
  *
- * Like the sequential path, a throwing callback never interrupts execution. The
- * first failure stops further events and is returned once the batch succeeds.
+ * A throwing callback cannot interrupt a batch the wallet has already accepted:
+ * the batch is still confirmed. The first failure stops further events and is
+ * returned once the batch succeeds.
  */
 function createBatchProgress(execution: Extract<PreparedExecution, { readonly kind: 'pending' }>) {
   const handler = execution.options.onProgress;
@@ -517,29 +518,26 @@ function createBatchProgress(execution: Extract<PreparedExecution, { readonly ki
       // oxlint-enable no-await-in-loop
       await emit({ kind: 'plan-completed' }, { type: 'plan-completed', result });
     },
-    /** The callback failure to report for a batch that confirmed, if any. */
+    /**
+     * The callback failure to report for a batch that confirmed, if any.
+     *
+     * The batch is atomic and has confirmed by the time this is reported, so
+     * every step is listed as completed whichever event the callback failed on.
+     * Reporting only the steps before that event would describe confirmed steps
+     * as pending, and resume state derived from it would send them again.
+     */
     failure(result: TransactionResult, batchId: BatchId): ProgressCallbackError | undefined {
       if (failed === undefined) return undefined;
       const { cause, event } = failed;
-      const last = execution.pending[execution.pending.length - 1];
       const step =
         event.kind === 'preflight-complete'
           ? execution.pending[0]
           : event.kind === 'plan-completed'
-            ? last
+            ? execution.pending[execution.pending.length - 1]
             : event.step;
-      const completed =
-        event.kind === 'preflight-complete'
-          ? execution.confirmed
-          : event.kind === 'plan-completed'
-            ? result.transactions
-            : result.transactions.slice(
-                0,
-                event.kind === 'step-confirmed' ? event.step.index + 1 : event.step.index,
-              );
       return ProgressCallbackError.from(
         cause,
-        failureContext(execution.plan, step, 'progress', completed, undefined, batchId),
+        failureContext(execution.plan, step, 'progress', result.transactions, undefined, batchId),
       );
     },
   };

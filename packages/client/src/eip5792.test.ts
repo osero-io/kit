@@ -31,7 +31,9 @@ import {
 import {
   createExecutionPlan,
   createTransactionRequest,
+  deserializeExecutionResumeState,
   executionResumeStateFromError,
+  serializeExecutionResumeState,
 } from './lib/plan.js';
 import type {
   ConfirmedTransaction,
@@ -48,6 +50,7 @@ type ReceiptWaitInput = {
 const actions = vi.hoisted(() => ({
   estimateGas: vi.fn<(...args: unknown[]) => Promise<bigint>>(),
   getCapabilities: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+  getTransaction: vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   getTransactionReceipt:
     vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   sendCalls: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
@@ -91,6 +94,7 @@ function resetActions(): void {
   actions.getCapabilities.mockReset().mockResolvedValue({
     atomic: { status: 'unsupported' },
   });
+  actions.getTransaction.mockReset().mockRejectedValue(new Error('transaction not found'));
   actions.getTransactionReceipt.mockReset().mockImplementation(async (_client, input) => ({
     status: 'success',
     transactionHash: input.hash,
@@ -923,19 +927,20 @@ describe('eip5792 batch progress', () => {
   });
 
   it.each([
-    ['preflight-complete', 'step-1', 0],
-    ['step-started', 'step-1', 0],
-    ['step-submitted', 'step-1', 0],
-    ['step-confirmed', 'step-1', 1],
-    ['plan-completed', 'step-2', 2],
+    ['preflight-complete', 'step-1'],
+    ['step-started', 'step-1'],
+    ['step-submitted', 'step-1'],
+    ['step-confirmed', 'step-1'],
+    ['plan-completed', 'step-2'],
   ] as const)(
-    'returns ProgressCallbackError after the batch confirms when %s throws',
-    async (failingType, stepId, completedCount) => {
+    'reports every batched step as completed when %s throws, and resuming sends nothing',
+    async (failingType, stepId) => {
       const valueWallet = atomicWallet();
+      const valuePlan = plan();
       const seen: string[] = [];
       const cause = new Error('consumer failed');
 
-      const result = await sendWith(valueWallet, plan(), {
+      const result = await sendWith(valueWallet, valuePlan, {
         onProgress: (event) => {
           seen.push(event.type);
           if (event.type === failingType) throw cause;
@@ -943,21 +948,75 @@ describe('eip5792 batch progress', () => {
       });
 
       expect(result.isErr()).toBe(true);
-      if (result.isErr()) {
-        expect(result.error).toBeInstanceOf(ProgressCallbackError);
-        expect(result.error.cause).toBe(cause);
-        if (result.error instanceof ProgressCallbackError) {
-          expect(result.error.execution).toMatchObject({ stage: 'progress', stepId });
-          expect(result.error.execution?.completed).toHaveLength(completedCount);
-        }
-      }
+      if (result.isOk()) return;
+      expect(result.error).toBeInstanceOf(ProgressCallbackError);
+      expect(result.error.cause).toBe(cause);
+      if (!(result.error instanceof ProgressCallbackError)) return;
+      expect(result.error.execution).toMatchObject({ stage: 'progress', stepId });
+      // The atomic batch confirmed, so both steps are completed whichever
+      // callback failed. Anything less would describe confirmed steps as pending.
+      expect(result.error.execution?.completed.map((step) => step.stepId)).toEqual([
+        'step-1',
+        'step-2',
+      ]);
+      expect(result.error.execution?.completed.map((step) => step.hash)).toEqual([
+        hash(9),
+        hash(9),
+      ]);
       // The first failing callback is the last one invoked.
       expect(seen.at(-1)).toBe(failingType);
       expect(seen.filter((type) => type === failingType)).toHaveLength(1);
       // A throwing callback never interrupts the submitted batch.
       expect(actions.waitForCallsStatus).toHaveBeenCalledOnce();
+
+      // Derive, persist, and resume: the confirmed calls must never be sent again.
+      const derived = executionResumeStateFromError(valuePlan, result.error);
+      if (derived.isErr()) throw derived.error;
+      const serialized = serializeExecutionResumeState(derived.value);
+      if (serialized.isErr()) throw serialized.error;
+      const restored = deserializeExecutionResumeState(serialized.value);
+      if (restored.isErr()) throw restored.error;
+      expect(restored.value.confirmed).toHaveLength(2);
+      actions.sendCalls.mockClear();
+      actions.sendTransaction.mockClear();
+
+      const resumed = await sendWith(valueWallet, valuePlan, { resume: restored.value });
+
+      expect(resumed.isOk()).toBe(true);
+      if (resumed.isOk()) {
+        expect(resumed.value.transactions.map((transaction) => transaction.hash)).toEqual([
+          hash(9),
+          hash(9),
+        ]);
+      }
+      expect(actions.sendCalls).not.toHaveBeenCalled();
+      expect(actions.sendTransaction).not.toHaveBeenCalled();
     },
   );
+
+  it('includes the resumed prefix and the batched steps when a callback fails', async () => {
+    const valueWallet = atomicWallet();
+    const valuePlan = plan({ stepCount: 3 });
+
+    const result = await sendWith(valueWallet, valuePlan, {
+      resume: resumeFirstStep(valuePlan),
+      onProgress: (event) => {
+        if (event.type === 'step-started') throw new Error('consumer failed');
+      },
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr() && result.error instanceof ProgressCallbackError) {
+      expect(result.error.execution?.completed.map((step) => step.hash)).toEqual([
+        hash(1),
+        hash(9),
+        hash(9),
+      ]);
+      const derived = executionResumeStateFromError(valuePlan, result.error);
+      expect(derived.isOk() && derived.value.confirmed).toHaveLength(3);
+    }
+    expect(result.isErr() && result.error).toBeInstanceOf(ProgressCallbackError);
+  });
 
   it('reports the batch failure rather than an earlier callback failure', async () => {
     const valueWallet = atomicWallet();
@@ -1030,6 +1089,24 @@ describe('eip5792 batch identity and resume', () => {
     }
   });
 
+  it('derives resume state from a reverted batch without acknowledgement', async () => {
+    const valuePlan = plan({ stepCount: 3 });
+    const valueWallet = atomicWallet();
+    actions.waitForCallsStatus.mockResolvedValueOnce({
+      atomic: true,
+      statusCode: 500,
+      receipts: [receipt(hash(4), 'reverted')],
+    });
+    const failed = await sendWith(valueWallet, valuePlan, { resume: resumeFirstStep(valuePlan) });
+    if (failed.isOk()) throw new Error('expected the batch to revert');
+
+    const derived = executionResumeStateFromError(valuePlan, failed.error);
+
+    // An atomic batch that reverted executed none of its calls.
+    expect(derived.isOk()).toBe(true);
+    if (derived.isOk()) expect(derived.value).toEqual(resumeFirstStep(valuePlan));
+  });
+
   it('resumes an atomic batch from the state derived from its own failure', async () => {
     const valuePlan = plan({ stepCount: 3 });
     const valueWallet = atomicWallet();
@@ -1037,7 +1114,16 @@ describe('eip5792 batch identity and resume', () => {
     const failed = await sendWith(valueWallet, valuePlan, { resume: resumeFirstStep(valuePlan) });
     if (failed.isOk()) throw new Error('expected the status wait to fail');
 
-    const derived = executionResumeStateFromError(valuePlan, failed.error);
+    // The wallet accepted the batch and its outcome is unknown, so nothing is
+    // derived until the caller has checked the batch and says it did not execute.
+    const refused = executionResumeStateFromError(valuePlan, failed.error);
+    expect(refused.isErr()).toBe(true);
+    if (refused.isErr()) {
+      expect(refused.error.details).toMatchObject({ stage: 'confirmation', batchId: BATCH_ID });
+    }
+    const derived = executionResumeStateFromError(valuePlan, failed.error, {
+      unresolvedStep: 'assume-not-executed',
+    });
     if (derived.isErr()) throw derived.error;
     expect(derived.value).toEqual(resumeFirstStep(valuePlan));
     actions.sendCalls.mockClear();

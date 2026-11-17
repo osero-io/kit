@@ -75,13 +75,19 @@ cases:
 The rule is the same in every adapter: only a repricing may stand in for the step that was
 submitted. The message is `Transaction <hash> was <reason> and cannot be treated as this plan step`.
 
-- **viem and Privy** observe viem's `onReplaced` callback. If viem returns a receipt for a different
-  hash without naming a reason, the adapter fails closed and treats it as `replaced`.
+- **viem and Privy** observe viem's `onReplaced` callback. viem calls it only when one confirmation
+  is requested; with more, it returns the replacement's receipt without naming a reason. In that
+  case the adapter reads the confirmed transaction once (`eth_getTransactionByHash`) and compares it
+  with what it submitted. The same sender, target, calldata, and value under another hash is a
+  repricing. Anything else, including a failed read, fails closed as `cancelled` or `replaced`. The
+  extra read happens only when the confirmed hash differs from the submitted one.
 - **ethers** reads the `TRANSACTION_REPLACED` error. A replacement flagged `cancelled`, or with any
   reason other than `repriced`, fails.
 - **EIP-5792** applies the rule to the extra-confirmation wait (`confirmations` greater than `1`).
-  Replacement of a batch before the wallet reports its terminal status is the wallet's concern and
-  is not observable through `wallet_getCallsStatus`.
+  The wallet builds the batch transaction, so the adapter has nothing to compare a substitute
+  against: any change of the batch transaction's hash during that wait fails, unless viem itself
+  reports a repricing. Replacement of a batch before the wallet reports its terminal status is the
+  wallet's concern and is not observable through `wallet_getCallsStatus`.
 - **Privy limitation.** Replacement is detected only for a response that carries a standard
   transaction hash, by scanning blocks through the receipt client. The adapter cannot observe what
   the Privy Wallet API does before it returns that hash.
@@ -150,6 +156,10 @@ For every batch failure after submission, `execution.completed` lists the steps 
 before the batch (a resumed prefix), never the batched steps themselves. An atomic batch either
 confirms every pending step or none.
 
+When a progress callback throws during an atomic batch, the batch is still confirmed and the
+returned `ProgressCallbackError` lists every batched step in `execution.completed`, whichever event
+the callback failed on. Resume state derived from it resumes to a finished plan and sends nothing.
+
 `UnexpectedError` is reserved for a genuine defect inside the adapter. An error that is already
 classified is never re-wrapped.
 
@@ -184,6 +194,22 @@ Every bundled adapter records each confirmed step on `execution.completed` with 
 that reports completed steps without confirmations is still valid; resume state cannot be derived
 from its errors.
 
+Resuming sends the failed step again, so the helper returns state only when the failure proves that
+step did not take effect. By stage:
+
+| Stage of the failure                       | Derived by default | Why                                                                  |
+| ------------------------------------------ | ------------------ | -------------------------------------------------------------------- |
+| `preflight`, `simulation`                  | Yes                | The step was never sent.                                             |
+| `signing` with `CancelError`               | Yes                | The user rejected it.                                                |
+| `revert`                                   | Yes                | The step was mined and reverted. An atomic batch reverts whole.      |
+| `progress`                                 | Yes                | The step is either unsent or listed as completed.                    |
+| `signing` with any other error             | No                 | An unrecognised send error does not prove nothing was sent.          |
+| `broadcast`, `confirmation`, `replacement` | No                 | A transaction or batch may be in flight or mined under another hash. |
+
+For the "No" rows the helper returns a `ValidationError` whose `details` carry the `stage` and any
+`hash` or `batchId`. After checking that the step did not execute, pass
+`{ unresolvedStep: 'assume-not-executed' }`.
+
 Two errors carry execution context beyond the per-stage tables above:
 
 - `QuoteExpiredError` raised between steps has `execution` set to the step that was not submitted
@@ -197,7 +223,11 @@ EIP-5792 failures after the wallet accepted a batch carry the batch identifier a
 
 ## Declaring chain support in a custom executor
 
-`ExecutorCapabilities.supportedChainIds` is optional. When a custom executor sets it, the
-capability preflight rejects a plan with a step on any other chain with
-`UnsupportedCapabilityError` (`capability: 'chain:<id>'`) before anything is sent. The bundled
-adapters leave it unset: they bind to the connected wallet's chain instead.
+`ExecutorCapabilities.supportedChainIds` is an optional declaration of the chains an executor can
+submit to. The SDK's own capability preflight honours it: a capability object that sets it rejects
+a plan with a step on any other chain with `UnsupportedCapabilityError`
+(`capability: 'chain:<id>'`) before anything is sent. The bundled adapters leave it unset, because
+they bind to the connected wallet's chain instead.
+
+That preflight is internal and is not exported. A custom executor that implements
+`ExecutionPlanHandler` itself does not pass through it, so it must enforce its own declaration.

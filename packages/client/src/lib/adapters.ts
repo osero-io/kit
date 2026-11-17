@@ -43,14 +43,31 @@ export type SingleTxExecutor = (
   context: SingleTransactionContext,
 ) => ResultAsync<SingleTransactionResult, SendWithError>;
 
+function withoutBigints(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map(withoutBigints);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, withoutBigints(nested)]),
+    );
+  }
+  return value;
+}
+
 /**
  * A confirmed step as it is recorded on an execution failure. It keeps the
  * receipt evidence so the failure can be turned back into resume state.
+ *
+ * The receipt evidence holds bigints, which `JSON.stringify` rejects. Before
+ * that evidence was added, `JSON.stringify(error.execution)` worked, and error
+ * handlers commonly log it. A non-enumerable `toJSON` keeps it working by
+ * writing bigints as decimal strings, as `OseroError.toJSON` does. The live
+ * object keeps its bigints.
  */
 export function toCompletedExecutionStep(
   transaction: ConfirmedTransaction,
 ): CompletedExecutionStep {
-  return {
+  const step: CompletedExecutionStep = {
     planId: transaction.planId,
     stepId: transaction.stepId,
     stepIndex: transaction.stepIndex,
@@ -60,6 +77,11 @@ export function toCompletedExecutionStep(
     ...(transaction.replacement === undefined ? {} : { replacement: transaction.replacement }),
     confirmation: transaction.confirmation,
   };
+  Object.defineProperty(step, 'toJSON', {
+    enumerable: false,
+    value: () => withoutBigints(step),
+  });
+  return step;
 }
 
 export function preflightExecutorCapabilities(

@@ -339,6 +339,44 @@ export function deserializeExecutionResumeState(
   return validateResumeStateShape(value as ExecutionResumeState);
 }
 
+export type ExecutionResumeFromErrorOptions = {
+  /**
+   * What to do when the step that failed may already have been submitted and
+   * its outcome is unknown: a receipt wait that timed out, a broadcast that
+   * failed ambiguously, a replaced transaction, a resume proof that could not
+   * be verified, or an EIP-5792 batch whose status never arrived.
+   *
+   * - `'reject'` (default) returns a `ValidationError` whose `details` carry the
+   *   stage and any transaction hash or batch id to check.
+   * - `'assume-not-executed'` returns the confirmed prefix, so resuming sends
+   *   the failed step again. Pass it only after confirming on chain, or with
+   *   the wallet, that the step did not execute. If it did execute, resuming
+   *   this way executes it twice.
+   */
+  readonly unresolvedStep?: 'reject' | 'assume-not-executed';
+};
+
+/**
+ * Whether the failure proves its step did not take effect. Only these do: the
+ * step was never sent (preflight, simulation, a progress callback before
+ * submission, a user rejection), or it was mined and reverted. A progress
+ * failure after confirmation lists its step as completed, so it is covered too.
+ */
+function failedStepProvablyNotExecuted(error: OseroError, stage: unknown): boolean {
+  switch (stage) {
+    case 'preflight':
+    case 'simulation':
+    case 'revert':
+    case 'progress':
+      return true;
+    case 'signing':
+      return error.code === 'CANCELLED';
+    default:
+      // broadcast, confirmation, replacement, and anything unrecognized.
+      return false;
+  }
+}
+
 /**
  * Builds resume state from a failed execution.
  *
@@ -346,15 +384,34 @@ export function deserializeExecutionResumeState(
  * the error it returns. This turns that evidence into the `resume` option for
  * the next `sendWith` call, which re-verifies each receipt before skipping it.
  *
- * It fails rather than guesses: the error must carry an execution context for
- * this plan, and every completed step must carry its confirmation. An error
- * raised before execution started, or by a custom executor that does not record
- * confirmations, cannot be turned into resume state.
+ * It fails rather than guesses:
+ *
+ * - the error must carry an execution context for this plan, and every completed
+ *   step must carry its confirmation. An error raised before execution started,
+ *   or by a custom executor that does not record confirmations, cannot be turned
+ *   into resume state;
+ * - resuming sends every step after the confirmed prefix, starting with the one
+ *   that failed. When that step may already have been submitted and its outcome
+ *   is unknown, this returns a `ValidationError` instead of state that would
+ *   send it again. See {@link ExecutionResumeFromErrorOptions.unresolvedStep}.
  */
 export function executionResumeStateFromError(
   plan: ExecutionPlan,
   error: OseroError,
+  options?: ExecutionResumeFromErrorOptions,
 ): Result<ExecutionResumeState, ValidationError> {
+  if (options !== undefined && (typeof options !== 'object' || options === null)) {
+    return err(ValidationError.forField('options', 'options must be an object'));
+  }
+  const unresolvedStep = options?.unresolvedStep ?? 'reject';
+  if (unresolvedStep !== 'reject' && unresolvedStep !== 'assume-not-executed') {
+    return err(
+      ValidationError.forField(
+        'options.unresolvedStep',
+        'unresolvedStep must be reject or assume-not-executed',
+      ),
+    );
+  }
   const validated = validateExecutionPlan(plan);
   if (validated.isErr()) return err(validated.error);
   const execution =
@@ -417,5 +474,31 @@ export function executionResumeStateFromError(
   if (shape.isErr()) return err(shape.error);
   const matched = validateResumeState(validated.value, state);
   if (matched.isErr()) return err(matched.error);
+
+  // Resuming sends the failed step again unless it is part of the confirmed
+  // prefix. Refuse when nothing proves that step did not already take effect.
+  const failedStepIsConfirmed = confirmed.some(
+    (transaction) => transaction.stepIndex === execution.stepIndex,
+  );
+  if (
+    !failedStepIsConfirmed &&
+    unresolvedStep === 'reject' &&
+    !failedStepProvablyNotExecuted(error, execution.stage)
+  ) {
+    return err(
+      ValidationError.forField(
+        'error.execution.stage',
+        `step ${String(execution.stepId)} failed at stage ${String(execution.stage)} and may already have been submitted; ` +
+          "confirm its outcome, then pass unresolvedStep: 'assume-not-executed' to resume from the confirmed prefix",
+        {
+          stage: execution.stage,
+          stepId: execution.stepId,
+          stepIndex: execution.stepIndex,
+          ...(execution.hash === undefined ? {} : { hash: execution.hash }),
+          ...(execution.batchId === undefined ? {} : { batchId: execution.batchId }),
+        },
+      ),
+    );
+  }
   return ok(state);
 }

@@ -227,7 +227,7 @@ if (resumed.isErr()) throw resumed.error;
 
 A confirmation failure carries the submitted hash and confirmed prefix. Persist that context before retrying. Adapters verify receipts for the prefix before skipping steps.
 
-From 1.1.0, build resume state from the failure with `executionResumeStateFromError(plan, error)` and persist it with `serializeExecutionResumeState` / `deserializeExecutionResumeState`, which use the same bigint-safe canonical JSON as the plan serializers. On 1.0.x there is no resume-state serializer: assemble an `ExecutionResumeState` from the `transaction` in each `step-confirmed` progress event and store it with an encoding that preserves `bigint` fields.
+From 1.1.0, build resume state from the failure with `executionResumeStateFromError(plan, error)`, which refuses a failure whose step may already have been submitted until you have checked it, and persist it with `serializeExecutionResumeState` / `deserializeExecutionResumeState`, which use the same bigint-safe canonical JSON as the plan serializers. On 1.0.x there is no resume-state serializer: assemble an `ExecutionResumeState` from the `transaction` in each `step-confirmed` progress event and store it with an encoding that preserves `bigint` fields.
 
 ## Wallet adapters
 

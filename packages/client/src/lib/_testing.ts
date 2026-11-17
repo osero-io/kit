@@ -281,10 +281,12 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
   async function failedAfterFirstStep() {
     const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
     if (harness.fail === undefined) return undefined;
-    harness.fail({ stage: 'receipt', kind: 'timeout' }, 2);
+    // A mined, reverted second step proves that step took no effect, so the
+    // failure can be turned into resume state without further checks.
+    harness.fail({ stage: 'receipt', kind: 'revert' }, 2);
     const valuePlan = contractPlan();
     const result = await harness.execute(valuePlan, 'direct');
-    if (result.isOk()) throw new Error('expected the injected receipt timeout to fail');
+    if (result.isOk()) throw new Error('expected the injected revert to fail');
     return { valuePlan, error: result.error };
   }
 
@@ -746,6 +748,57 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
           ).toEqual(['two']);
         },
       );
+
+      it('refuses to derive resume state from a receipt timeout until the caller resolves the step', async () => {
+        const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        if (harness.fail === undefined) return;
+        harness.fail({ stage: 'receipt', kind: 'timeout' }, 2);
+        const valuePlan = contractPlan();
+        const result = await harness.execute(valuePlan, 'direct');
+        if (result.isOk()) throw new Error('expected the injected receipt timeout to fail');
+        const hash =
+          result.error.code === 'CONFIRMATION_FAILED' ? result.error.execution?.hash : undefined;
+
+        const refused = executionResumeStateFromError(valuePlan, result.error);
+        const acknowledged = executionResumeStateFromError(valuePlan, result.error, {
+          unresolvedStep: 'assume-not-executed',
+        });
+
+        // Step two was submitted and may still confirm: resuming would send it again.
+        expect(hash).toMatch(/^0x[0-9a-f]{64}$/);
+        expect(refused.isErr()).toBe(true);
+        if (refused.isErr()) {
+          expect(refused.error.field).toBe('error.execution.stage');
+          expect(refused.error.details).toMatchObject({
+            stage: 'confirmation',
+            stepId: 'two',
+            hash,
+          });
+        }
+        expect(acknowledged.isOk()).toBe(true);
+        if (acknowledged.isOk()) {
+          expect(acknowledged.value.confirmed.map((step) => step.stepId)).toEqual(['one']);
+        }
+      });
+
+      it('keeps the failure context loggable with JSON.stringify', async () => {
+        const failed = await failedAfterFirstStep();
+        if (failed === undefined) return;
+        if (!('execution' in failed.error) || failed.error.execution === undefined) {
+          throw new Error('expected an execution context');
+        }
+        const execution = failed.error.execution;
+
+        // The live context keeps bigint receipt fields; logging it must not throw.
+        expect(typeof execution.completed[0]?.confirmation?.gasUsed).toBe('bigint');
+        const logged = JSON.parse(JSON.stringify(execution)) as {
+          completed: { stepId: string; confirmation: Record<string, unknown> }[];
+        };
+        expect(logged.completed[0]?.stepId).toBe('one');
+        expect(logged.completed[0]?.confirmation).toMatchObject({ status: 'success' });
+        expect(typeof logged.completed[0]?.confirmation.gasUsed).toBe('string');
+        expect(() => JSON.stringify(failed.error)).not.toThrow();
+      });
 
       it.each(['reverted', 'unavailable'] as const)(
         'sends nothing when the resume proof receipt is %s',

@@ -17,6 +17,10 @@ export type SupportedSwapRouteMode = {
    * The bound a quote for this mode carries and how the deployed contracts
    * enforce it. `enforcedBy: 'none'` means the route cannot enforce its quoted
    * bound, and `prepareSwap` requires `allowUnprotectedSlippage: true`.
+   * `enforcedBy: 'allowance'` means the spend is capped by an allowance of
+   * exactly the maximum input: `prepareSwap` sets the allowance to that amount
+   * under `approvalPolicy: 'exact'`, fails under `'none'` unless it already
+   * equals it, and rejects `'max'`.
    */
   readonly slippageProtection: SwapSlippageProtection;
   /**

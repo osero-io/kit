@@ -28,6 +28,7 @@ type ReceiptWaitInput = {
 };
 
 const actions = vi.hoisted(() => ({
+  getTransaction: vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   getTransactionReceipt:
     vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   waitForTransactionReceipt:
@@ -76,6 +77,7 @@ function resetReceipts(): void {
     gasUsed: 50n,
     effectiveGasPrice: 2n,
   }));
+  actions.getTransaction.mockReset().mockRejectedValue(new Error('transaction not found'));
   actions.getTransactionReceipt.mockReset().mockImplementation(async (_client, input) => ({
     status: 'success',
     transactionHash: input.hash,
@@ -286,9 +288,20 @@ describe('Privy stage behavior', () => {
             confirmation: expect.objectContaining({ status: 'success' }),
           }),
         ]);
-        // The confirmed prefix can be resumed once the wallet is reconfigured.
-        const derived = executionResumeStateFromError(valuePlan, result.error);
+        // The Wallet API accepted the request, so the step may be in flight:
+        // nothing is derived until the caller has resolved it.
+        const refused = executionResumeStateFromError(valuePlan, result.error);
+        expect(refused.isErr()).toBe(true);
+        if (refused.isErr()) {
+          expect(refused.error.details).toMatchObject({ stage: 'broadcast', stepId: 'swap-two' });
+        }
+        const derived = executionResumeStateFromError(valuePlan, result.error, {
+          unresolvedStep: 'assume-not-executed',
+        });
         expect(derived.isOk()).toBe(true);
+        if (derived.isOk()) {
+          expect(derived.value.confirmed.map((step) => step.stepId)).toEqual(['swap']);
+        }
       }
     }
     // The receipt wait ran for the confirmed first step only.
@@ -511,6 +524,53 @@ describe('Privy transaction replacement', () => {
       });
     }
     expect(state.sendTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts an unexplained substitution that is the same transaction at another fee', async () => {
+    const state = makePrivy();
+    replaceFirstReceipt(undefined, hash(99));
+    actions.getTransaction.mockResolvedValue({
+      hash: hash(99),
+      from: ACCOUNT,
+      to: TARGET,
+      input: '0x1234',
+      value: 0n,
+    });
+
+    const result = await sendWith(state.privy, wallet, twoStepPlan(), {
+      ...options,
+      confirmations: 2,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.transactions[0]).toMatchObject({
+        submittedHash: hash(1),
+        hash: hash(99),
+        replacement: { reason: 'repriced', originalHash: hash(1), replacementHash: hash(99) },
+      });
+    }
+    expect(state.sendTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed when an unexplained substitution carries other calldata', async () => {
+    const state = makePrivy();
+    replaceFirstReceipt(undefined, hash(99));
+    actions.getTransaction.mockResolvedValue({
+      hash: hash(99),
+      from: ACCOUNT,
+      to: TARGET,
+      input: '0xdead',
+      value: 0n,
+    });
+
+    const result = await sendWith(state.privy, wallet, twoStepPlan(), {
+      ...options,
+      confirmations: 2,
+    });
+
+    expect(result.isErr() && result.error).toBeInstanceOf(ConfirmationError);
+    expect(state.sendTransaction).toHaveBeenCalledTimes(1);
   });
 
   it.each(['cancelled', 'replaced', undefined] as const)(
