@@ -1,5 +1,85 @@
 # @osero/client
 
+## 1.1.0
+
+### Minor Changes
+
+- f2fb235: Add the remaining capabilities from the v1 audit. Everything here is additive: no export, type, error code, default, or existing behaviour changed, and every new field is optional.
+
+  **Resume from a failure.**
+
+  - `executionResumeStateFromError(plan, error)` builds the `resume` option for the next `sendWith` call from a failed execution. It returns state only when that is safe: every confirmed step on the error must carry its receipt, and the step that failed must provably not have taken effect (it was never sent, the wallet explicitly rejected it, or it was mined and reverted). When the failed step may already have been submitted, such as a receipt timeout or an EIP-5792 batch whose status never arrived, it returns a `ValidationError` naming the hash or batch id to check. Pass `{ unresolvedStep: 'assume-not-executed' }` after confirming the step did not execute.
+  - `serializeExecutionResumeState(state)` and `deserializeExecutionResumeState(json)` persist resume state as bigint-safe canonical JSON, like the plan serializers.
+  - Completed steps on an execution error (`error.execution.completed`) now carry optional `submittedHash`, `replacement`, and `confirmation`. Every bundled adapter sets them. `JSON.stringify(error.execution)` keeps working: the bigint receipt fields are written as decimal strings.
+  - `error.execution.batchId` is set on EIP-5792 failures once the wallet has accepted a batch.
+  - `QuoteExpiredError` has an optional `execution` context. When a quote expires between steps, it names the step that was not sent and lists the steps already confirmed.
+
+  **Wait for a cross-chain transfer without the quote.** `OseroApiClient.waitForTransferStatus({ sourceTransactionHash, statusContext }, options)` polls with the same options and semantics as `waitForSwapCompletion`, so a restarted process can resume waiting from a persisted status request. `waitForSwapCompletion` is unchanged.
+
+  **Richer simulation.** `simulateExecutionPlan` results gain:
+
+  - `feeData.basis` (`'max-fee-per-gas'` or `'gas-price'`) and `feeData.maxFeePerGas`. `feeData.gasPrice` keeps its value and meaning.
+  - `revert: { reason?, data? }` on a failed step, when the node returned a revert reason or raw revert data.
+  - an optional fourth argument `{ quote }`. Given the prepared quote the plan came from, the result's `quote` field echoes the expected amount and the minimum output or maximum input. A quote for a different plan is a `ValidationError`.
+
+  **Opt-in local gas estimates.** `prepareSwap` accepts `gasEstimates: 'independent-steps'`. It estimates, at the quote block, the steps that do not depend on an earlier step (the first step) and attaches `estimatedGas` with source `'local-simulation'`. The default is `'none'`, which makes no extra RPC call. A failed estimate omits the field and never fails `prepareSwap`. Estimates do not change the plan ID.
+
+  **Route discovery.** `listSwapRoutes(chainId)` lists each supported local pair with its modes, how each mode enforces its slippage bound, and its referral capability.
+
+  **Executor capabilities.**
+
+  - `ExecutorCapabilities.supportedChainIds` is an optional declaration of the chains an executor can submit to. The SDK's capability preflight rejects a plan with a step on another chain when a capability object sets it. The bundled adapters leave it unset, and the preflight is internal, so a custom executor must enforce its own declaration.
+  - When the Privy Wallet API returns a response without a standard transaction hash, the `UnsupportedCapabilityError` now carries an optional `execution` context naming the step and the steps already confirmed.
+
+  **Refresh Context forward compatibility.** Primitive fields the API adds to a Refresh Context are preserved and sent back unchanged on refresh. A Refresh Context without extra fields is sent byte-for-byte as before.
+
+  Release tooling: the packed-consumer check now typechecks the ethers and Privy entrypoints with their peers installed at the supported floors (viem 2.28.0, ethers 6.14.0, `@privy-io/node` 0.19.0), the adapter files have per-file coverage floors, and CI bundles the browser-supported entrypoints and fails on any Node.js built-in import.
+
+### Patch Changes
+
+- f2fb235: Close the bug and security gaps left from the v1 audit. No export, type, error code, or default changed. The observable behaviour changes are:
+
+  **Approval calldata must be canonical.** An approval step is accepted only when its calldata is byte-for-byte the canonical encoding of `approve(spender, amount)`. Calldata that decodes to the right spender and amount but carries extra bytes after the arguments was previously accepted and is now rejected. This applies to hosted quotes (`getSwapQuote`, `refreshSwapQuote`, and `executeSwap` return `ApiResponseError`) and to plans you build or load yourself (`createTransactionRequest`, `createExecutionPlan`, `deserializeExecutionPlan`, `resumeExecutionPlan`, and every `sendWith` return `ValidationError`). Approvals built with `createApprovalTransaction` are unaffected.
+
+  **A cancelled or replaced transaction is no longer treated as confirmed.** In the viem, Privy, and EIP-5792 adapters, if a submitted transaction is cancelled or replaced by a different transaction, `sendWith` now returns `ConfirmationError` at stage `replacement` with the submitted hash, and no later step is broadcast. Previously the replacement's receipt was recorded as a successful step. This matches the ethers adapter. A transaction that was only repriced still succeeds, for any number of confirmations. viem names the kind of replacement only when one confirmation is requested; with more, the viem and Privy adapters compare the replacement viem found in the mined block with what was submitted and accept it only if its sender, target, calldata, and value are exactly the same. This adds no RPC request. To observe that block, the adapter's receipt wait no longer joins a `waitForTransactionReceipt` you started yourself on the same client and hash: it polls for the receipt on its own, so that wait's `confirmations` no longer stand in for the ones passed to `sendWith`. Block-number polling is still shared. On viem releases that keep polling after a receipt wait times out (2.28 does), each timed-out adapter wait on a hash now leaves its own receipt poller behind, where retries used to join a single one.
+
+  **Repriced transactions are labelled `repriced`.** For a repriced step the viem adapter now reports `replacement.reason` as `'repriced'` instead of `'replaced'`, matching ethers. The Privy adapter now also reports `submittedHash` and `replacement` for a repriced step instead of only the effective hash. The EIP-5792 adapter cannot verify a wallet-built batch transaction, so a change of the batch transaction's hash while it waits for extra confirmations now fails with `ConfirmationError` at stage `replacement`.
+
+  **Privy `sendWith` no longer throws on a malformed plan.** A malformed plan passed together with `idempotencyKeys`, a `null` plan, or an `idempotencyKeys` value that is not an object made `sendWith` throw a `TypeError`. Each now returns `ValidationError` and makes no Wallet API call.
+
+  **EIP-5792 failures are classified.** The EIP-5792 adapter returned `UnexpectedError` for failures it can identify. Now:
+
+  - a `wallet_sendCalls` failure returns `SigningError` for an unauthorized account (code `4100`) and `BroadcastError` for anything else that is not a user rejection or an atomic-capability refusal (code `5760`, which still falls back to sequential sends or returns `UnsupportedCapabilityError`); a response without a batch ID returns `BroadcastError`;
+  - a batch status wait that fails or times out returns `ConfirmationError`, with the batch ID in the message;
+  - a malformed, failed, or non-atomic batch status returns `ConfirmationError`;
+  - a batch that reverted as a whole still returns `TransactionError`, and its `execution.completed` now lists the steps confirmed before the batch instead of being empty;
+  - a partial revert (status `600`, or a status `500` that carries a successful receipt or is not reported as atomic) now returns `ConfirmationError` instead of `TransactionError`, because some calls may be on chain;
+  - an unreadable receipt during the extra-confirmation wait now returns `ConfirmationError` instead of `TransactionError`.
+
+  **EIP-5792 batch progress is reported as it happens.** Progress events for an atomic batch were emitted only after the batch succeeded, so a failed batch reported nothing. `preflight-complete` and `step-started` are now emitted when the wallet accepts the batch, `step-submitted` when the wallet reports the batch's transaction hash, and `step-confirmed` and `plan-completed` only after confirmation. For a successful batch the same events are emitted, with all submissions before all confirmations.
+
+  **A progress callback failure on an EIP-5792 batch reports every confirmed step.** When `onProgress` threw during an atomic batch, the returned `ProgressCallbackError` listed only the steps before the failing event in `execution.completed`, even though the whole batch had confirmed. It now lists every batched step.
+
+  **Unknown Transfer States keep polling.** A normalized transfer `state` this SDK release does not know is decoded as `'unknown'` instead of failing the response with `ApiResponseError`. `waitForSwapCompletion` keeps polling on it.
+
+  **Referral codes in responses are not range-checked.** The response decoder rejected referral codes outside 3000–3999 even though requests accept any code and the range was documented as not enforced client-side. Any non-negative safe integer the API returns is now accepted. The code must still match the one you requested.
+
+  **Multicall works on Unichain.** `getTokenBalances` with `multicall: 'require'` always failed on chain 130, and `'prefer'` always fell back to three separate reads, because the Unichain chain definition did not declare Multicall3. It now does, so `getChain(130).viemChain.contracts.multicall3` is set.
+
+  Documentation: the adapter defaults and per-stage error mappings are now specified in `docs/osero-sdk/adapters.md`, and the README states the supported runtimes.
+
+- b0f412a: `executeSwap` no longer sends a redundant approval after an approval has confirmed. No export, type, error code, or default changed.
+
+  **What was wrong.** After an approval confirmed, `executeSwap` refreshed the quote and re-read the allowance at the block returned by `getBlockNumber()`. viem answers that call from a cache for the client's `cacheTime` (4 seconds on Ethereum by default). When the approval confirmed inside that window, the allowance was read at a block from before the approval, came back as insufficient, and the same approval was sent again. Each repeat cost gas and a wallet prompt, and enough of them ended the swap with `ApprovalLimitError`. Setting `cacheTime: 0` on the public client was the only way to avoid it.
+
+  **What changed.**
+
+  - `getSwapQuote`, `refreshSwapQuote`, and `executeSwap` read the allowance at a fresh block: they call `getBlockNumber({ cacheTime: 0 })` on the client from `publicClientProvider`. This is one uncached `eth_blockNumber` request per chain for each quote that has an Approval Step to check. Quotes without one make no RPC request, as before.
+  - Inside `executeSwap`, the allowance check after a confirmed approval never reads below that approval's receipt block (`confirmation.blockNumber` of the approval result, when the handler reports it). If the RPC still reports an older head, the SDK asks again up to four times, 250 ms apart, and then reads at the receipt block. An RPC that cannot serve that block returns `RpcError` and no further approval is requested. Cancelling through `signal` during the wait returns `CancelError`.
+  - `simulateExecutionPlan`, `quoteSwap`, and `prepareSwap` now also pin their reads to a fresh block in the same way. A simulation, quote, or prepared plan requested right after a transaction no longer reflects state from before it. Each call now makes one uncached `eth_blockNumber` request; a large `cacheTime` on the public client no longer saves that request.
+
+  Approval and refresh limits, progress events and their order, and the hosted API requests are unchanged.
+
 ## 1.0.1
 
 ### Patch Changes
