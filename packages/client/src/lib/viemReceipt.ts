@@ -73,14 +73,23 @@ function observeBlockTransactions(
 
 type ClientLike = Client<Transport, Chain | undefined>;
 
-/** The replacement search for one submitted hash, shared by every adapter wait on it. */
+/**
+ * What adapter waits on one submitted hash have observed. viem may run a single
+ * poller for several of them, and only that poller's reads can be observed, so
+ * every wait viem could put on the same poller records into the same map.
+ */
 type Observation = {
-  readonly view: ClientLike;
   readonly observed: Map<string, ObservedTransaction>;
   waiters: number;
 };
 
-const observations = new WeakMap<ClientLike, Map<string, Observation>>();
+/** Keyed by the identity viem shares pollers by: the view's `uid` and the hash. */
+const observations = new Map<string, Observation>();
+
+/** `client.extend()` returns another object with the same `uid`, so objects cannot key this. */
+function receiptWaitUid(client: ClientLike): string {
+  return `${String(client.uid)}:osero-receipt`;
+}
 
 /**
  * Returns a view of `client` that records the sender's transactions from every
@@ -117,7 +126,7 @@ function observingClient(
       : (parameters: unknown): unknown =>
           watchBlockNumber(client, parameters as WatchBlockNumberParameters);
   return Object.create(client, {
-    uid: { value: `${String(client.uid)}:osero-receipt` },
+    uid: { value: receiptWaitUid(client) },
     getBlock: {
       value: async (parameters: unknown): Promise<unknown> => {
         const block = await readBlock(parameters);
@@ -129,31 +138,19 @@ function observingClient(
   }) as ClientLike;
 }
 
-/**
- * Adapter waits on the same client and hash share one view, because viem may
- * run a single poller for them and only that poller's reads can be observed.
- */
-function joinObservation(client: ClientLike, hash: string, sender: string): Observation {
-  let byHash = observations.get(client);
-  if (byHash === undefined) {
-    byHash = new Map();
-    observations.set(client, byHash);
-  }
-  let observation = byHash.get(hash);
+function joinObservation(key: string): Observation {
+  let observation = observations.get(key);
   if (observation === undefined) {
-    const observed = new Map<string, ObservedTransaction>();
-    observation = { view: observingClient(client, sender, observed), observed, waiters: 0 };
-    byHash.set(hash, observation);
+    observation = { observed: new Map(), waiters: 0 };
+    observations.set(key, observation);
   }
   observation.waiters += 1;
   return observation;
 }
 
-function leaveObservation(client: ClientLike, hash: string, observation: Observation): void {
+function leaveObservation(key: string, observation: Observation): void {
   observation.waiters -= 1;
-  if (observation.waiters > 0) return;
-  const byHash = observations.get(client);
-  if (byHash?.get(hash) === observation) byHash.delete(hash);
+  if (observation.waiters === 0 && observations.get(key) === observation) observations.delete(key);
 }
 
 /**
@@ -208,35 +205,54 @@ export async function waitForViemReceipt(
   let reason: ViemReplacementReason | undefined;
   const { submitted } = args;
   const hash = args.hash.toLowerCase();
-  const observation =
-    submitted === undefined
-      ? undefined
-      : joinObservation(client, hash, submitted.from.toLowerCase());
+  if (submitted === undefined) {
+    const receipt = await waitForTransactionReceipt(
+      client,
+      waitParameters(args, (named) => {
+        reason = named;
+      }),
+    );
+    if (reason === undefined && receipt.transactionHash.toLowerCase() !== hash) reason = 'replaced';
+    return reason === undefined ? { receipt } : { receipt, replacement: reason };
+  }
+  const key = `${receiptWaitUid(client)}\u0000${hash}`;
+  const observation = joinObservation(key);
   try {
-    const receipt = await waitForTransactionReceipt(observation?.view ?? client, {
-      hash: args.hash,
-      confirmations: args.confirmations,
-      ...(args.timeout === undefined ? {} : { timeout: args.timeout }),
-      onReplaced: (replacement) => {
-        reason =
-          replacement.reason === 'repriced' || replacement.reason === 'cancelled'
-            ? replacement.reason
-            : 'replaced';
-      },
-    });
+    const view = observingClient(client, submitted.from.toLowerCase(), observation.observed);
+    const receipt = await waitForTransactionReceipt(
+      view,
+      waitParameters(args, (named) => {
+        reason = named;
+      }),
+    );
     if (reason === undefined && receipt.transactionHash.toLowerCase() !== hash) {
-      reason =
-        observation === undefined || submitted === undefined
-          ? 'replaced'
-          : classifyUnreportedReplacement(
-              observation.observed.get(receipt.transactionHash.toLowerCase()),
-              submitted,
-            );
+      reason = classifyUnreportedReplacement(
+        observation.observed.get(receipt.transactionHash.toLowerCase()),
+        submitted,
+      );
     }
     return reason === undefined ? { receipt } : { receipt, replacement: reason };
   } finally {
-    if (observation !== undefined) leaveObservation(client, hash, observation);
+    leaveObservation(key, observation);
   }
+}
+
+function waitParameters(
+  args: { readonly hash: Hex; readonly confirmations: number; readonly timeout?: number },
+  onNamed: (reason: ViemReplacementReason) => void,
+) {
+  return {
+    hash: args.hash,
+    confirmations: args.confirmations,
+    ...(args.timeout === undefined ? {} : { timeout: args.timeout }),
+    onReplaced: (replacement: { readonly reason: string }) => {
+      onNamed(
+        replacement.reason === 'repriced' || replacement.reason === 'cancelled'
+          ? replacement.reason
+          : 'replaced',
+      );
+    },
+  };
 }
 
 /**

@@ -1,3 +1,4 @@
+import type { PrivyClient } from '@privy-io/node';
 import {
   createClient,
   createPublicClient,
@@ -7,9 +8,11 @@ import {
   publicActions,
   type Address,
   type Hex,
+  type PublicClient,
 } from 'viem';
 import { base } from 'viem/chains';
 
+import { sendWith as sendWithPrivy } from '../privy.js';
 import { sendWith } from '../viem.js';
 import { ConfirmationError } from './errors.js';
 import { createExecutionPlan, createTransactionRequest } from './plan.js';
@@ -231,6 +234,19 @@ describe('waitForViemReceipt against the real viem waiter', () => {
     expect(outcomes.map((outcome) => outcome.replacement)).toEqual(['repriced', 'repriced']);
   });
 
+  it('shares what it observed with a wait on an extension of the same client', async () => {
+    // client.extend() returns another object with the same uid, so viem puts both
+    // waits on one poller and only one of the two views reads the block.
+    const { client } = publicClient(REPRICED);
+    const extended = client.extend(() => ({}));
+    const wait = (through: typeof client) =>
+      waitForViemReceipt(through, { hash: ORIGINAL, confirmations: 2, submitted: SUBMITTED });
+
+    const outcomes = await Promise.all([wait(client), wait(extended as typeof client)]);
+
+    expect(outcomes.map((outcome) => outcome.replacement)).toEqual(['repriced', 'repriced']);
+  });
+
   it('fails closed when the confirmed transaction was sent by another account', async () => {
     const { client } = publicClient(REPRICED);
 
@@ -360,4 +376,37 @@ describe('viem adapter with multiple confirmations against the real viem waiter'
       expect(node.sent).toHaveLength(1);
     },
   );
+});
+
+describe('Privy adapter with multiple confirmations against the real viem waiter', () => {
+  it('confirms a repriced step for two sends that share a hash, one through an extended receipt client', async () => {
+    // A retry with the same idempotency key resolves to the same hash.
+    const privy = {
+      wallets: () => ({ ethereum: () => ({ sendTransaction: async () => ({ hash: ORIGINAL }) }) }),
+    } as unknown as PrivyClient;
+    const { client } = publicClient(REPRICED);
+    const send = (receiptClient: PublicClient) =>
+      sendWithPrivy(privy, { id: 'wallet-1', address: ACCOUNT }, plan().single, {
+        chainId: base.id,
+        receiptClient,
+        idempotencyKeys: { one: 'key-one' },
+        confirmations: 2,
+      });
+
+    const results = await Promise.all([
+      send(client as unknown as PublicClient),
+      send(client.extend(() => ({})) as unknown as PublicClient),
+    ]);
+
+    for (const result of results) {
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) {
+        expect(result.value.transactions[0]).toMatchObject({
+          submittedHash: ORIGINAL,
+          hash: REPLACEMENT,
+          replacement: { reason: 'repriced' },
+        });
+      }
+    }
+  });
 });
