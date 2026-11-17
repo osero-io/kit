@@ -176,3 +176,28 @@ reports one. A batch whose status wait times out has therefore emitted `step-sta
 Pass `resume` with the confirmed prefix to skip steps that already executed. Every adapter fetches
 the receipt for each entry and requires a successful receipt with the same hash before skipping it.
 A missing, reverted, or mismatched receipt returns `ConfirmationError` and nothing is sent.
+
+Every bundled adapter records each confirmed step on `execution.completed` with its
+`submittedHash`, `replacement`, and `confirmation`, which is everything resume state needs.
+`executionResumeStateFromError(plan, error)` turns a failure into the `resume` option, and
+`serializeExecutionResumeState` / `deserializeExecutionResumeState` persist it. A custom executor
+that reports completed steps without confirmations is still valid; resume state cannot be derived
+from its errors.
+
+Two errors carry execution context beyond the per-stage tables above:
+
+- `QuoteExpiredError` raised between steps has `execution` set to the step that was not submitted
+  (stage `preflight`), with the confirmed prefix in `execution.completed`.
+- The Privy `UnsupportedCapabilityError` for a response without a standard transaction hash has
+  `execution` set to that step (stage `broadcast`). The Wallet API accepted the request, so treat
+  the step as possibly in flight.
+
+EIP-5792 failures after the wallet accepted a batch carry the batch identifier as
+`execution.batchId`.
+
+## Declaring chain support in a custom executor
+
+`ExecutorCapabilities.supportedChainIds` is optional. When a custom executor sets it, the
+capability preflight rejects a plan with a step on any other chain with
+`UnsupportedCapabilityError` (`capability: 'chain:<id>'`) before anything is sent. The bundled
+adapters leave it unset: they bind to the connected wallet's chain instead.

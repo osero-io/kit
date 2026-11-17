@@ -15,6 +15,7 @@ pnpm + Turborepo TypeScript monorepo, compiled with TypeScript 7. The only publi
 - `pnpm check` — everything CI runs: `turbo run format:check lint build typecheck test`
 - Scope any task to one package with a turbo filter: `pnpm turbo run build --filter=@osero/client`
 - Run a single test: `pnpm --filter @osero/client test -t "<test name>"` or point vitest at a file: `pnpm --filter @osero/client test src/lib/actions/prepareSwap.test.ts`
+- `pnpm browser:check` — bundle the browser-supported entrypoints of the built SDK with esbuild and fail on any Node built-in import (run after `pnpm build`; CI runs it)
 - `pnpm lint` / `pnpm lint:fix` — oxlint across workspace
 - `pnpm format:check` / `pnpm format` — oxfmt
 - `pnpm --filter @osero/examples dry-run:inspect-plan` — safe local plan-building example (no broadcast)
@@ -59,7 +60,7 @@ Never throw from an action path. Errors are typed classes in `src/lib/errors.ts`
 
 ### Chain/token/API registries
 
-`src/lib/capabilities.ts` (`SUPPORTED_CHAIN_IDS`, `CHAIN_CAPABILITIES`) is the single source of truth for local action builders: chain metadata, token addresses, protocol addresses, the SSR source, and the supported route matrix all live in one `ChainCapability` entry per chain. `src/lib/chains.ts`, `src/lib/tokens.ts`, and `src/lib/addresses.ts` (`PSM_ADDRESSES`) are derived views of it, so a new local PSM chain is added in `capabilities.ts` only (with a `litePsm` address if it is mainnet-style). The route flow switches on `protocol` (`'ethereum-lite-psm'` or `'psm3'`), which is semantic rather than geographic. `CHAIN_CAPABILITIES` itself is internal and not exported from any entrypoint.
+`src/lib/capabilities.ts` (`SUPPORTED_CHAIN_IDS`, `CHAIN_CAPABILITIES`) is the single source of truth for local action builders: chain metadata, token addresses, protocol addresses, the SSR source, and the supported route matrix all live in one `ChainCapability` entry per chain. `src/lib/chains.ts`, `src/lib/tokens.ts`, and `src/lib/addresses.ts` (`PSM_ADDRESSES`) are derived views of it, so a new local PSM chain is added in `capabilities.ts` only (with a `litePsm` address if it is mainnet-style). The route flow switches on `protocol` (`'ethereum-lite-psm'` or `'psm3'`), which is semantic rather than geographic. `CHAIN_CAPABILITIES` itself is internal and not exported from any entrypoint; `listSwapRoutes(chainId)` in `src/lib/routes.ts` is its narrow public view.
 
 Hosted API vocabulary is different: the client ships **no gate**. The `OSERO_API_KNOWN_*` exports in `src/lib/api.ts` are advisory snapshots that only power editor autocomplete and offline UI hints — refresh them when the hosted API's vocabulary changes, but never validate a request or response against them. Decoders must stay structural (wire grammar and execution safety only); do not add membership checks or registry cross-checks. Adding hosted assets is an API-repo change (the SDK optionally refreshes the `KNOWN_*` rows for autocomplete). The local action registries above stay strict — they gate local plan building.
 

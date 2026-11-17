@@ -227,7 +227,7 @@ if (resumed.isErr()) throw resumed.error;
 
 A confirmation failure carries the submitted hash and confirmed prefix. Persist that context before retrying. Adapters verify receipts for the prefix before skipping steps.
 
-Only plans have serializers. Resume state is a plain `ExecutionResumeState` that the application assembles from the `transaction` in each `step-confirmed` progress event and stores with an encoding that preserves `bigint` fields.
+From 1.1.0, build resume state from the failure with `executionResumeStateFromError(plan, error)` and persist it with `serializeExecutionResumeState` / `deserializeExecutionResumeState`, which use the same bigint-safe canonical JSON as the plan serializers. On 1.0.x there is no resume-state serializer: assemble an `ExecutionResumeState` from the `transaction` in each `step-confirmed` progress event and store it with an encoding that preserves `bigint` fields.
 
 ## Wallet adapters
 
@@ -635,6 +635,8 @@ The response is no longer nested under `bridge`:
 | `status.bridge.error`             | `status.error`                           |
 | `status.bridge.providerStatus`    | provider-native `status.providerDetails` |
 
+From 1.1.0, `waitForTransferStatus({ sourceTransactionHash, statusContext }, options)` waits the same way from a persisted status request, so a restarted process does not need the quote.
+
 `waitForSwapCompletion()` defaults to a 5-second polling interval and a 30-minute timeout; pass explicit values when those defaults do not match product policy. It supports `AbortSignal`, awaits async `onStatus` callbacks, and invokes the callback only when the complete status observation changes. It keeps polling both `pending` and `unknown`.
 
 Both `completed` and `failed` are successful terminal `Result` values. A failed bridge transfer is not an SDK transport error, so inspect `status.state` and `status.error`. Same-chain quotes have `statusContext === null` and do not need polling; quote-aware status methods reject them locally before an HTTP request.
@@ -738,5 +740,5 @@ Deep imports under `@osero/client/src/*` or `@osero/client/dist/lib/*` are not p
 - [ ] Recovery Actions are submitted through `prepareRecoveryExecutionPlan()` with an explicit submitter, and only from an `action-required` recovery.
 - [ ] Status polling resumes after a Recovery Action is submitted.
 - [ ] Quote display does not subtract Provider Details fees from `quote.expectedOutput` again.
-- [ ] Persisted plans use the canonical serializers, and persisted resume state keeps its `bigint` fields.
+- [ ] Persisted plans and resume state use the canonical serializers (`serializeExecutionPlan`, and `serializeExecutionResumeState` from 1.1.0).
 - [ ] UI copy does not present independent simulation as guaranteed execution.

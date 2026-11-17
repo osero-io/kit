@@ -36,8 +36,10 @@ Requirements:
 Supported runtimes:
 
 - **Node.js 20 or newer** for every entrypoint.
-- **Modern browsers** that provide ES modules, `BigInt`, and a global `fetch`, for `@osero/client`, `/actions`, `/api`, `/contracts`, `/viem`, `/eip5792`, and `/ethers`. The SDK's own source imports no Node.js built-in module.
+- **Modern browsers** that provide ES modules, `BigInt`, and a global `fetch`, for `@osero/client`, `/actions`, `/api`, `/contracts`, `/viem`, `/eip5792`, and `/ethers`. CI bundles each of these entrypoints for the browser with its dependencies and fails if any of them needs a Node.js built-in module (`pnpm browser:check`).
 - `@osero/client/privy` wraps the server-side `@privy-io/node` SDK and is supported on Node.js only.
+
+The peer ranges are tested at their floors: the packed-consumer check installs viem 2.28.0, ethers 6.14.0, and `@privy-io/node` 0.19.0 and typechecks every entrypoint against them.
 
 ## Public entrypoints
 
@@ -53,6 +55,8 @@ Supported runtimes:
 | `@osero/client/privy`     | Privy server-wallet executor                                               |
 
 Unexported files under `src/lib` and `dist/lib` are implementation details. Package export-map enforcement prevents importing them as public subpaths.
+
+Every operation returns a neverthrow `Result` or `ResultAsync`, and the root entrypoint exports those two as types only. That is the whole contract: the methods on a returned result (`isOk()`, `isErr()`, `map`, `andThen`, `match`, and awaiting a `ResultAsync`) are stable, but neverthrow's helper functions such as `ok`, `err`, and `ResultAsync.fromPromise` are not re-exported and are not part of this package's API. Install `neverthrow` yourself if you want to construct results.
 
 ## Configure reads explicitly
 
@@ -188,7 +192,28 @@ if (prepared.isOk()) {
 }
 ```
 
-The chain capability matrix determines which pair/mode combinations are deployed. Unsupported combinations return `ValidationError`; the SDK does not guess protocol liquidity from a generic ABI.
+The chain capability matrix determines which pair/mode combinations are deployed. Unsupported combinations return `ValidationError`; the SDK does not guess protocol liquidity from a generic ABI. List what a chain supports with [`listSwapRoutes`](#supported-chains).
+
+### Optional local gas estimates
+
+By default a local plan carries no gas estimate and `prepareSwap` makes no estimation call. Pass `gasEstimates: 'independent-steps'` to attach an advisory estimate, taken at the quote block, to the steps that can be estimated on current chain state:
+
+```ts
+const prepared = await prepareSwap(client, {
+  chainId: 8453,
+  account,
+  mode: 'exact-in',
+  amountIn: amountIn.value,
+  assetOut: 'sUSDS',
+  gasEstimates: 'independent-steps',
+});
+
+if (prepared.isOk()) {
+  console.log(prepared.value.plan.steps[0]?.estimatedGas); // { gas, source: 'local-simulation', observedAtBlock }
+}
+```
+
+Only the first step is estimated. Every later step of a sequential plan depends on an earlier one: a swap that follows an approval cannot be estimated until the approval has executed. A failed estimate omits the field and never fails `prepareSwap`. Estimates are advisory metadata: they are not part of the plan ID, and no adapter uses them as a gas limit.
 
 ## Approval policy
 
@@ -281,26 +306,40 @@ A confirmation failure includes:
 - submitted transaction hash when one exists
 - the ordered confirmed prefix
 
-Persist plans with the canonical serializers. Resume state has no serializer yet: it is a plain `ExecutionResumeState` (`{ planId, confirmed }`) that the application assembles and stores itself, using an encoding that preserves `bigint` fields. Build `confirmed` from the `transaction` carried by each `step-confirmed` progress event; the `completed` list on an execution error identifies the confirmed steps but does not carry their receipts.
+Every bundled adapter attaches the confirmed prefix, with its receipts, to the error it returns. Turn a failure into resume state, persist it, and resume later:
 
 ```ts
 import {
   deserializeExecutionPlan,
-  resumeExecutionPlan,
+  deserializeExecutionResumeState,
+  executionResumeStateFromError,
   serializeExecutionPlan,
+  serializeExecutionResumeState,
 } from '@osero/client';
 
-const serialized = serializeExecutionPlan(prepared.value.plan);
-if (serialized.isErr()) throw serialized.error;
+const result = await sendWith(walletClient, plan);
+if (result.isErr()) {
+  const resume = executionResumeStateFromError(plan, result.error);
+  if (resume.isOk()) {
+    const savedPlan = serializeExecutionPlan(plan);
+    const savedResume = serializeExecutionResumeState(resume.value);
+    // Store both strings. They are bigint-safe canonical JSON.
+  }
+}
 
-const restored = deserializeExecutionPlan(serialized.value);
-if (restored.isErr()) throw restored.error;
-
-const resumed = resumeExecutionPlan(restored.value, savedResumeState);
-if (resumed.isErr()) throw resumed.error;
+// Later, possibly in another process:
+const restoredPlan = deserializeExecutionPlan(savedPlanJson);
+const restoredResume = deserializeExecutionResumeState(savedResumeJson);
+if (restoredPlan.isOk() && restoredResume.isOk()) {
+  await sendWith(walletClient, restoredPlan.value, { resume: restoredResume.value });
+}
 ```
 
-Adapters re-fetch receipts for a supplied confirmed prefix before skipping it. Resume state must match the plan ID, step order, operation, and hashes exactly.
+`executionResumeStateFromError` does not guess. It returns a `ValidationError` when the error carries no execution context, belongs to another plan, or lists a completed step without its confirmation, as an error from a custom executor might. `deserializeExecutionResumeState` validates the shape of the state; whether it matches a plan is checked when it is used.
+
+Adapters re-fetch receipts for a supplied confirmed prefix before skipping it. Resume state must match the plan ID, step order, operation, and hashes exactly. `resumeExecutionPlan(plan, state)` performs the same match without a wallet and returns the pending steps.
+
+An ambiguous failure is not a reason to resend. When a confirmation times out, check the hash on `error.execution.hash` (or, for an EIP-5792 batch, the wallet's status for `error.execution.batchId`) before deciding anything. A quote that expires partway through a plan returns `QuoteExpiredError` whose `execution.completed` lists the steps already confirmed.
 
 ## Honest simulation
 
@@ -311,6 +350,10 @@ const simulation = await simulateExecutionPlan(client, prepared.value.plan, acco
 ```
 
 Simulation reports the pinned block, native balance, relevant token balances/allowances, fee data, per-step estimate, and RPC provenance. Multi-step plans are labeled `independent-steps`: later estimates do not pretend earlier state transitions have occurred.
+
+- `feeData.basis` says what `feeData.gasPrice` is. With `'max-fee-per-gas'` it is the EIP-1559 fee cap (also exposed as `feeData.maxFeePerGas`), so each `estimatedNativeFee` is an upper bound rather than the expected cost. With `'gas-price'` it is the legacy gas price.
+- A failed step carries `result.revert` when the node returned a revert reason or raw revert data. Both fields are best effort: custom error data stays raw in `revert.data` without a decoded `reason`.
+- Pass the prepared quote to see its bounds next to the simulation: `simulateExecutionPlan(client, prepared.value.plan, account, { quote: prepared.value })` adds a `quote` field with the expected amount and the minimum output or maximum input. The quote must belong to the plan being simulated. These are the quote's values; independent step simulation does not measure the swap output.
 
 ## Hosted API
 
@@ -403,6 +446,17 @@ const completion = await api.waitForSwapCompletion(
 ```
 
 The helper sends the source transaction hash with the quote's complete Status Context: Quote Provider, source chain, destination chain, bridge, and — for 0x only — the Provider Quote ID. It polls normalized `pending` and `unknown` states and stops on `completed` or `failed`. A terminal `failed` state is a successful Transfer Status observation whose payload preserves the nullable error and Provider Details. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors. Same-chain quotes have no Status Context and reject Transfer Status polling before an HTTP request.
+
+To keep waiting after a restart, persist `{ sourceTransactionHash, statusContext }` when the source transaction is submitted and pass it to `waitForTransferStatus`, which takes the same options and behaves the same way without needing the quote:
+
+```ts
+const statusRequest = {
+  sourceTransactionHash: execution.value.executionResult.txHash,
+  statusContext: finalQuote.statusContext, // non-null for a cross-chain quote
+};
+// Persist statusRequest as JSON. After a restart:
+const completion = await api.waitForTransferStatus(statusRequest, { timeoutMs: 30 * 60_000 });
+```
 
 Status Context is a provider-discriminated union. Persist it whole alongside the quote and submit it unchanged: a 0x context additionally carries `providerQuoteId` (0x's `quoteId`), which the client serializes into every status poll and refuses to poll without, because bundled transactions cannot be disambiguated otherwise. `isOseroApiZeroXStatusContext` narrows to it.
 
@@ -501,6 +555,26 @@ if (result.isErr()) {
 | Arbitrum One | 42161 | Spark PSM3              |
 
 Use `listChains()`, `getChain()`, `listTokens()`, and `getToken()` rather than copying addresses. Raw ABIs and intentionally supported addresses are available through `@osero/client/contracts`.
+
+`listSwapRoutes(chainId)` lists the local routes on a chain. It is a synchronous lookup derived from the same capability matrix `quoteSwap` and `prepareSwap` use, so a listed pair and mode is one they accept:
+
+```ts
+import { listSwapRoutes } from '@osero/client';
+
+for (const route of listSwapRoutes(1)) {
+  for (const mode of route.modes) {
+    console.log(
+      route.assetIn,
+      route.assetOut,
+      mode.mode, // 'exact-in' | 'exact-out'
+      mode.slippageProtection.enforcedBy, // 'calldata' | 'allowance' | 'none'
+      mode.referral, // 'none' | 'uint16' | 'uint256'
+    );
+  }
+}
+```
+
+A mode whose `slippageProtection.enforcedBy` is `'none'` cannot enforce its quoted bound on chain, and `prepareSwap` requires `allowUnprotectedSlippage: true` for it. A mode whose `referral` is `'none'` rejects a referral code. The listing describes what is deployed, not current liquidity, and returns an empty list for a chain without local routes. Hosted API pairs are listed by `OseroApiClient.getSupportedAssets()` instead.
 
 ## Telemetry
 
