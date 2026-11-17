@@ -4,14 +4,15 @@ import {
   getTransactionReceipt,
   sendCalls,
   waitForCallsStatus,
-  waitForTransactionReceipt,
 } from 'viem/actions';
 
 import { preflightExecutorCapabilities } from './lib/adapters.js';
 import {
+  BroadcastError,
   CancelError,
   ConfigurationError,
   ConfirmationError,
+  OseroError,
   ProgressCallbackError,
   SigningError,
   TransactionError,
@@ -39,6 +40,7 @@ import {
   validateExecutorBinding,
   validateResumeState,
 } from './lib/validation.js';
+import { nonRepricedReplacementError, waitForViemReceipt } from './lib/viemReceipt.js';
 import { sendWith as sendWithViem, type SendWithOptions as ViemSendWithOptions } from './viem.js';
 
 export type SendWithOptions = ViemSendWithOptions & {
@@ -118,6 +120,8 @@ type ConfirmedBatchReceipt = {
     readonly gasUsed?: bigint;
     readonly effectiveGasPrice?: bigint;
   };
+  /** Set when extra confirmations observed the batch transaction being repriced. */
+  readonly repricedFrom?: Hex;
 };
 
 type AtomicBatchOutcome =
@@ -140,12 +144,6 @@ const EIP5792_EXECUTOR_CAPABILITIES: ExecutorCapabilities = {
 };
 
 const HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
-
-class Eip5792UnexpectedError extends UnexpectedError {
-  constructor(message: string, cause: unknown) {
-    super(message, { cause });
-  }
-}
 
 function hasConnectedAccount(walletClient: WalletClient): walletClient is ConnectedWalletClient {
   return walletClient.account !== undefined && walletClient.chain !== undefined;
@@ -410,7 +408,8 @@ function mapSendCallsError(
   const context = failureContext(plan, first, signingFailed ? 'signing' : 'broadcast', completed);
   if (code === 4001 || code === 5750) return err(CancelError.from(cause, context));
   if (code === 4100) return err(SigningError.from(cause, context));
-  return err(UnexpectedError.from(cause));
+  // Every other wallet_sendCalls failure is a failed submission, not an SDK defect.
+  return err(BroadcastError.from(cause, context));
 }
 
 function asReceipt(value: unknown): {
@@ -444,16 +443,130 @@ function asReceipt(value: unknown): {
   };
 }
 
-function unexpected(message: string, cause: unknown): UnexpectedError {
-  return new Eip5792UnexpectedError(message, cause);
+type BatchEvent =
+  | { readonly kind: 'preflight-complete' }
+  | {
+      readonly kind: 'step-started' | 'step-submitted' | 'step-confirmed';
+      readonly step: IndexedStep;
+    }
+  | { readonly kind: 'plan-completed' };
+
+/**
+ * Emits progress for an atomic batch as each fact becomes known, so a batch
+ * that later fails has still reported what was submitted:
+ *
+ * - once the wallet accepts the batch: `preflight-complete`, then `step-started`
+ *   for every batched step;
+ * - once the wallet reports the batch's transaction: `step-submitted` for every
+ *   step, carrying that on-chain hash (a batch ID is not a transaction hash, so
+ *   nothing is invented before then);
+ * - only after the batch is confirmed: `step-confirmed` and `plan-completed`.
+ *
+ * Like the sequential path, a throwing callback never interrupts execution. The
+ * first failure stops further events and is returned once the batch succeeds.
+ */
+function createBatchProgress(execution: Extract<PreparedExecution, { readonly kind: 'pending' }>) {
+  const handler = execution.options.onProgress;
+  let failed: { readonly cause: unknown; readonly event: BatchEvent } | undefined;
+  const emit = async (event: BatchEvent, progress: ExecutionProgress): Promise<void> => {
+    if (handler === undefined || failed !== undefined) return;
+    try {
+      await handler(progress);
+    } catch (cause) {
+      failed = { cause, event };
+    }
+  };
+  const stepEvent = (step: IndexedStep) => ({
+    planId: execution.plan.id,
+    stepId: step.transaction.id,
+    stepIndex: step.index,
+    operation: step.transaction.operation,
+  });
+
+  return {
+    async batchAccepted(): Promise<void> {
+      await emit(
+        { kind: 'preflight-complete' },
+        {
+          type: 'preflight-complete',
+          planId: execution.plan.id,
+          totalSteps: execution.plan.steps.length,
+          resumedSteps: execution.confirmed.length,
+        },
+      );
+      // oxlint-disable no-await-in-loop -- Progress callbacks preserve plan order.
+      for (const step of execution.pending) {
+        await emit({ kind: 'step-started', step }, { type: 'step-started', ...stepEvent(step) });
+      }
+      // oxlint-enable no-await-in-loop
+    },
+    async transactionKnown(hash: Hex): Promise<void> {
+      // oxlint-disable no-await-in-loop -- Progress callbacks preserve plan order.
+      for (const step of execution.pending) {
+        await emit(
+          { kind: 'step-submitted', step },
+          { type: 'step-submitted', ...stepEvent(step), hash },
+        );
+      }
+      // oxlint-enable no-await-in-loop
+    },
+    async confirmed(result: TransactionResult): Promise<void> {
+      // oxlint-disable no-await-in-loop -- Progress callbacks preserve plan order.
+      for (const step of execution.pending) {
+        await emit(
+          { kind: 'step-confirmed', step },
+          { type: 'step-confirmed', transaction: result.transactions[step.index]! },
+        );
+      }
+      // oxlint-enable no-await-in-loop
+      await emit({ kind: 'plan-completed' }, { type: 'plan-completed', result });
+    },
+    /** The callback failure to report for a batch that confirmed, if any. */
+    failure(result: TransactionResult): ProgressCallbackError | undefined {
+      if (failed === undefined) return undefined;
+      const { cause, event } = failed;
+      const last = execution.pending[execution.pending.length - 1];
+      const step =
+        event.kind === 'preflight-complete'
+          ? execution.pending[0]
+          : event.kind === 'plan-completed'
+            ? last
+            : event.step;
+      const completed =
+        event.kind === 'preflight-complete'
+          ? execution.confirmed
+          : event.kind === 'plan-completed'
+            ? result.transactions
+            : result.transactions.slice(
+                0,
+                event.kind === 'step-confirmed' ? event.step.index + 1 : event.step.index,
+              );
+      return ProgressCallbackError.from(
+        cause,
+        failureContext(execution.plan, step, 'progress', completed),
+      );
+    },
+  };
 }
+
+type BatchProgress = ReturnType<typeof createBatchProgress>;
 
 function decodeConfirmedBatchReceipt(
   value: unknown,
   plan: ExecutionPlan,
   batch: AtomicBatch,
   batchId: BatchId,
+  completed: readonly ConfirmedTransaction[],
 ): Result<ConfirmedBatchReceipt, SendWithError> {
+  const lastStep = batch.entries[batch.entries.length - 1].step;
+  // The wallet answered, but not with a status this adapter can accept as proof
+  // of confirmation. That is a confirmation failure for a submitted batch.
+  const unconfirmed = (message: string, hash?: Hex): ConfirmationError =>
+    new ConfirmationError(
+      message,
+      failureContext(plan, lastStep, 'confirmation', completed, hash),
+      { cause: value },
+    );
   if (
     typeof value !== 'object' ||
     value === null ||
@@ -462,28 +575,23 @@ function decodeConfirmedBatchReceipt(
     !('receipts' in value) ||
     !Array.isArray(value.receipts)
   ) {
-    return err(unexpected(`Call batch ${batchId} returned a malformed status`, value));
+    return err(unconfirmed(`Call batch ${batchId} returned a malformed status`));
   }
   const receipts = value.receipts.map(asReceipt);
   const lastReceipt = receipts.toReversed().find((receipt) => receipt !== null);
+  const lastHash = lastReceipt?.transactionHash;
   if (value.statusCode === 500 || value.statusCode === 600) {
     if (lastReceipt !== undefined && lastReceipt !== null) {
       return err(
         new TransactionError(
           `Call batch ${batchId} failed at transaction ${lastReceipt.transactionHash}`,
           lastReceipt.transactionHash,
-          failureContext(
-            plan,
-            batch.entries[batch.entries.length - 1].step,
-            'revert',
-            [],
-            lastReceipt.transactionHash,
-          ),
+          failureContext(plan, lastStep, 'revert', completed, lastReceipt.transactionHash),
           { cause: value },
         ),
       );
     }
-    return err(unexpected(`Call batch ${batchId} failed without a transaction receipt`, value));
+    return err(unconfirmed(`Call batch ${batchId} failed without a transaction receipt`));
   }
   if (
     value.statusCode !== 200 ||
@@ -491,11 +599,11 @@ function decodeConfirmedBatchReceipt(
     (receipts.length !== 1 && receipts.length !== batch.entries.length) ||
     receipts.some((receipt) => receipt === null || receipt.status !== 'success')
   ) {
-    return err(unexpected(`Call batch ${batchId} returned an invalid terminal status`, value));
+    return err(unconfirmed(`Call batch ${batchId} returned an invalid terminal status`, lastHash));
   }
   const terminal = receipts[receipts.length - 1]!;
   if (terminal === null) {
-    return err(unexpected(`Call batch ${batchId} did not return a terminal receipt`, value));
+    return err(unconfirmed(`Call batch ${batchId} did not return a terminal receipt`));
   }
   return ok({
     batchId,
@@ -514,7 +622,10 @@ async function executeAtomicBatch(
   walletClient: ConnectedWalletClient,
   execution: Extract<PreparedExecution, { readonly kind: 'pending' }>,
   batch: AtomicBatch,
+  progress: BatchProgress,
 ): Promise<Result<AtomicBatchOutcome, SendWithError>> {
+  const firstStep = batch.entries[0].step;
+  const lastStep = batch.entries[batch.entries.length - 1].step;
   let response: unknown;
   try {
     response = await sendCalls(walletClient, {
@@ -537,9 +648,16 @@ async function executeAtomicBatch(
     typeof response.id !== 'string' ||
     response.id.length === 0
   ) {
-    return err(UnexpectedError.from(new Error('wallet_sendCalls returned an invalid batch id')));
+    return err(
+      new BroadcastError(
+        'wallet_sendCalls returned an invalid batch id',
+        failureContext(execution.plan, firstStep, 'broadcast', execution.confirmed),
+        { cause: response },
+      ),
+    );
   }
   const batchId = response.id as BatchId;
+  await progress.batchAccepted();
 
   let status: unknown;
   try {
@@ -548,47 +666,77 @@ async function executeAtomicBatch(
       timeout: execution.options.confirmationTimeoutMs,
     });
   } catch (cause) {
-    return err(unexpected(`Failed while waiting for call batch ${batchId}`, cause));
+    // The batch was accepted; only its outcome is unknown. Never retry blindly.
+    return err(
+      new ConfirmationError(
+        `Failed while waiting for call batch ${batchId}`,
+        failureContext(execution.plan, lastStep, 'confirmation', execution.confirmed),
+        { cause },
+      ),
+    );
   }
-  const decoded = decodeConfirmedBatchReceipt(status, execution.plan, batch, batchId);
-  if (decoded.isErr()) return err(decoded.error);
+  const decoded = decodeConfirmedBatchReceipt(
+    status,
+    execution.plan,
+    batch,
+    batchId,
+    execution.confirmed,
+  );
+  if (decoded.isErr()) {
+    if (decoded.error instanceof TransactionError) {
+      await progress.transactionKnown(decoded.error.txHash);
+    }
+    return err(decoded.error);
+  }
+  const submittedHash = decoded.value.terminal.transactionHash;
+  await progress.transactionKnown(submittedHash);
   if (execution.options.confirmations === 1)
     return ok({ kind: 'confirmed', receipt: decoded.value });
 
   let receipt: unknown;
+  let replacement: Awaited<ReturnType<typeof waitForViemReceipt>>['replacement'];
   try {
-    receipt = await waitForTransactionReceipt(walletClient, {
-      hash: decoded.value.terminal.transactionHash,
+    const waited = await waitForViemReceipt(walletClient, {
+      hash: submittedHash,
       confirmations: execution.options.confirmations,
       timeout: execution.options.confirmationTimeoutMs,
     });
+    receipt = waited.receipt;
+    replacement = waited.replacement;
   } catch (cause) {
     return err(
       ConfirmationError.from(
         cause,
         failureContext(
           execution.plan,
-          batch.entries[batch.entries.length - 1].step,
+          lastStep,
           'confirmation',
           execution.confirmed,
-          decoded.value.terminal.transactionHash,
+          submittedHash,
         ),
       ),
     );
   }
   const confirmed = asReceipt(receipt);
+  // Same rule as the sequential adapters: only a same-transaction fee bump may
+  // stand in for the batch transaction the wallet reported.
+  if (replacement !== undefined && replacement !== 'repriced') {
+    return err(
+      nonRepricedReplacementError(
+        submittedHash,
+        replacement,
+        confirmed?.transactionHash ?? submittedHash,
+        failureContext(execution.plan, lastStep, 'replacement', execution.confirmed, submittedHash),
+      ),
+    );
+  }
   if (confirmed === null || confirmed.status !== 'success') {
+    const revertedHash = confirmed?.transactionHash ?? submittedHash;
     return err(
       new TransactionError(
-        `Transaction ${decoded.value.terminal.transactionHash} reverted`,
-        decoded.value.terminal.transactionHash,
-        failureContext(
-          execution.plan,
-          batch.entries[batch.entries.length - 1].step,
-          'revert',
-          execution.confirmed,
-          decoded.value.terminal.transactionHash,
-        ),
+        `Transaction ${revertedHash} reverted`,
+        revertedHash,
+        failureContext(execution.plan, lastStep, 'revert', execution.confirmed, revertedHash),
         { cause: receipt },
       ),
     );
@@ -605,6 +753,7 @@ async function executeAtomicBatch(
           ? {}
           : { effectiveGasPrice: confirmed.effectiveGasPrice }),
       },
+      ...(replacement === 'repriced' ? { repricedFrom: submittedHash } : {}),
     },
   });
 }
@@ -631,8 +780,17 @@ function toLogicalConfirmation(
     stepId: step.transaction.id,
     stepIndex: step.index,
     operation: step.transaction.operation,
-    submittedHash: hash,
+    submittedHash: receipt.repricedFrom ?? hash,
     hash,
+    ...(receipt.repricedFrom === undefined
+      ? {}
+      : {
+          replacement: {
+            reason: 'repriced',
+            originalHash: receipt.repricedFrom,
+            replacementHash: hash,
+          },
+        }),
     confirmation: {
       status: 'success',
       transactionHash: hash,
@@ -661,95 +819,6 @@ function buildAtomicResult(
     transactions,
     txHash: receipt.terminal.transactionHash,
   };
-}
-
-function progressEvents(
-  execution: Extract<PreparedExecution, { readonly kind: 'pending' }>,
-  result: TransactionResult,
-): readonly {
-  readonly event: ExecutionProgress;
-  readonly step: IndexedStep;
-  readonly completed: readonly ConfirmedTransaction[];
-}[] {
-  const first = execution.pending[0];
-  const events: {
-    event: ExecutionProgress;
-    step: IndexedStep;
-    completed: readonly ConfirmedTransaction[];
-  }[] = [
-    {
-      event: {
-        type: 'preflight-complete',
-        planId: execution.plan.id,
-        totalSteps: execution.plan.steps.length,
-        resumedSteps: execution.confirmed.length,
-      },
-      step: first,
-      completed: execution.confirmed,
-    },
-  ];
-  for (const step of execution.pending) {
-    const transaction = result.transactions[step.index]!;
-    const completed = result.transactions.slice(0, step.index);
-    events.push(
-      {
-        event: {
-          type: 'step-started',
-          planId: execution.plan.id,
-          stepId: step.transaction.id,
-          stepIndex: step.index,
-          operation: step.transaction.operation,
-        },
-        step,
-        completed,
-      },
-      {
-        event: {
-          type: 'step-submitted',
-          planId: execution.plan.id,
-          stepId: step.transaction.id,
-          stepIndex: step.index,
-          operation: step.transaction.operation,
-          hash: transaction.submittedHash,
-        },
-        step,
-        completed,
-      },
-      {
-        event: { type: 'step-confirmed', transaction },
-        step,
-        completed: result.transactions.slice(0, step.index + 1),
-      },
-    );
-  }
-  events.push({
-    event: { type: 'plan-completed', result },
-    step: execution.pending[execution.pending.length - 1],
-    completed: result.transactions,
-  });
-  return events;
-}
-
-async function emitProgress(
-  execution: Extract<PreparedExecution, { readonly kind: 'pending' }>,
-  result: TransactionResult,
-): Promise<Result<void, SendWithError>> {
-  if (execution.options.onProgress === undefined) return ok(undefined);
-  // oxlint-disable no-await-in-loop -- Progress callbacks preserve plan order.
-  for (const item of progressEvents(execution, result)) {
-    try {
-      await execution.options.onProgress(item.event);
-    } catch (cause) {
-      return err(
-        ProgressCallbackError.from(
-          cause,
-          failureContext(execution.plan, item.step, 'progress', item.completed),
-        ),
-      );
-    }
-  }
-  // oxlint-enable no-await-in-loop
-  return ok(undefined);
 }
 
 function toViemOptions(options: ResolvedOptions): ViemSendWithOptions {
@@ -805,7 +874,8 @@ function executePlan(
       const expiry = checkExecutionPlanExpiry(prepared.value.plan);
       if (expiry.isErr()) return err(expiry.error);
       const batch = groupPendingSteps(prepared.value);
-      const outcome = await executeAtomicBatch(walletClient, prepared.value, batch);
+      const progress = createBatchProgress(prepared.value);
+      const outcome = await executeAtomicBatch(walletClient, prepared.value, batch, progress);
       if (outcome.isErr()) return err(outcome.error);
       if (outcome.value.kind === 'atomic-unavailable') {
         if (
@@ -821,10 +891,14 @@ function executePlan(
         );
       }
       const result = buildAtomicResult(prepared.value, outcome.value.receipt);
-      const progress = await emitProgress(prepared.value, result);
-      if (progress.isErr()) return err(progress.error);
+      await progress.confirmed(result);
+      const progressFailure = progress.failure(result);
+      if (progressFailure !== undefined) return err(progressFailure);
       return ok(result);
     } catch (cause) {
+      // Last-resort net for genuine defects. Classified failures are returned
+      // above as results; one that is thrown anyway is passed through unchanged.
+      if (cause instanceof OseroError) return err(cause as SendWithError);
       return err(UnexpectedError.from(cause));
     }
   };
