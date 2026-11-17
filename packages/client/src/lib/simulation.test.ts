@@ -463,8 +463,22 @@ describe('simulation revert details', () => {
   ])('reports no revert details for %s', async (_name, cause) => {
     const failed = await failedSwapStep(cause);
 
-    expect(failed.revert === undefined || failed.revert.reason === undefined).toBe(true);
-    if (cause instanceof Error && !('data' in cause)) expect('revert' in failed).toBe(false);
+    expect('revert' in failed).toBe(false);
+    expect(failed.error).toBeInstanceOf(SimulationError);
+  });
+
+  it('reports no revert details for empty data nested in an RPC payload or a viem error', async () => {
+    const nested = await failedSwapStep(
+      Object.assign(new Error('rpc error'), { data: { message: 'reverted', data: '0x' } }),
+    );
+    const viemError = await failedSwapStep(
+      Object.assign(new ContractFunctionRevertedError({ abi: [], functionName: 'swapExactIn' }), {
+        raw: '0x',
+      }),
+    );
+
+    expect('revert' in nested).toBe(false);
+    expect(viemError.revert?.data).toBeUndefined();
   });
 
   it('decodes a revert that travelled through a real viem public client', async () => {
@@ -652,16 +666,54 @@ describe('simulation quote bounds', () => {
   });
 
   it.each([
-    ['null options', null],
-    ['a null quote', { quote: null }],
-    ['a quote without a plan', { quote: {} }],
-  ])('rejects %s as a validation result', async (_name, options) => {
+    ['null options', () => null],
+    ['a null quote', () => ({ quote: null })],
+    ['a quote without a plan', () => ({ quote: {} })],
+    ['a quote that is only a plan', (plan: ExecutionPlan) => ({ quote: { plan } })],
+    [
+      'a quote without its quote block',
+      (plan: ExecutionPlan) => ({ quote: { ...exactInQuote(plan), quotedAt: undefined } }),
+    ],
+    [
+      'a quote whose quote block is not a bigint',
+      (plan: ExecutionPlan) => ({
+        quote: { ...exactInQuote(plan), quotedAt: { blockNumber: 120 } },
+      }),
+    ],
+    [
+      'a quote with an unknown mode',
+      (plan: ExecutionPlan) => ({ quote: { ...exactInQuote(plan), mode: 'exact-ish' } }),
+    ],
+    [
+      'an exact-input quote without its minimum output',
+      (plan: ExecutionPlan) => ({
+        quote: { ...exactInQuote(plan), minimumAmountOut: undefined },
+      }),
+    ],
+    [
+      'a quote whose amount is not a bigint',
+      (plan: ExecutionPlan) => ({
+        quote: { ...exactInQuote(plan), expectedAmountOut: { symbol: 'sUSDS', raw: '9000' } },
+      }),
+    ],
+    [
+      'a quote without slippage protection',
+      (plan: ExecutionPlan) => ({
+        quote: { ...exactInQuote(plan), slippageProtection: undefined },
+      }),
+    ],
+  ])('rejects %s as a validation result before any RPC call', async (_name, build) => {
     const { client, publicClient } = simulationClient();
+    const plan = executionPlan();
 
-    const result = await simulateExecutionPlan(client, executionPlan(), ACCOUNT, options as never);
+    const pending = simulateExecutionPlan(client, plan, ACCOUNT, build(plan) as never);
 
+    // The failure is a returned Err, never a rejected promise.
+    await expect(Promise.resolve(pending)).resolves.toBeDefined();
+    const result = await pending;
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
     expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+    expect(publicClient.estimateGas).not.toHaveBeenCalled();
   });
 });

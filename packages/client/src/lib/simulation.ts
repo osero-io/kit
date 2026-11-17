@@ -165,17 +165,19 @@ function decodeRevert(cause: unknown): SimulatedStepRevert | undefined {
     seen.add(current);
     if (current instanceof ContractFunctionRevertedError) {
       reason ??= current.reason ?? current.data?.errorName;
-      if (data === undefined && isHex(current.raw)) data = current.raw;
+      if (data === undefined && isHex(current.raw) && current.raw !== '0x') data = current.raw;
     }
     if (data === undefined && 'data' in current) {
       const candidate = current.data;
-      if (isHex(candidate)) {
+      // Empty revert data carries nothing to report.
+      if (isHex(candidate) && candidate !== '0x') {
         data = candidate;
       } else if (
         typeof candidate === 'object' &&
         candidate !== null &&
         'data' in candidate &&
-        isHex(candidate.data)
+        isHex(candidate.data) &&
+        candidate.data !== '0x'
       ) {
         data = candidate.data;
       }
@@ -189,7 +191,7 @@ function decodeRevert(cause: unknown): SimulatedStepRevert | undefined {
     }
     current = 'cause' in current ? current.cause : undefined;
   }
-  if (reason === undefined && data !== undefined && data !== '0x') {
+  if (reason === undefined && data !== undefined) {
     try {
       // Without an ABI viem decodes the standard Error(string) and Panic(uint256).
       const decoded = decodeErrorResult({ data });
@@ -210,6 +212,52 @@ function decodeRevert(cause: unknown): SimulatedStepRevert | undefined {
     ...(reason === undefined ? {} : { reason }),
     ...(data === undefined ? {} : { data }),
   };
+}
+
+function isTokenAmount(value: unknown): value is TokenAmount {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'symbol' in value &&
+    typeof value.symbol === 'string' &&
+    'raw' in value &&
+    typeof value.raw === 'bigint'
+  );
+}
+
+/**
+ * Reads the bounds to echo from a caller-supplied quote. The quote is a plain
+ * object the caller may have rebuilt or deserialized, so every field that is
+ * echoed is checked first; `undefined` means the quote is not usable.
+ */
+function readQuoteBounds(quote: PreparedSwapQuote): SimulatedQuoteBounds | undefined {
+  const protection: unknown = quote.slippageProtection;
+  if (
+    typeof quote.assetIn !== 'string' ||
+    typeof quote.assetOut !== 'string' ||
+    typeof protection !== 'object' ||
+    protection === null ||
+    typeof quote.quotedAt !== 'object' ||
+    quote.quotedAt === null ||
+    typeof quote.quotedAt.blockNumber !== 'bigint'
+  ) {
+    return undefined;
+  }
+  if (quote.mode === 'exact-in') {
+    return isTokenAmount(quote.amountIn) &&
+      isTokenAmount(quote.expectedAmountOut) &&
+      isTokenAmount(quote.minimumAmountOut)
+      ? quoteBounds(quote)
+      : undefined;
+  }
+  if (quote.mode === 'exact-out') {
+    return isTokenAmount(quote.amountOut) &&
+      isTokenAmount(quote.expectedAmountIn) &&
+      isTokenAmount(quote.maximumAmountIn)
+      ? quoteBounds(quote)
+      : undefined;
+  }
+  return undefined;
 }
 
 function quoteBounds(quote: PreparedSwapQuote): SimulatedQuoteBounds {
@@ -252,6 +300,7 @@ export function simulateExecutionPlan(
     return errAsync(ValidationError.forField('options', 'options must be an object'));
   }
   const quote = options?.quote;
+  let echoedQuote: SimulatedQuoteBounds | undefined;
   if (quote !== undefined) {
     // The echoed bounds must describe exactly the transactions being simulated:
     // the quote's plan id, the plan's id, and the plan's contents all agree.
@@ -273,6 +322,12 @@ export function simulateExecutionPlan(
           'options.quote',
           'quote does not belong to the execution plan being simulated',
         ),
+      );
+    }
+    echoedQuote = readQuoteBounds(quote);
+    if (echoedQuote === undefined) {
+      return errAsync(
+        ValidationError.forField('options.quote', 'quote is not a complete prepared swap quote'),
       );
     }
   }
@@ -445,7 +500,7 @@ export function simulateExecutionPlan(
         basis: maxFeePerGas === undefined ? 'gas-price' : 'max-fee-per-gas',
         ...(maxFeePerGas === undefined ? {} : { maxFeePerGas }),
       },
-      ...(quote === undefined ? {} : { quote: quoteBounds(quote) }),
+      ...(echoedQuote === undefined ? {} : { quote: echoedQuote }),
       steps,
       provenance: {
         transportType: publicClient.value.transport.type,
