@@ -82,8 +82,9 @@ submitted. The message is `Transaction <hash> was <reason> and cannot be treated
   including a replacement the adapter could not observe, fails closed as `cancelled` or `replaced`.
   The comparison uses the block viem already read for the wait, so it adds no RPC request. To see
   that block, the adapter's wait keeps its own receipt polling: it does not join a
-  `waitForTransactionReceipt` you started yourself on the same client and hash, and it always
-  applies the `confirmations` you passed to `sendWith`. Block-number polling is still shared.
+  `waitForTransactionReceipt` you started yourself on the same client and hash, so that wait's
+  `confirmations` no longer stand in for the ones you passed to `sendWith`. Block-number polling is
+  still shared.
 - **ethers** reads the `TRANSACTION_REPLACED` error. A replacement flagged `cancelled`, or with any
   reason other than `repriced`, fails.
 - **EIP-5792** applies the rule to the extra-confirmation wait (`confirmations` greater than `1`).

@@ -61,8 +61,9 @@ function rpcTransaction(hash: Hex, fields: Mined, blockNumber: bigint | null) {
  * A node on which the submitted transaction never mines. One block after the
  * start, a transaction from the same sender with the same nonce mines instead.
  */
-function scriptedNode(replacement: Mined) {
-  const replacedAt = START_BLOCK + 1n;
+function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint } = {}) {
+  // The replacement mines one block after the start, or later when asked.
+  let replacedAt = START_BLOCK + (options.mineAfter ?? 1n);
   let head = START_BLOCK - 1n;
   const calls: string[] = [];
   const sent: unknown[] = [];
@@ -120,7 +121,15 @@ function scriptedNode(replacement: Mined) {
         throw new Error(`unexpected RPC ${method}`);
     }
   };
-  return { transport: custom({ request }), calls, sent };
+  return {
+    transport: custom({ request }),
+    calls,
+    sent,
+    /** Mines the replacement in the next block. */
+    mineNow(): void {
+      replacedAt = head + 1n;
+    },
+  };
 }
 
 const SUBMITTED_AS_MINED: Mined = { to: TARGET, input: '0x1234', value: 0n };
@@ -245,6 +254,31 @@ describe('waitForViemReceipt against the real viem waiter', () => {
     const outcomes = await Promise.all([wait(client), wait(extended as typeof client)]);
 
     expect(outcomes.map((outcome) => outcome.replacement)).toEqual(['repriced', 'repriced']);
+  });
+
+  it('recognises a repricing after an earlier wait on the same hash timed out', async () => {
+    // viem 2.28 leaves the poller of a timed-out wait running. A later wait must
+    // not join it: its reads go to an observation that no longer exists.
+    const node = scriptedNode(REPRICED, { mineAfter: 1_000n });
+    const client = createPublicClient({
+      chain: base,
+      transport: node.transport,
+      pollingInterval: 1,
+    });
+    const wait = (timeout?: number) =>
+      waitForViemReceipt(client, {
+        hash: ORIGINAL,
+        confirmations: 2,
+        submitted: SUBMITTED,
+        ...(timeout === undefined ? {} : { timeout }),
+      });
+
+    await expect(wait(20)).rejects.toThrow(/Timed out while waiting for transaction/);
+    node.mineNow();
+    const outcome = await wait();
+
+    expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+    expect(outcome.replacement).toBe('repriced');
   });
 
   it('fails closed when the confirmed transaction was sent by another account', async () => {

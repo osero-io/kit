@@ -79,17 +79,18 @@ type ClientLike = Client<Transport, Chain | undefined>;
  * every wait viem could put on the same poller records into the same map.
  */
 type Observation = {
+  /** The `uid` every view in this observation presents to viem. */
+  readonly uid: string;
   readonly observed: Map<string, ObservedTransaction>;
   waiters: number;
 };
 
-/** Keyed by the identity viem shares pollers by: the view's `uid` and the hash. */
+/**
+ * Live observations, keyed by the client `uid` and the hash. `client.extend()`
+ * returns another object with the same `uid`, so objects cannot key this.
+ */
 const observations = new Map<string, Observation>();
-
-/** `client.extend()` returns another object with the same `uid`, so objects cannot key this. */
-function receiptWaitUid(client: ClientLike): string {
-  return `${String(client.uid)}:osero-receipt`;
-}
+let observationCount = 0;
 
 /**
  * Returns a view of `client` that records the sender's transactions from every
@@ -105,12 +106,13 @@ function receiptWaitUid(client: ClientLike): string {
  * started on the same client, whose block reads it could not observe and whose
  * confirmation count would silently replace the adapter's. Block-number
  * polling still runs on `client` itself, so it stays shared with the caller's
- * own watchers exactly as before.
+ * own watchers exactly as before, and viem keeps nothing else under the view's
+ * `uid` once the wait has settled.
  */
 function observingClient(
   client: ClientLike,
   sender: string,
-  observed: Map<string, ObservedTransaction>,
+  { uid, observed }: Observation,
 ): ClientLike {
   const { getBlock: ownGetBlock, watchBlockNumber: ownWatchBlockNumber } = client as {
     readonly getBlock?: unknown;
@@ -126,7 +128,7 @@ function observingClient(
       : (parameters: unknown): unknown =>
           watchBlockNumber(client, parameters as WatchBlockNumberParameters);
   return Object.create(client, {
-    uid: { value: receiptWaitUid(client) },
+    uid: { value: uid },
     getBlock: {
       value: async (parameters: unknown): Promise<unknown> => {
         const block = await readBlock(parameters);
@@ -138,10 +140,22 @@ function observingClient(
   }) as ClientLike;
 }
 
-function joinObservation(key: string): Observation {
+/**
+ * Adapter waits that are live at the same time on one client `uid` and hash
+ * share an observation, and through its `uid` a viem poller, as they did before
+ * the view existed. Each observation gets a fresh `uid`: viem 2.28 leaves the
+ * poller of a timed-out wait running, and a later wait must not join a poller
+ * whose reads go to an observation that is already gone.
+ */
+function joinObservation(client: ClientLike, key: string): Observation {
   let observation = observations.get(key);
   if (observation === undefined) {
-    observation = { observed: new Map(), waiters: 0 };
+    observationCount += 1;
+    observation = {
+      uid: `${String(client.uid)}:osero-receipt:${observationCount}`,
+      observed: new Map(),
+      waiters: 0,
+    };
     observations.set(key, observation);
   }
   observation.waiters += 1;
@@ -215,10 +229,10 @@ export async function waitForViemReceipt(
     if (reason === undefined && receipt.transactionHash.toLowerCase() !== hash) reason = 'replaced';
     return reason === undefined ? { receipt } : { receipt, replacement: reason };
   }
-  const key = `${receiptWaitUid(client)}\u0000${hash}`;
-  const observation = joinObservation(key);
+  const key = `${String(client.uid)}\u0000${hash}`;
+  const observation = joinObservation(client, key);
   try {
-    const view = observingClient(client, submitted.from.toLowerCase(), observation.observed);
+    const view = observingClient(client, submitted.from.toLowerCase(), observation);
     const receipt = await waitForTransactionReceipt(
       view,
       waitParameters(args, (named) => {
