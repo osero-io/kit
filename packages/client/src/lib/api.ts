@@ -1051,8 +1051,8 @@ export class OseroApiClient {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       };
       const approvalResults: TransactionResult[] = [];
-      // Per chain, the highest block an approval of this run confirmed in. A later allowance
-      // check never reads below it, so a confirmed approval is never requested a second time.
+      // Per chain, the highest block an approval of this run confirmed in, for the approvals
+      // whose handler reported a receipt block. A later allowance check never reads below it.
       const approvalBlockFloors = new Map<number, bigint>();
       const emit = async (
         progress: OseroApiHostedSwapProgress,
@@ -1791,15 +1791,20 @@ function recordApprovalBlockFloors(
   plan: ExecutionPlan,
   result: TransactionResult,
 ): void {
-  const transactions: unknown = result?.transactions;
-  if (!Array.isArray(transactions)) return;
-  for (const transaction of transactions as readonly Partial<ConfirmedTransaction>[]) {
-    const blockNumber = transaction?.confirmation?.blockNumber;
-    if (typeof blockNumber !== 'bigint' || blockNumber < 0n) continue;
-    const chainId = plan.steps.find((step) => step.id === transaction.stepId)?.chainId;
-    if (chainId === undefined) continue;
-    const floor = floors.get(chainId);
-    if (floor === undefined || blockNumber > floor) floors.set(chainId, blockNumber);
+  try {
+    const transactions: unknown = result?.transactions;
+    if (!Array.isArray(transactions)) return;
+    for (const transaction of transactions as readonly Partial<ConfirmedTransaction>[]) {
+      const blockNumber = transaction?.confirmation?.blockNumber;
+      if (typeof blockNumber !== 'bigint' || blockNumber < 0n) continue;
+      const chainId = plan.steps.find((step) => step.id === transaction.stepId)?.chainId;
+      if (chainId === undefined) continue;
+      const floor = floors.get(chainId);
+      if (floor === undefined || blockNumber > floor) floors.set(chainId, blockNumber);
+    }
+  } catch {
+    // A result whose properties throw when read carries no usable receipt block either. The
+    // result itself is returned to the caller untouched, as it was before floors existed.
   }
 }
 

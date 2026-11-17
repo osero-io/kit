@@ -1961,6 +1961,17 @@ function withReceiptBlock(result: TransactionResult, blockNumber: bigint): Trans
   };
 }
 
+/** Replaces the receipt of a single-step wallet result with one that throws when read. */
+function withUnreadableReceipt(result: TransactionResult): TransactionResult {
+  const transaction = Object.defineProperty({ ...result.transactions[0]! }, 'confirmation', {
+    enumerable: true,
+    get(): never {
+      throw new Error('unreadable receipt');
+    },
+  });
+  return { ...result, transactions: [transaction] };
+}
+
 /**
  * A wallet that confirms every plan and, when `blockNumber` is given, reports it as the receipt
  * block. `onConfirm` runs once per confirmed plan, before the result is returned.
@@ -2162,6 +2173,131 @@ describe('allowance block selection', () => {
     expect(result.isOk()).toBe(true);
     expect(wallet.calls).toHaveLength(2);
     expect(rpc.getBlockNumber).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues on the fresh head when reading the receipt of a wallet result throws', async () => {
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    const rpc = publicClient([0n, REQUIRED], 1);
+    const wallet = executionHandler();
+    const handler: ExecutionPlanHandler = (plan) =>
+      wallet.handler(plan).map((result) => withUnreadableReceipt(result));
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), handler);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.approvalResults).toHaveLength(1);
+    expect(wallet.calls).toHaveLength(2);
+    expect(rpc.getBlockNumber.mock.calls).toEqual([FRESH_HEAD, FRESH_HEAD]);
+  });
+
+  it('raises the floor to the block of each later approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    // The allowance is only sufficient from the block of the second approval.
+    const rpc = rpcClient({
+      getBlockNumber: async () => 150n,
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 300n ? REQUIRED : 0n,
+    });
+    const receiptBlocks = [200n, 300n, 301n];
+    const wallet = executionHandler();
+    const handler: ExecutionPlanHandler = (plan) =>
+      wallet
+        .handler(plan)
+        .map((result) => withReceiptBlock(result, receiptBlocks[wallet.calls.length - 1]!));
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), handler));
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.approvalResults).toHaveLength(2);
+    expect(wallet.calls.map((plan) => plan.steps.map((step) => step.operation))).toEqual([
+      ['APPROVE_ERC20'],
+      ['APPROVE_ERC20'],
+      ['SWAP_EXACT_IN'],
+    ]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 200n, 300n]);
+  });
+
+  it('keeps the floor for a refresh caused by quote expiry', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(new Date('2030-01-01T00:01:00.000Z'));
+    const expired = quoteWithApproval();
+    const fresh = {
+      ...expired,
+      quote: {
+        ...expired.quote,
+        quotedAt: '2030-01-01T00:01:00.000Z',
+        expiresAt: '2030-01-01T00:02:00.000Z',
+      },
+    } as OseroApiSwapQuoteResponse;
+    const transport = fetchSequence({ body: expired }, { body: expired }, { body: fresh });
+    const rpc = rpcClient({
+      getBlockNumber: async () => 150n,
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 200n ? REQUIRED : 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const refreshReasons: string[] = [];
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(
+      client.executeSwap(swapRequest(), wallet.handler, {
+        onProgress: (event) => {
+          if (event.type === 'quote-refresh') refreshReasons.push(event.reason);
+        },
+      }),
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(refreshReasons).toEqual(['approval-confirmed', 'quote-expired']);
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    // The head never passes the approval, so both refreshes read at the receipt block.
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 200n, 200n]);
+  });
+
+  it('returns the head request failure when it fails while waiting for the approval block', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    let headRequests = 0;
+    const rpc = rpcClient({
+      getBlockNumber: async () => {
+        headRequests += 1;
+        if (headRequests === 3) throw new Error('head unavailable');
+        return 150n;
+      },
+      readContract: async () => 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), wallet.handler));
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(RpcError);
+      if (result.error instanceof RpcError) expect(result.error.operation).toBe('getBlockNumber');
+    }
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20']]);
+    expect(rpc.getBlockNumber).toHaveBeenCalledTimes(3);
+    expect(rpc.readContract).toHaveBeenCalledTimes(1);
   });
 
   it('fails closed when the RPC cannot serve the block of the confirmed approval', async () => {
