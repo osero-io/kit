@@ -80,7 +80,10 @@ submitted. The message is `Transaction <hash> was <reason> and cannot be treated
   case the adapter compares the transaction viem found in the mined block with what it submitted.
   The same sender, target, calldata, and value under another hash is a repricing. Anything else,
   including a replacement the adapter could not observe, fails closed as `cancelled` or `replaced`.
-  The comparison uses the block viem already read for the wait, so it adds no RPC request.
+  The comparison uses the block viem already read for the wait, so it adds no RPC request. To see
+  that block, the adapter's wait keeps its own receipt polling: it does not join a
+  `waitForTransactionReceipt` you started yourself on the same client and hash, and it always
+  applies the `confirmations` you passed to `sendWith`. Block-number polling is still shared.
 - **ethers** reads the `TRANSACTION_REPLACED` error. A replacement flagged `cancelled`, or with any
   reason other than `repriced`, fails.
 - **EIP-5792** applies the rule to the extra-confirmation wait (`confirmations` greater than `1`).
@@ -144,16 +147,16 @@ Three mappings are worth knowing when you branch on `code`:
 
 ### EIP-5792 atomic batch
 
-| Stage          | Condition                                                                                                                                                                                                                                      | Error                                           |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| preflight      | Wallet cannot batch atomically and fallback is disabled or the plan requires `atomic-batch`                                                                                                                                                    | `UnsupportedCapabilityError`                    |
-| `signing`      | `wallet_sendCalls` rejected with code `4001` (user rejection) or `5750` (upgrade declined)                                                                                                                                                     | `CancelError`                                   |
-| `signing`      | `wallet_sendCalls` rejected with code `4100` (unauthorized)                                                                                                                                                                                    | `SigningError`                                  |
-| `broadcast`    | Any other `wallet_sendCalls` failure, or a response without a usable batch ID                                                                                                                                                                  | `BroadcastError`                                |
-| `confirmation` | The status wait failed or timed out                                                                                                                                                                                                            | `ConfirmationError`, message names the batch ID |
-| `confirmation` | The wallet returned a malformed status, a failure without a receipt, or a partial revert (status `600`, or a `500` that disclaims atomicity or carries a successful receipt), an unreadable receipt, or a status that is not an atomic success | `ConfirmationError`, message names the batch ID |
-| `revert`       | Status `500` (complete revert) with a receipt, atomicity not disclaimed, and no successful receipt                                                                                                                                             | `TransactionError` with that transaction hash   |
-| `replacement`  | During the extra-confirmation wait, the batch transaction was cancelled or replaced                                                                                                                                                            | `ConfirmationError`                             |
+| Stage          | Condition                                                                                                                                                                                                                                            | Error                                           |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| preflight      | Wallet cannot batch atomically and fallback is disabled or the plan requires `atomic-batch`                                                                                                                                                          | `UnsupportedCapabilityError`                    |
+| `signing`      | `wallet_sendCalls` rejected with code `4001` (user rejection) or `5750` (upgrade declined)                                                                                                                                                           | `CancelError`                                   |
+| `signing`      | `wallet_sendCalls` rejected with code `4100` (unauthorized)                                                                                                                                                                                          | `SigningError`                                  |
+| `broadcast`    | Any other `wallet_sendCalls` failure, or a response without a usable batch ID                                                                                                                                                                        | `BroadcastError`                                |
+| `confirmation` | The status wait failed or timed out                                                                                                                                                                                                                  | `ConfirmationError`, message names the batch ID |
+| `confirmation` | The wallet returned a malformed status, a failure without a receipt, or a partial revert (status `600`, or a `500` that carries a successful receipt or is not reported as atomic), an unreadable receipt, or a status that is not an atomic success | `ConfirmationError`, message names the batch ID |
+| `revert`       | Status `500` (complete revert) with a receipt, atomicity not disclaimed, and no successful receipt                                                                                                                                                   | `TransactionError` with that transaction hash   |
+| `replacement`  | During the extra-confirmation wait, the batch transaction was cancelled or replaced                                                                                                                                                                  | `ConfirmationError`                             |
 
 `wallet_sendCalls` code `5760` (atomicity not supported) is not an error by itself: the adapter falls
 back to sequential viem execution unless fallback is disabled.

@@ -4,6 +4,7 @@ import {
   createWalletClient,
   custom,
   numberToHex,
+  publicActions,
   type Address,
   type Hex,
 } from 'viem';
@@ -199,6 +200,37 @@ describe('waitForViemReceipt against the real viem waiter', () => {
     expect(outcome.replacement).toBe('repriced');
   });
 
+  it.each([1, 2])(
+    'still recognises a repricing while the caller waits on the same client and hash (%i confirmations)',
+    async (confirmations) => {
+      // viem shares one poller between waits on the same client and hash. The
+      // caller's wait starts first, so a shared poller would read blocks through
+      // the caller's client and never name the replacement to the adapter.
+      const { client } = publicClient(REPRICED);
+      const callers = client.waitForTransactionReceipt({ hash: ORIGINAL, confirmations: 2 });
+
+      const outcome = await waitForViemReceipt(client, {
+        hash: ORIGINAL,
+        confirmations,
+        submitted: SUBMITTED,
+      });
+
+      expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+      expect(outcome.replacement).toBe('repriced');
+      expect((await callers).transactionHash).toBe(REPLACEMENT);
+    },
+  );
+
+  it('shares what it observed between adapter waits on the same client and hash', async () => {
+    const { client } = publicClient(REPRICED);
+    const wait = () =>
+      waitForViemReceipt(client, { hash: ORIGINAL, confirmations: 2, submitted: SUBMITTED });
+
+    const outcomes = await Promise.all([wait(), wait()]);
+
+    expect(outcomes.map((outcome) => outcome.replacement)).toEqual(['repriced', 'repriced']);
+  });
+
   it('fails closed when the confirmed transaction was sent by another account', async () => {
     const { client } = publicClient(REPRICED);
 
@@ -267,6 +299,34 @@ describe('viem adapter with multiple confirmations against the real viem waiter'
         confirmation: { status: 'success', transactionHash: REPLACEMENT, confirmations: 2 },
       });
     }
+    expect(node.sent).toHaveLength(1);
+  });
+
+  it('confirms a repriced step while the caller monitors the same hash on the same client', async () => {
+    const { wallet, node } = walletClient(REPRICED);
+    const monitoring = wallet.extend(publicActions);
+    const monitored: Promise<unknown>[] = [];
+
+    const result = await sendWith(monitoring, plan().single, {
+      confirmations: 2,
+      onProgress(event) {
+        if (event.type !== 'step-submitted') return;
+        monitored.push(
+          monitoring.waitForTransactionReceipt({ hash: event.hash, confirmations: 2 }),
+        );
+      },
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.transactions[0]).toMatchObject({
+        submittedHash: ORIGINAL,
+        hash: REPLACEMENT,
+        replacement: { reason: 'repriced' },
+      });
+    }
+    expect(monitored).toHaveLength(1);
+    await expect(monitored[0]).resolves.toMatchObject({ transactionHash: REPLACEMENT });
     expect(node.sent).toHaveLength(1);
   });
 
