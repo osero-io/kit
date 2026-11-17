@@ -3,6 +3,7 @@ import type { Hex } from 'viem';
 import {
   ProgressCallbackError,
   UnsupportedCapabilityError,
+  type CompletedExecutionStep,
   type ExecutionFailureContext,
   type ExecutionStage,
 } from './errors.js';
@@ -41,6 +42,25 @@ export type SingleTxExecutor = (
   transaction: TransactionRequest,
   context: SingleTransactionContext,
 ) => ResultAsync<SingleTransactionResult, SendWithError>;
+
+/**
+ * A confirmed step as it is recorded on an execution failure. It keeps the
+ * receipt evidence so the failure can be turned back into resume state.
+ */
+export function toCompletedExecutionStep(
+  transaction: ConfirmedTransaction,
+): CompletedExecutionStep {
+  return {
+    planId: transaction.planId,
+    stepId: transaction.stepId,
+    stepIndex: transaction.stepIndex,
+    operation: transaction.operation,
+    hash: transaction.hash,
+    submittedHash: transaction.submittedHash,
+    ...(transaction.replacement === undefined ? {} : { replacement: transaction.replacement }),
+    confirmation: transaction.confirmation,
+  };
+}
 
 export function preflightExecutorCapabilities(
   plan: ExecutionPlan,
@@ -115,13 +135,7 @@ export function runExecutionPlan(
         operation: step.operation,
         stage,
         ...(hash === undefined ? {} : { hash }),
-        completed: confirmed.map((transaction) => ({
-          planId: transaction.planId,
-          stepId: transaction.stepId,
-          stepIndex: transaction.stepIndex,
-          operation: transaction.operation,
-          hash: transaction.hash,
-        })),
+        completed: confirmed.map(toCompletedExecutionStep),
       }),
     });
 

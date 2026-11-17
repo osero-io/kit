@@ -15,6 +15,7 @@ import {
 import {
   preflightExecutorCapabilities,
   runExecutionPlan,
+  toCompletedExecutionStep,
   type SingleTransactionContext,
   type SingleTransactionResult,
   type SingleTxExecutor,
@@ -124,7 +125,7 @@ function sendSingleTransaction(
       return (numerator + 9_999n) / 10_000n;
     })
     .andThen((gas) => {
-      const expiry = checkExecutionPlanExpiry(plan);
+      const expiry = checkExecutionPlanExpiry(plan, context.failure('preflight'));
       if (expiry.isErr()) return errAsync(expiry.error);
       return ResultAsync.fromPromise(
         sendTransactionWithViem(walletClient, {
@@ -237,13 +238,7 @@ function verifyResumeReceipts(
           operation: step.operation,
           stage,
           ...(hash === undefined ? {} : { hash }),
-          completed: resume.value.slice(0, transaction.stepIndex).map((completed) => ({
-            planId: completed.planId,
-            stepId: completed.stepId,
-            stepIndex: completed.stepIndex,
-            operation: completed.operation,
-            hash: completed.hash,
-          })),
+          completed: resume.value.slice(0, transaction.stepIndex).map(toCompletedExecutionStep),
         }),
       };
       const receipt = await ResultAsync.fromPromise(

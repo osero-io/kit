@@ -2,9 +2,16 @@ import { encodeFunctionData, type Address, type Hex } from 'viem';
 
 import { erc20Abi } from './abis/erc20.js';
 import type { AdvisoryGasEstimate } from './domain.js';
-import { QuoteExpiredError, ValidationError } from './errors.js';
+import {
+  QuoteExpiredError,
+  ValidationError,
+  type CompletedExecutionStep,
+  type ExecutionFailureContext,
+  type OseroError,
+} from './errors.js';
 import { err, ok, type Result } from './result.js';
 import type {
+  ConfirmedTransaction,
   ExecutionPlan,
   ExecutionPlanMetadata,
   ExecutorRequirements,
@@ -20,6 +27,7 @@ import {
   validatePositiveUint256,
   validateQuoteExpiry,
   validateResumeState,
+  validateResumeStateShape,
   validateTransactionRequest,
 } from './validation.js';
 
@@ -187,16 +195,30 @@ export function serializeExecutionPlan(plan: ExecutionPlan): Result<string, Vali
   const validated = validateExecutionPlan(plan);
   if (validated.isErr()) return err(validated.error);
   try {
-    return ok(
-      JSON.stringify(validated.value, (_key, value: unknown) =>
-        typeof value === 'bigint' ? { $bigint: value.toString() } : value,
-      ),
-    );
+    return ok(JSON.stringify(validated.value, encodeBigint));
   } catch (cause) {
     return err(
       new ValidationError('Execution plan could not be serialized', 'plan', undefined, { cause }),
     );
   }
+}
+
+function encodeBigint(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? { $bigint: value.toString() } : value;
+}
+
+function decodeBigint(_key: string, nested: unknown): unknown {
+  if (
+    typeof nested === 'object' &&
+    nested !== null &&
+    Object.keys(nested).length === 1 &&
+    '$bigint' in nested &&
+    typeof nested.$bigint === 'string' &&
+    /^(?:0|[1-9][0-9]*)$/.test(nested.$bigint)
+  ) {
+    return BigInt(nested.$bigint);
+  }
+  return nested;
 }
 
 export function deserializeExecutionPlan(
@@ -213,19 +235,7 @@ export function deserializeExecutionPlan(
 
   let value: unknown;
   try {
-    value = JSON.parse(serialized, (_key, nested: unknown) => {
-      if (
-        typeof nested === 'object' &&
-        nested !== null &&
-        Object.keys(nested).length === 1 &&
-        '$bigint' in nested &&
-        typeof nested.$bigint === 'string' &&
-        /^(?:0|[1-9][0-9]*)$/.test(nested.$bigint)
-      ) {
-        return BigInt(nested.$bigint);
-      }
-      return nested;
-    });
+    value = JSON.parse(serialized, decodeBigint);
   } catch (cause) {
     return err(
       new ValidationError(
@@ -255,11 +265,14 @@ export function deserializeExecutionPlan(
   return validated;
 }
 
-export function checkExecutionPlanExpiry(plan: ExecutionPlan): Result<void, QuoteExpiredError> {
+export function checkExecutionPlanExpiry(
+  plan: ExecutionPlan,
+  execution?: ExecutionFailureContext,
+): Result<void, QuoteExpiredError> {
   if (plan.quoteExpiresAt === undefined || Date.now() < Date.parse(plan.quoteExpiresAt)) {
     return ok(undefined);
   }
-  return err(new QuoteExpiredError(plan, plan.quoteExpiresAt));
+  return err(new QuoteExpiredError(plan, plan.quoteExpiresAt, execution));
 }
 
 export function resumeExecutionPlan(
@@ -280,4 +293,129 @@ export function resumeExecutionPlan(
     confirmed: confirmed.value,
     pending: validated.value.steps.slice(confirmed.value.length),
   });
+}
+
+/**
+ * Serializes resume state with the same canonical, bigint-safe encoding as
+ * {@link serializeExecutionPlan}. The state is checked for shape only; whether
+ * it matches a particular plan is decided when it is used, by
+ * {@link resumeExecutionPlan} and by every adapter.
+ */
+export function serializeExecutionResumeState(
+  state: ExecutionResumeState,
+): Result<string, ValidationError> {
+  const validated = validateResumeStateShape(state);
+  if (validated.isErr()) return err(validated.error);
+  try {
+    return ok(JSON.stringify(validated.value, encodeBigint));
+  } catch (cause) {
+    return err(
+      new ValidationError('Resume state could not be serialized', 'resume', undefined, { cause }),
+    );
+  }
+}
+
+export function deserializeExecutionResumeState(
+  serialized: string,
+): Result<ExecutionResumeState, ValidationError> {
+  if (typeof serialized !== 'string' || serialized.length === 0) {
+    return err(
+      ValidationError.forField('serialized', 'serialized resume state must be a non-empty string'),
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized, decodeBigint);
+  } catch (cause) {
+    return err(
+      new ValidationError(
+        'serialized resume state is not valid canonical JSON',
+        'serialized',
+        undefined,
+        { cause },
+      ),
+    );
+  }
+  return validateResumeStateShape(value as ExecutionResumeState);
+}
+
+/**
+ * Builds resume state from a failed execution.
+ *
+ * Every bundled adapter attaches the confirmed prefix, with receipt evidence, to
+ * the error it returns. This turns that evidence into the `resume` option for
+ * the next `sendWith` call, which re-verifies each receipt before skipping it.
+ *
+ * It fails rather than guesses: the error must carry an execution context for
+ * this plan, and every completed step must carry its confirmation. An error
+ * raised before execution started, or by a custom executor that does not record
+ * confirmations, cannot be turned into resume state.
+ */
+export function executionResumeStateFromError(
+  plan: ExecutionPlan,
+  error: OseroError,
+): Result<ExecutionResumeState, ValidationError> {
+  const validated = validateExecutionPlan(plan);
+  if (validated.isErr()) return err(validated.error);
+  const execution =
+    typeof error === 'object' && error !== null && 'execution' in error
+      ? (error.execution as ExecutionFailureContext | undefined)
+      : undefined;
+  if (typeof execution !== 'object' || execution === null) {
+    return err(
+      ValidationError.forField(
+        'error.execution',
+        'error carries no execution context; nothing is known about confirmed steps',
+      ),
+    );
+  }
+  if (execution.planId !== validated.value.id) {
+    return err(
+      ValidationError.forField(
+        'error.execution.planId',
+        'execution failure belongs to a different execution plan',
+      ),
+    );
+  }
+  if (!Array.isArray(execution.completed)) {
+    return err(
+      ValidationError.forField('error.execution.completed', 'completed steps must be an array'),
+    );
+  }
+
+  const confirmed: ConfirmedTransaction[] = [];
+  for (const [index, step] of (
+    execution.completed as readonly CompletedExecutionStep[]
+  ).entries()) {
+    if (
+      typeof step !== 'object' ||
+      step === null ||
+      step.confirmation === undefined ||
+      step.submittedHash === undefined
+    ) {
+      return err(
+        ValidationError.forField(
+          `error.execution.completed[${index}]`,
+          'completed step carries no confirmation data; resume state cannot be derived from it',
+        ),
+      );
+    }
+    confirmed.push({
+      planId: step.planId,
+      stepId: step.stepId,
+      stepIndex: step.stepIndex,
+      operation: step.operation as OperationType,
+      submittedHash: step.submittedHash,
+      hash: step.hash,
+      ...(step.replacement === undefined ? {} : { replacement: step.replacement }),
+      confirmation: step.confirmation,
+    });
+  }
+
+  const state: ExecutionResumeState = { planId: validated.value.id, confirmed };
+  const shape = validateResumeStateShape(state);
+  if (shape.isErr()) return err(shape.error);
+  const matched = validateResumeState(validated.value, state);
+  if (matched.isErr()) return err(matched.error);
+  return ok(state);
 }

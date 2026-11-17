@@ -3,6 +3,7 @@ import { isError, type Signer, type TransactionReceipt, type TransactionResponse
 import {
   preflightExecutorCapabilities,
   runExecutionPlan,
+  toCompletedExecutionStep,
   type SingleTransactionContext,
   type SingleTransactionResult,
   type SingleTxExecutor,
@@ -108,7 +109,7 @@ function sendSingleTransaction(
       return (numerator + 9_999n) / 10_000n;
     })
     .andThen((gasLimit) => {
-      const expiry = checkExecutionPlanExpiry(plan);
+      const expiry = checkExecutionPlanExpiry(plan, context.failure('preflight'));
       if (expiry.isErr()) return errAsync(expiry.error);
       return ResultAsync.fromPromise(
         signer.sendTransaction({ ...transaction, gasLimit }),
@@ -240,13 +241,7 @@ function verifyResumeReceipts(
         operation: step.operation,
         stage: 'confirmation' as const,
         hash: transaction.hash,
-        completed: completed.map((value) => ({
-          planId: value.planId,
-          stepId: value.stepId,
-          stepIndex: value.stepIndex,
-          operation: value.operation,
-          hash: value.hash,
-        })),
+        completed: completed.map(toCompletedExecutionStep),
       };
       const receipt = await ResultAsync.fromPromise(
         signer.provider!.getTransactionReceipt(transaction.hash),

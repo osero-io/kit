@@ -9,7 +9,11 @@ import {
 import { base, mainnet } from 'viem/chains';
 import { vi } from 'vitest';
 
-import { defineAdapterContract, type AdapterContractFactory } from './lib/_testing.js';
+import {
+  defineAdapterContract,
+  type AdapterContractFactory,
+  type AdapterFault,
+} from './lib/_testing.js';
 import { ConfirmationError, TransactionError } from './lib/errors.js';
 import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
 import { _configureTelemetryForTesting, type TelemetryEvent } from './lib/telemetry.js';
@@ -64,13 +68,82 @@ function resetActions(): void {
   }));
 }
 
+async function successfulReceipt(_client: unknown, input: ReceiptWaitInput) {
+  return {
+    status: 'success',
+    transactionHash: input.hash,
+    blockNumber: 123n,
+    gasUsed: 50n,
+    effectiveGasPrice: 2n,
+  };
+}
+
+/** Injects one failure into the mocked viem actions for the shared adapter contract. */
+function injectViemFault(fault: AdapterFault, step: number): void {
+  const nth = <Args extends unknown[], Value>(
+    mock: { mockImplementation(implementation: (...args: Args) => Promise<Value>): unknown },
+    normal: (...args: Args) => Promise<Value>,
+    faulty: (...args: Args) => Promise<Value>,
+  ): void => {
+    let call = 0;
+    mock.mockImplementation((...args: Args) => {
+      call += 1;
+      return call === step ? faulty(...args) : normal(...args);
+    });
+  };
+  if (fault.stage === 'estimate') {
+    nth(
+      actions.estimateGas,
+      async () => 100n,
+      async () => {
+        throw new Error('estimate failed');
+      },
+    );
+    return;
+  }
+  if (fault.stage === 'send') {
+    nth(
+      actions.sendTransaction,
+      async () => hash(actions.sendTransaction.mock.calls.length),
+      async () => {
+        throw fault.kind === 'cancel'
+          ? new UserRejectedRequestError(new Error('user rejected'))
+          : new TransactionExecutionError(new BaseError('rpc failure'), {
+              account: null,
+              chain: base,
+              to: TARGET,
+            });
+      },
+    );
+    return;
+  }
+  if (fault.stage === 'resume-receipt') {
+    actions.getTransactionReceipt.mockImplementation(async (_client, input) => {
+      if (fault.kind === 'unavailable') throw new Error('receipt not found');
+      return { status: 'reverted', transactionHash: input.hash };
+    });
+    return;
+  }
+  nth(actions.waitForTransactionReceipt, successfulReceipt, async (client, input) => {
+    if (fault.kind === 'timeout') throw new Error('receipt timeout');
+    if (fault.kind === 'revert') {
+      return { ...(await successfulReceipt(client, input)), status: 'reverted' };
+    }
+    input.onReplaced?.({ reason: fault.kind });
+    return { ...(await successfulReceipt(client, input)), transactionHash: hash(9_000 + step) };
+  });
+}
+
 const factory: AdapterContractFactory = (configuration = {}) => {
   resetActions();
   const valueWallet = wallet(configuration.account ?? ACCOUNT, configuration.chainId ?? 8453);
   return {
     broadcast: actions.sendTransaction,
-    execute(valuePlan, form, confirmations) {
-      const options = confirmations === undefined ? {} : { confirmations };
+    resumeReceiptLookup: actions.getTransactionReceipt,
+    performs: { estimate: true },
+    fail: (fault, step = 1) => injectViemFault(fault, step),
+    execute(valuePlan, form, confirmations, extra) {
+      const options = { ...(confirmations === undefined ? {} : { confirmations }), ...extra };
       return form === 'direct'
         ? sendWith(valueWallet, valuePlan, options)
         : sendWith(valueWallet, options)(valuePlan);

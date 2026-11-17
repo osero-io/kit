@@ -80,8 +80,11 @@ export {
   createExecutionPlan,
   createTransactionRequest,
   deserializeExecutionPlan,
+  deserializeExecutionResumeState,
+  executionResumeStateFromError,
   resumeExecutionPlan,
   serializeExecutionPlan,
+  serializeExecutionResumeState,
   type TransactionRequestInput,
 } from './lib/plan.js';
 export type { Result, ResultAsync } from './lib/result.js';

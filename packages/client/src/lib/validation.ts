@@ -520,3 +520,88 @@ export function validateResumeState(
   }
   return ok(resume.confirmed);
 }
+
+function isNonNegativeBigint(value: unknown): value is bigint {
+  return typeof value === 'bigint' && value >= 0n;
+}
+
+/**
+ * Structural validation of resume state on its own, without a plan: an ordered
+ * prefix of confirmed transactions that all belong to `planId`. Whether the
+ * prefix matches a specific plan is checked by {@link validateResumeState}.
+ */
+export function validateResumeStateShape(
+  resume: ExecutionResumeState,
+): Result<ExecutionResumeState, ValidationError> {
+  if (
+    typeof resume !== 'object' ||
+    resume === null ||
+    typeof resume.planId !== 'string' ||
+    !IDENTIFIER_PATTERN.test(resume.planId) ||
+    !Array.isArray(resume.confirmed)
+  ) {
+    return err(ValidationError.forField('resume', 'resume state is malformed'));
+  }
+  for (const [index, transaction] of (
+    resume.confirmed as readonly ConfirmedTransaction[]
+  ).entries()) {
+    const field = `resume.confirmed[${index}]`;
+    const malformed = (reason: string) => err(ValidationError.forField(field, reason));
+    if (typeof transaction !== 'object' || transaction === null) {
+      return malformed('confirmed transaction must be an object');
+    }
+    if (transaction.planId !== resume.planId) {
+      return malformed('confirmed transaction belongs to a different execution plan');
+    }
+    if (typeof transaction.stepId !== 'string' || !IDENTIFIER_PATTERN.test(transaction.stepId)) {
+      return malformed('confirmed transaction needs a stable step id');
+    }
+    if (transaction.stepIndex !== index) {
+      return malformed('confirmed transactions must form an ordered prefix starting at step 0');
+    }
+    if (
+      typeof transaction.operation !== 'string' ||
+      !Object.hasOwn(OPERATIONS, transaction.operation)
+    ) {
+      return malformed('confirmed transaction operation is not recognized');
+    }
+    if (
+      typeof transaction.hash !== 'string' ||
+      typeof transaction.submittedHash !== 'string' ||
+      !HASH_PATTERN.test(transaction.hash) ||
+      !HASH_PATTERN.test(transaction.submittedHash)
+    ) {
+      return malformed('confirmed transaction hashes must be 32-byte hex strings');
+    }
+    const confirmation = transaction.confirmation;
+    if (
+      typeof confirmation !== 'object' ||
+      confirmation === null ||
+      confirmation.status !== 'success' ||
+      typeof confirmation.transactionHash !== 'string' ||
+      confirmation.transactionHash.toLowerCase() !== transaction.hash.toLowerCase() ||
+      !Number.isSafeInteger(confirmation.confirmations) ||
+      confirmation.confirmations <= 0 ||
+      (confirmation.blockNumber !== undefined && !isNonNegativeBigint(confirmation.blockNumber)) ||
+      (confirmation.gasUsed !== undefined && !isNonNegativeBigint(confirmation.gasUsed)) ||
+      (confirmation.effectiveGasPrice !== undefined &&
+        !isNonNegativeBigint(confirmation.effectiveGasPrice))
+    ) {
+      return malformed('confirmed transaction needs a successful confirmation for its hash');
+    }
+    const replacement = transaction.replacement;
+    if (
+      replacement !== undefined &&
+      (typeof replacement !== 'object' ||
+        replacement === null ||
+        typeof replacement.reason !== 'string' ||
+        typeof replacement.originalHash !== 'string' ||
+        typeof replacement.replacementHash !== 'string' ||
+        replacement.originalHash.toLowerCase() !== transaction.submittedHash.toLowerCase() ||
+        replacement.replacementHash.toLowerCase() !== transaction.hash.toLowerCase())
+    ) {
+      return malformed('replacement data must link the submitted hash to the effective hash');
+    }
+  }
+  return ok(resume);
+}

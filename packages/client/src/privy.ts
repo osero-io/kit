@@ -16,6 +16,7 @@ import { getTransactionReceipt } from 'viem/actions';
 import {
   preflightExecutorCapabilities,
   runExecutionPlan,
+  toCompletedExecutionStep,
   type SingleTransactionContext,
   type SingleTransactionResult,
   type SingleTxExecutor,
@@ -292,7 +293,7 @@ function sendSingleTransaction(
   context: SingleTransactionContext,
   options: ResolvedOptions,
 ): ResultAsync<SingleTransactionResult, SendWithError> {
-  const expiry = checkExecutionPlanExpiry(plan);
+  const expiry = checkExecutionPlanExpiry(plan, context.failure('preflight'));
   if (expiry.isErr()) return errAsync(expiry.error);
   return ResultAsync.fromPromise(
     sendPrivyTransaction(privy, wallet, request, options.idempotencyKeys?.[request.id]),
@@ -383,13 +384,7 @@ function verifyResumeReceipts(
         operation: step.operation,
         stage: 'confirmation' as const,
         hash: transaction.hash,
-        completed: completed.map((value) => ({
-          planId: value.planId,
-          stepId: value.stepId,
-          stepIndex: value.stepIndex,
-          operation: value.operation,
-          hash: value.hash,
-        })),
+        completed: completed.map(toCompletedExecutionStep),
       };
       const receipt = await ResultAsync.fromPromise(
         getTransactionReceipt(options.receiptClient, { hash: transaction.hash }),

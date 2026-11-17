@@ -9,17 +9,32 @@ import {
 } from 'viem';
 
 import { erc20Abi } from './abis/erc20.js';
-import { ValidationError } from './errors.js';
+import { toCompletedExecutionStep } from './adapters.js';
+import {
+  ConfirmationError,
+  QuoteExpiredError,
+  UnexpectedError,
+  ValidationError,
+  type ExecutionFailureContext,
+} from './errors.js';
 import {
   createApprovalTransaction,
   createExecutionPlan,
   createPreparedApprovalTransaction,
   createTransactionRequest,
   deserializeExecutionPlan,
+  deserializeExecutionResumeState,
+  executionResumeStateFromError,
   resumeExecutionPlan,
   serializeExecutionPlan,
+  serializeExecutionResumeState,
 } from './plan.js';
-import type { ConfirmedTransaction, ExecutionPlan, TransactionRequest } from './types.js';
+import type {
+  ConfirmedTransaction,
+  ExecutionPlan,
+  ExecutionResumeState,
+  TransactionRequest,
+} from './types.js';
 import { computeExecutionPlanId, validateExecutionPlan } from './validation.js';
 
 const ACCOUNT_LOWER = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as const;
@@ -487,6 +502,273 @@ describe('canonical persistence and recovery', () => {
       expect(resumed.value.pending.map((step) => step.id)).toEqual(['two']);
     }
     expect(skippedSecond.isErr()).toBe(true);
+  });
+});
+
+const OTHER_HASH = `0x${'b'.repeat(64)}` as const;
+
+function twoStepPlanWithState(): {
+  readonly plan: ExecutionPlan;
+  readonly state: ExecutionResumeState;
+} {
+  const plan = createExecutionPlan({ steps: [transaction('one'), transaction('two')] });
+  if (plan.isErr()) throw plan.error;
+  const first: ConfirmedTransaction = {
+    ...confirmed(plan.value.id, plan.value.steps[0]!, 0),
+    submittedHash: OTHER_HASH,
+    replacement: { reason: 'repriced', originalHash: OTHER_HASH, replacementHash: HASH },
+    confirmation: {
+      status: 'success',
+      transactionHash: HASH,
+      blockNumber: 2n ** 70n,
+      gasUsed: 2n ** 65n + 1n,
+      effectiveGasPrice: 0n,
+      confirmations: 3,
+    },
+  };
+  return { plan: plan.value, state: { planId: plan.value.id, confirmed: [first] } };
+}
+
+describe('resume state persistence', () => {
+  it('round-trips resume state exactly, including bigints beyond the safe integer range', () => {
+    const { plan, state } = twoStepPlanWithState();
+
+    const serialized = serializeExecutionResumeState(state);
+
+    expect(serialized.isOk()).toBe(true);
+    if (serialized.isErr()) return;
+    expect(serialized.value).toContain(`{"$bigint":"${(2n ** 70n).toString()}"}`);
+    expect(() => JSON.parse(serialized.value)).not.toThrow();
+    const restored = deserializeExecutionResumeState(serialized.value);
+    expect(restored.isOk()).toBe(true);
+    if (restored.isErr()) return;
+    expect(restored.value).toEqual(state);
+    expect(typeof restored.value.confirmed[0]?.confirmation.blockNumber).toBe('bigint');
+    // The restored state is accepted for the plan it belongs to.
+    const resumed = resumeExecutionPlan(plan, restored.value);
+    expect(resumed.isOk()).toBe(true);
+    if (resumed.isOk()) expect(resumed.value.pending.map((step) => step.id)).toEqual(['two']);
+  });
+
+  it('round-trips an empty confirmed prefix', () => {
+    const { state } = twoStepPlanWithState();
+    const empty = { planId: state.planId, confirmed: [] };
+
+    const serialized = serializeExecutionResumeState(empty);
+
+    expect(serialized.isOk()).toBe(true);
+    if (serialized.isOk()) {
+      expect(deserializeExecutionResumeState(serialized.value)).toEqual(
+        serializeExecutionResumeState(empty).map(() => empty),
+      );
+    }
+  });
+
+  it.each([
+    [
+      'an entry for another plan',
+      (entry: Record<string, unknown>) => (entry.planId = 'plan-other'),
+    ],
+    ['an out-of-order step index', (entry: Record<string, unknown>) => (entry.stepIndex = 1)],
+    ['an unknown operation', (entry: Record<string, unknown>) => (entry.operation = 'DRAIN')],
+    ['a malformed hash', (entry: Record<string, unknown>) => (entry.hash = '0x1234')],
+    [
+      'a reverted confirmation',
+      (entry: Record<string, unknown>) =>
+        ((entry.confirmation as Record<string, unknown>).status = 'reverted'),
+    ],
+    [
+      'a confirmation for another hash',
+      (entry: Record<string, unknown>) =>
+        ((entry.confirmation as Record<string, unknown>).transactionHash = OTHER_HASH),
+    ],
+    [
+      'zero confirmations',
+      (entry: Record<string, unknown>) =>
+        ((entry.confirmation as Record<string, unknown>).confirmations = 0),
+    ],
+    [
+      'a block number that is not a bigint',
+      (entry: Record<string, unknown>) =>
+        ((entry.confirmation as Record<string, unknown>).blockNumber = 12),
+    ],
+    [
+      'replacement data that does not link the hashes',
+      (entry: Record<string, unknown>) =>
+        ((entry.replacement as Record<string, unknown>).originalHash = HASH),
+    ],
+    ['a missing confirmation', (entry: Record<string, unknown>) => delete entry.confirmation],
+  ])('rejects tampered serialized resume state with %s', (_name, tamper) => {
+    const { state } = twoStepPlanWithState();
+    const serialized = serializeExecutionResumeState(state);
+    if (serialized.isErr()) throw serialized.error;
+    const parsed = JSON.parse(serialized.value) as { confirmed: Record<string, unknown>[] };
+    tamper(parsed.confirmed[0]!);
+
+    const result = deserializeExecutionResumeState(JSON.stringify(parsed));
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+      expect(result.error.field).toBe('resume.confirmed[0]');
+    }
+  });
+
+  it.each([
+    ['an empty string', ''],
+    ['text that is not JSON', '{not json'],
+    ['a JSON scalar', '7'],
+    ['a state without a confirmed list', '{"planId":"plan-x"}'],
+    ['a state with a malformed plan id', '{"planId":"","confirmed":[]}'],
+  ])('rejects %s as serialized resume state', (_name, serialized) => {
+    const result = deserializeExecutionResumeState(serialized);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ValidationError);
+  });
+
+  it('refuses to serialize malformed resume state', () => {
+    const { state } = twoStepPlanWithState();
+
+    expect(serializeExecutionResumeState(null as never).isErr()).toBe(true);
+    expect(
+      serializeExecutionResumeState({
+        ...state,
+        confirmed: [{ ...state.confirmed[0]!, hash: '0x12' as never }],
+      }).isErr(),
+    ).toBe(true);
+  });
+
+  it('leaves plan matching to resume: a well-formed state for another plan is rejected there', () => {
+    const { state } = twoStepPlanWithState();
+    const other = createExecutionPlan({ steps: [transaction('one', { data: '0xbeef' })] });
+    if (other.isErr()) throw other.error;
+    const serialized = serializeExecutionResumeState(state);
+    if (serialized.isErr()) throw serialized.error;
+    const restored = deserializeExecutionResumeState(serialized.value);
+    if (restored.isErr()) throw restored.error;
+
+    const resumed = resumeExecutionPlan(other.value, restored.value);
+
+    expect(resumed.isErr()).toBe(true);
+    if (resumed.isErr()) expect(resumed.error.field).toBe('resume.planId');
+  });
+});
+
+function failureContextFor(
+  plan: ExecutionPlan,
+  completed: ExecutionFailureContext['completed'],
+): ExecutionFailureContext {
+  const step = plan.steps[completed.length]!;
+  return {
+    planId: plan.id,
+    stepId: step.id,
+    stepIndex: completed.length,
+    operation: step.operation,
+    stage: 'confirmation',
+    hash: OTHER_HASH,
+    completed,
+  };
+}
+
+describe('resume state from a failed execution', () => {
+  it('derives state that resume accepts from a failure carrying confirmations', () => {
+    const { plan, state } = twoStepPlanWithState();
+    const error = new ConfirmationError(
+      'receipt timeout',
+      failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
+    );
+
+    const derived = executionResumeStateFromError(plan, error);
+
+    expect(derived.isOk()).toBe(true);
+    if (derived.isErr()) return;
+    expect(derived.value).toEqual(state);
+    expect(resumeExecutionPlan(plan, derived.value).isOk()).toBe(true);
+  });
+
+  it('derives an empty prefix when the first step failed', () => {
+    const { plan } = twoStepPlanWithState();
+    const error = new ConfirmationError('receipt timeout', failureContextFor(plan, []));
+
+    const derived = executionResumeStateFromError(plan, error);
+
+    expect(derived.isOk()).toBe(true);
+    if (derived.isOk()) expect(derived.value).toEqual({ planId: plan.id, confirmed: [] });
+  });
+
+  it('derives state from a quote expiry that happened mid-plan', () => {
+    const expiring = createExecutionPlan({
+      steps: [transaction('one'), transaction('two')],
+      quoteExpiresAt: '2026-07-22T20:00:00Z',
+    });
+    if (expiring.isErr() || expiring.value.version !== 2) throw new Error('test plan failed');
+    const first = confirmed(expiring.value.id, expiring.value.steps[0]!, 0);
+    const error = new QuoteExpiredError(expiring.value, expiring.value.quoteExpiresAt, {
+      ...failureContextFor(expiring.value, [toCompletedExecutionStep(first)]),
+      stage: 'preflight',
+    });
+
+    const derived = executionResumeStateFromError(expiring.value, error);
+
+    expect(derived.isOk()).toBe(true);
+    if (derived.isOk()) expect(derived.value.confirmed).toEqual([first]);
+  });
+
+  it('refuses to guess when a completed step carries no confirmation data', () => {
+    const { plan, state } = twoStepPlanWithState();
+    const first = state.confirmed[0]!;
+    // The shape a custom executor, or an SDK release before 1.1.0, reports.
+    const legacy = {
+      planId: first.planId,
+      stepId: first.stepId,
+      stepIndex: first.stepIndex,
+      operation: first.operation,
+      hash: first.hash,
+    };
+    const error = new ConfirmationError('receipt timeout', failureContextFor(plan, [legacy]));
+
+    const derived = executionResumeStateFromError(plan, error);
+
+    expect(derived.isErr()).toBe(true);
+    if (derived.isErr()) expect(derived.error.field).toBe('error.execution.completed[0]');
+  });
+
+  it('rejects an error without execution context, for another plan, or with a mismatched prefix', () => {
+    const { plan, state } = twoStepPlanWithState();
+    const other = createExecutionPlan({ steps: [transaction('one', { data: '0xbeef' })] });
+    if (other.isErr()) throw other.error;
+    const completed = state.confirmed.map(toCompletedExecutionStep);
+
+    const noContext = executionResumeStateFromError(
+      plan,
+      UnexpectedError.from(new Error('defect')),
+    );
+    const validation = executionResumeStateFromError(
+      plan,
+      ValidationError.forField('plan', 'malformed'),
+    );
+    const otherPlan = executionResumeStateFromError(
+      other.value,
+      new ConfirmationError('receipt timeout', failureContextFor(plan, completed)),
+    );
+    const mismatched = executionResumeStateFromError(
+      plan,
+      new ConfirmationError(
+        'receipt timeout',
+        failureContextFor(plan, [{ ...completed[0]!, stepId: 'two' }]),
+      ),
+    );
+    const malformedPlan = executionResumeStateFromError(
+      null as never,
+      new ConfirmationError('receipt timeout', failureContextFor(plan, completed)),
+    );
+
+    expect(noContext.isErr() && noContext.error.field).toBe('error.execution');
+    expect(validation.isErr() && validation.error.field).toBe('error.execution');
+    expect(otherPlan.isErr() && otherPlan.error.field).toBe('error.execution.planId');
+    expect(mismatched.isErr() && mismatched.error.field).toBe('resume.confirmed[0]');
+    expect(malformedPlan.isErr() && malformedPlan.error.field).toBe('plan');
   });
 });
 

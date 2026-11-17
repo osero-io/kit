@@ -3,7 +3,12 @@ import type { Hex, PublicClient } from 'viem';
 import { base, mainnet } from 'viem/chains';
 import { type Mock, vi } from 'vitest';
 
-import { defineAdapterContract, mockFn, type AdapterContractFactory } from './lib/_testing.js';
+import {
+  defineAdapterContract,
+  mockFn,
+  type AdapterContractFactory,
+  type AdapterFault,
+} from './lib/_testing.js';
 import { ConfirmationError, TransactionError, ValidationError } from './lib/errors.js';
 import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
 import { sendWith, type PrivyWallet } from './privy.js';
@@ -68,6 +73,47 @@ function resetReceipts(): void {
   }));
 }
 
+/** Injects one failure into the Privy harness for the shared adapter contract. */
+function injectPrivyFault(state: PrivyHarnessState, fault: AdapterFault, step: number): void {
+  if (fault.stage === 'estimate') return;
+  if (fault.stage === 'send') {
+    let sent = 0;
+    state.sendTransaction.mockImplementation(async () => {
+      sent += 1;
+      if (sent === step) {
+        throw fault.kind === 'cancel'
+          ? new APIUserAbortError({ message: 'caller aborted' })
+          : new Error('wallet API unavailable');
+      }
+      return { hash: hash(sent) };
+    });
+    return;
+  }
+  if (fault.stage === 'resume-receipt') {
+    actions.getTransactionReceipt.mockImplementation(async (_client, input) => {
+      if (fault.kind === 'unavailable') throw new Error('receipt not found');
+      return { status: 'reverted', transactionHash: input.hash };
+    });
+    return;
+  }
+  let waited = 0;
+  actions.waitForTransactionReceipt.mockImplementation(async (_client, input) => {
+    waited += 1;
+    const receipt = {
+      status: 'success',
+      transactionHash: input.hash,
+      blockNumber: 123n,
+      gasUsed: 50n,
+      effectiveGasPrice: 2n,
+    };
+    if (waited !== step) return receipt;
+    if (fault.kind === 'timeout') throw new Error('receipt timeout');
+    if (fault.kind === 'revert') return { ...receipt, status: 'reverted' };
+    input.onReplaced?.({ reason: fault.kind });
+    return { ...receipt, transactionHash: hash(9_000 + step) };
+  });
+}
+
 const factory: AdapterContractFactory = (configuration = {}) => {
   resetReceipts();
   const state = makePrivy();
@@ -78,7 +124,11 @@ const factory: AdapterContractFactory = (configuration = {}) => {
   };
   return {
     broadcast: state.sendTransaction,
-    execute(valuePlan, form, confirmations) {
+    resumeReceiptLookup: actions.getTransactionReceipt,
+    // Privy selects gas inside its Wallet API; the SDK performs no estimate.
+    performs: { estimate: false },
+    fail: (fault, step = 1) => injectPrivyFault(state, fault, step),
+    execute(valuePlan, form, confirmations, extra) {
       const options = {
         chainId,
         receiptClient: receiptClient(chainId),
@@ -86,6 +136,7 @@ const factory: AdapterContractFactory = (configuration = {}) => {
           valuePlan.steps.map((step) => [step.id, `key-${step.id}`]),
         ),
         ...(confirmations === undefined ? {} : { confirmations }),
+        ...extra,
       };
       return form === 'direct'
         ? sendWith(state.privy, wallet, valuePlan, options)

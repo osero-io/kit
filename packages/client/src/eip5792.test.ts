@@ -1,9 +1,20 @@
-import type { Chain, Hex, WalletClient } from 'viem';
+import {
+  BaseError,
+  TransactionExecutionError,
+  UserRejectedRequestError,
+  type Chain,
+  type Hex,
+  type WalletClient,
+} from 'viem';
 import { base, mainnet } from 'viem/chains';
 import { vi } from 'vitest';
 
 import { sendWith, supportsAtomicBatch } from './eip5792.js';
-import { defineAdapterContract, type AdapterContractFactory } from './lib/_testing.js';
+import {
+  defineAdapterContract,
+  type AdapterContractFactory,
+  type AdapterFault,
+} from './lib/_testing.js';
 import {
   AccountMismatchError,
   BroadcastError,
@@ -17,13 +28,22 @@ import {
   UnsupportedCapabilityError,
   ValidationError,
 } from './lib/errors.js';
-import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
+import {
+  createExecutionPlan,
+  createTransactionRequest,
+  executionResumeStateFromError,
+} from './lib/plan.js';
 import type {
   ConfirmedTransaction,
   ExecutionPlan,
   ExecutionProgress,
   ExecutionResumeState,
 } from './lib/types.js';
+
+type ReceiptWaitInput = {
+  readonly hash: Hex;
+  readonly onReplaced?: (replacement: { readonly reason: string }) => void;
+};
 
 const actions = vi.hoisted(() => ({
   estimateGas: vi.fn<(...args: unknown[]) => Promise<bigint>>(),
@@ -33,15 +53,8 @@ const actions = vi.hoisted(() => ({
   sendCalls: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   sendTransaction: vi.fn<(...args: unknown[]) => Promise<Hex>>(),
   waitForCallsStatus: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
-  waitForTransactionReceipt: vi.fn<
-    (
-      _client: unknown,
-      input: {
-        readonly hash: Hex;
-        readonly onReplaced?: (replacement: { readonly reason: string }) => void;
-      },
-    ) => Promise<unknown>
-  >(),
+  waitForTransactionReceipt:
+    vi.fn<(_client: unknown, input: ReceiptWaitInput) => Promise<unknown>>(),
 }));
 
 vi.mock('viem/actions', () => actions);
@@ -132,14 +145,86 @@ function plan(
   return valuePlan.value;
 }
 
+async function successfulReceipt(_client: unknown, input: ReceiptWaitInput) {
+  return {
+    status: 'success',
+    transactionHash: input.hash,
+    blockNumber: 123n,
+    gasUsed: 50n,
+    effectiveGasPrice: 2n,
+  };
+}
+
+/** Injects one failure into the mocked viem actions for the shared adapter contract. */
+function injectViemFault(fault: AdapterFault, step: number): void {
+  const nth = <Args extends unknown[], Value>(
+    mock: { mockImplementation(implementation: (...args: Args) => Promise<Value>): unknown },
+    normal: (...args: Args) => Promise<Value>,
+    faulty: (...args: Args) => Promise<Value>,
+  ): void => {
+    let call = 0;
+    mock.mockImplementation((...args: Args) => {
+      call += 1;
+      return call === step ? faulty(...args) : normal(...args);
+    });
+  };
+  if (fault.stage === 'estimate') {
+    nth(
+      actions.estimateGas,
+      async () => 100n,
+      async () => {
+        throw new Error('estimate failed');
+      },
+    );
+    return;
+  }
+  if (fault.stage === 'send') {
+    nth(
+      actions.sendTransaction,
+      async () => hash(actions.sendTransaction.mock.calls.length),
+      async () => {
+        throw fault.kind === 'cancel'
+          ? new UserRejectedRequestError(new Error('user rejected'))
+          : new TransactionExecutionError(new BaseError('rpc failure'), {
+              account: null,
+              chain: base,
+              to: TARGET,
+            });
+      },
+    );
+    return;
+  }
+  if (fault.stage === 'resume-receipt') {
+    actions.getTransactionReceipt.mockImplementation(async (_client, input) => {
+      if (fault.kind === 'unavailable') throw new Error('receipt not found');
+      return { status: 'reverted', transactionHash: input.hash };
+    });
+    return;
+  }
+  nth(actions.waitForTransactionReceipt, successfulReceipt, async (client, input) => {
+    if (fault.kind === 'timeout') throw new Error('receipt timeout');
+    if (fault.kind === 'revert') {
+      return { ...(await successfulReceipt(client, input)), status: 'reverted' };
+    }
+    input.onReplaced?.({ reason: fault.kind });
+    return { ...(await successfulReceipt(client, input)), transactionHash: hash(9_000 + step) };
+  });
+}
+
+// The shared contract runs against the sequential fallback, which is the viem executor.
 const factory: AdapterContractFactory = (configuration = {}) => {
   resetActions();
   actions.getCapabilities.mockResolvedValue({ atomic: { status: 'unsupported' } });
   const valueWallet = wallet(configuration.account ?? ACCOUNT, configuration.chainId ?? 8453);
   return {
     broadcast: actions.sendTransaction,
-    execute(valuePlan, form, confirmations) {
-      const options = confirmations === undefined ? {} : { confirmations };
+    resumeReceiptLookup: actions.getTransactionReceipt,
+    // The EIP-5792 preflight verifies the proof, then the viem fallback verifies it again.
+    resumeReceiptLookupsPerStep: 2,
+    performs: { estimate: true },
+    fail: (fault, step = 1) => injectViemFault(fault, step),
+    execute(valuePlan, form, confirmations, extra) {
+      const options = { ...(confirmations === undefined ? {} : { confirmations }), ...extra };
       return form === 'direct'
         ? sendWith(valueWallet, valuePlan, options)
         : sendWith(valueWallet, options)(valuePlan);
@@ -898,6 +983,117 @@ function throwingOptions(cause: unknown) {
     },
   );
 }
+
+describe('eip5792 batch identity and resume', () => {
+  beforeEach(resetActions);
+
+  it('attaches the batch id to every failure after the wallet accepted the batch', async () => {
+    actions.waitForCallsStatus.mockRejectedValueOnce(new Error('timed out'));
+    const timedOut = await sendWith(atomicWallet(), plan());
+    actions.waitForCallsStatus.mockResolvedValueOnce({
+      atomic: true,
+      statusCode: 500,
+      receipts: [receipt(hash(4), 'reverted')],
+    });
+    const reverted = await sendWith(atomicWallet(), plan());
+    actions.waitForCallsStatus.mockResolvedValueOnce('garbage');
+    const malformed = await sendWith(atomicWallet(), plan());
+    actions.waitForTransactionReceipt.mockRejectedValueOnce(new Error('receipt timeout'));
+    const unconfirmed = await sendWith(atomicWallet(), plan(), { confirmations: 2 });
+    const callback = await sendWith(atomicWallet(), plan(), {
+      onProgress: () => {
+        throw new Error('consumer failed');
+      },
+    });
+
+    for (const result of [timedOut, reverted, malformed, unconfirmed, callback]) {
+      expect(result.isErr()).toBe(true);
+      if (result.isErr() && 'execution' in result.error) {
+        expect(result.error.execution?.batchId).toBe(BATCH_ID);
+      }
+    }
+    expect(timedOut.isErr() && timedOut.error).toBeInstanceOf(ConfirmationError);
+    expect(reverted.isErr() && reverted.error).toBeInstanceOf(TransactionError);
+    expect(callback.isErr() && callback.error).toBeInstanceOf(ProgressCallbackError);
+  });
+
+  it('attaches no batch id when the wallet never accepted the batch', async () => {
+    const valueWallet = atomicWallet();
+    actions.sendCalls.mockRejectedValue(new Error('network down'));
+
+    const result = await sendWith(valueWallet, plan());
+
+    expect(result.isErr() && result.error).toBeInstanceOf(BroadcastError);
+    if (result.isErr() && result.error instanceof BroadcastError) {
+      expect(result.error.execution).toBeDefined();
+      expect('batchId' in result.error.execution!).toBe(false);
+    }
+  });
+
+  it('resumes an atomic batch from the state derived from its own failure', async () => {
+    const valuePlan = plan({ stepCount: 3 });
+    const valueWallet = atomicWallet();
+    actions.waitForCallsStatus.mockRejectedValueOnce(new Error('timed out'));
+    const failed = await sendWith(valueWallet, valuePlan, { resume: resumeFirstStep(valuePlan) });
+    if (failed.isOk()) throw new Error('expected the status wait to fail');
+
+    const derived = executionResumeStateFromError(valuePlan, failed.error);
+    if (derived.isErr()) throw derived.error;
+    expect(derived.value).toEqual(resumeFirstStep(valuePlan));
+    actions.sendCalls.mockClear();
+    actions.getTransactionReceipt.mockClear();
+
+    const resumed = await sendWith(valueWallet, valuePlan, { resume: derived.value });
+
+    expect(resumed.isOk()).toBe(true);
+    if (resumed.isOk()) {
+      expect(resumed.value.transactions.map((transaction) => transaction.hash)).toEqual([
+        hash(1),
+        hash(9),
+        hash(9),
+      ]);
+    }
+    // The confirmed prefix was re-verified and only the two pending steps were batched.
+    expect(actions.getTransactionReceipt).toHaveBeenCalledOnce();
+    expect(actions.sendCalls).toHaveBeenCalledOnce();
+    expect(actions.sendCalls).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        calls: valuePlan.steps.slice(1).map((step) => ({
+          to: step.to,
+          data: step.data,
+          value: step.value,
+        })),
+      }),
+    );
+  });
+
+  it('reports the confirmed prefix when the quote expired before the batch was sent', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-22T20:00:00Z'));
+    try {
+      const steps = plan({ stepCount: 2 }).steps;
+      const expiring = createExecutionPlan({ steps, quoteExpiresAt: '2026-07-22T20:00:00Z' });
+      if (expiring.isErr()) throw expiring.error;
+
+      const result = await sendWith(atomicWallet(), expiring.value, {
+        resume: resumeFirstStep(expiring.value),
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error.code).toBe('QUOTE_EXPIRED');
+        if (result.error.code === 'QUOTE_EXPIRED') {
+          expect(result.error.execution).toMatchObject({ stepId: 'step-2', stage: 'preflight' });
+          expect(result.error.execution?.completed).toHaveLength(1);
+        }
+      }
+      expect(actions.sendCalls).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('eip5792 last-resort error net', () => {
   beforeEach(resetActions);

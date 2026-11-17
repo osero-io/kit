@@ -9,11 +9,19 @@ import type {
 } from './api.js';
 import { CHAINS, type OseroChainId } from './chains.js';
 import { OseroClient, type OseroPublicClient } from './OseroClient.js';
-import { createExecutionPlan, createTransactionRequest } from './plan.js';
+import {
+  createExecutionPlan,
+  createTransactionRequest,
+  deserializeExecutionResumeState,
+  executionResumeStateFromError,
+  serializeExecutionResumeState,
+} from './plan.js';
 import { okAsync, type Result } from './result.js';
 import type {
   ExecutionPlan,
   ExecutionPlanHandler,
+  ExecutionProgress,
+  ExecutionResumeState,
   SendWithError,
   TransactionResult,
 } from './types.js';
@@ -197,13 +205,38 @@ export function createMockClient(
   };
 }
 
+/**
+ * A failure the shared adapter contract can ask a harness to inject. `step` is
+ * the 1-based position of the transaction within one `execute` call.
+ */
+export type AdapterFault =
+  | { readonly stage: 'estimate' }
+  | { readonly stage: 'send'; readonly kind: 'cancel' | 'broadcast' }
+  | {
+      readonly stage: 'receipt';
+      readonly kind: 'timeout' | 'revert' | 'cancelled' | 'replaced' | 'repriced';
+    }
+  | { readonly stage: 'resume-receipt'; readonly kind: 'reverted' | 'unavailable' };
+
 export type AdapterContractHarness = {
   readonly broadcast: unknown;
+  /** Spy on the receipt lookup used to verify a resume proof. */
+  readonly resumeReceiptLookup?: unknown;
+  /** Receipt lookups one resumed step costs. Defaults to 1. */
+  readonly resumeReceiptLookupsPerStep?: number;
+  /** Stages this adapter performs itself; a contract test for an absent stage is skipped. */
+  readonly performs?: { readonly estimate: boolean };
   execute(
     plan: ExecutionPlan,
     form: 'direct' | 'curried',
     confirmations?: number,
+    extra?: {
+      readonly resume?: ExecutionResumeState;
+      readonly onProgress?: (progress: ExecutionProgress) => void;
+    },
   ): PromiseLike<Result<TransactionResult, SendWithError>>;
+  /** Injects one failure. Harnesses without fault injection skip the failure-stage contract. */
+  fail?(fault: AdapterFault, step?: number): void;
 };
 
 export type AdapterContractFactory = (configuration?: {
@@ -237,6 +270,24 @@ function contractPlan(quoteExpiresAt?: string): ExecutionPlan {
 }
 
 export function defineAdapterContract(name: string, factory: AdapterContractFactory): void {
+  const supportsFaults = (): boolean =>
+    factory({ account: CONTRACT_ACCOUNT, chainId: 8453 }).fail !== undefined;
+  const harnessWithFault = (fault: AdapterFault, step = 1) => {
+    const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+    harness.fail?.(fault, step);
+    return harness;
+  };
+
+  async function failedAfterFirstStep() {
+    const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+    if (harness.fail === undefined) return undefined;
+    harness.fail({ stage: 'receipt', kind: 'timeout' }, 2);
+    const valuePlan = contractPlan();
+    const result = await harness.execute(valuePlan, 'direct');
+    if (result.isOk()) throw new Error('expected the injected receipt timeout to fail');
+    return { valuePlan, error: result.error };
+  }
+
   describe(`${name} adapter contract`, () => {
     afterEach(() => vi.useRealTimers());
 
@@ -460,6 +511,283 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
 
       expect(result.isOk()).toBe(true);
       expect(harness.broadcast).toHaveBeenCalledTimes(2);
+    });
+
+    describe('failure stages', () => {
+      it('classifies a failed gas estimate as a simulation error and sends nothing', async () => {
+        const harness = harnessWithFault({ stage: 'estimate' });
+        if (harness.fail === undefined || harness.performs?.estimate !== true) return;
+
+        const result = await harness.execute(contractPlan(), 'direct');
+
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error.code).toBe('SIMULATION_FAILED');
+          if (result.error.code === 'SIMULATION_FAILED') {
+            expect(result.error.execution).toMatchObject({
+              stage: 'simulation',
+              stepId: 'one',
+              completed: [],
+            });
+          }
+        }
+        expect(harness.broadcast).not.toHaveBeenCalled();
+      });
+
+      it('classifies a wallet rejection as cancellation at the signing stage', async () => {
+        if (!supportsFaults()) return;
+        const harness = harnessWithFault({ stage: 'send', kind: 'cancel' });
+
+        const result = await harness.execute(contractPlan(), 'direct');
+
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error.code).toBe('CANCELLED');
+          if (result.error.code === 'CANCELLED') {
+            expect(result.error.execution).toMatchObject({ stage: 'signing', stepId: 'one' });
+            expect(result.error.execution?.hash).toBeUndefined();
+          }
+        }
+        expect(harness.broadcast).toHaveBeenCalledTimes(1);
+      });
+
+      it('classifies a failed submission as a broadcast error', async () => {
+        if (!supportsFaults()) return;
+        const harness = harnessWithFault({ stage: 'send', kind: 'broadcast' });
+
+        const result = await harness.execute(contractPlan(), 'direct');
+
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error.code).toBe('BROADCAST_FAILED');
+          if (result.error.code === 'BROADCAST_FAILED') {
+            expect(result.error.execution).toMatchObject({ stage: 'broadcast', stepId: 'one' });
+          }
+        }
+        expect(harness.broadcast).toHaveBeenCalledTimes(1);
+      });
+
+      it('preserves the submitted hash and the confirmed prefix on a receipt timeout', async () => {
+        if (!supportsFaults()) return;
+        const harness = harnessWithFault({ stage: 'receipt', kind: 'timeout' }, 2);
+        const progress: ExecutionProgress[] = [];
+
+        const result = await harness.execute(contractPlan(), 'direct', undefined, {
+          onProgress: (event) => void progress.push(event),
+        });
+
+        expect(result.isErr()).toBe(true);
+        const submitted = progress.filter((event) => event.type === 'step-submitted');
+        expect(submitted).toHaveLength(2);
+        if (result.isErr()) {
+          expect(result.error.code).toBe('CONFIRMATION_FAILED');
+          if (result.error.code === 'CONFIRMATION_FAILED') {
+            expect(result.error.execution).toMatchObject({
+              stage: 'confirmation',
+              stepId: 'two',
+              stepIndex: 1,
+            });
+            expect(result.error.execution?.hash).toBe(
+              submitted[1]?.type === 'step-submitted' ? submitted[1].hash : undefined,
+            );
+            expect(result.error.execution?.completed).toHaveLength(1);
+            expect(result.error.execution?.completed[0]).toMatchObject({
+              stepId: 'one',
+              stepIndex: 0,
+              confirmation: { status: 'success' },
+            });
+          }
+        }
+        expect(harness.broadcast).toHaveBeenCalledTimes(2);
+      });
+
+      it('classifies a reverted receipt as a transaction error with its hash', async () => {
+        if (!supportsFaults()) return;
+        const harness = harnessWithFault({ stage: 'receipt', kind: 'revert' });
+
+        const result = await harness.execute(contractPlan(), 'direct');
+
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error.code).toBe('TRANSACTION_REVERTED');
+          if (result.error.code === 'TRANSACTION_REVERTED') {
+            expect(result.error.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+            expect(result.error.execution).toMatchObject({
+              stage: 'revert',
+              stepId: 'one',
+              hash: result.error.txHash,
+            });
+          }
+        }
+        expect(harness.broadcast).toHaveBeenCalledTimes(1);
+      });
+
+      it.each(['cancelled', 'replaced'] as const)(
+        'stops at the replacement stage when a step is %s',
+        async (kind) => {
+          if (!supportsFaults()) return;
+          const harness = harnessWithFault({ stage: 'receipt', kind });
+
+          const result = await harness.execute(contractPlan(), 'direct');
+
+          expect(result.isErr()).toBe(true);
+          if (result.isErr()) {
+            expect(result.error.code).toBe('CONFIRMATION_FAILED');
+            if (result.error.code === 'CONFIRMATION_FAILED') {
+              expect(result.error.execution).toMatchObject({
+                stage: 'replacement',
+                stepId: 'one',
+                completed: [],
+              });
+              expect(result.error.execution?.hash).toMatch(/^0x[0-9a-f]{64}$/);
+            }
+          }
+          expect(harness.broadcast).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it('accepts a repriced step and records both hashes', async () => {
+        if (!supportsFaults()) return;
+        const harness = harnessWithFault({ stage: 'receipt', kind: 'repriced' });
+
+        const result = await harness.execute(contractPlan(), 'direct');
+
+        expect(result.isOk()).toBe(true);
+        if (result.isOk()) {
+          const first = result.value.transactions[0]!;
+          expect(first.hash).not.toBe(first.submittedHash);
+          expect(first.replacement).toEqual({
+            reason: 'repriced',
+            originalHash: first.submittedHash,
+            replacementHash: first.hash,
+          });
+          expect(first.confirmation.transactionHash).toBe(first.hash);
+        }
+        expect(harness.broadcast).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    describe('resume', () => {
+      it.each(['direct', 'curried'] as const)(
+        'resumes from a failure-derived state, re-verifies the prefix, and sends only the rest with %s invocation',
+        async (form) => {
+          const failed = await failedAfterFirstStep();
+          if (failed === undefined) return;
+          const derived = executionResumeStateFromError(failed.valuePlan, failed.error);
+          if (derived.isErr()) throw derived.error;
+          expect(derived.value.confirmed).toHaveLength(1);
+          // The state survives the canonical serializer, as it would across a restart.
+          const serialized = serializeExecutionResumeState(derived.value);
+          if (serialized.isErr()) throw serialized.error;
+          const restored = deserializeExecutionResumeState(serialized.value);
+          if (restored.isErr()) throw restored.error;
+          expect(restored.value).toEqual(derived.value);
+
+          const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+          const progress: ExecutionProgress[] = [];
+          const result = await harness.execute(failed.valuePlan, form, undefined, {
+            resume: restored.value,
+            onProgress: (event) => void progress.push(event),
+          });
+
+          expect(result.isOk()).toBe(true);
+          if (result.isOk()) {
+            expect(result.value.transactions.map((transaction) => transaction.stepId)).toEqual([
+              'one',
+              'two',
+            ]);
+            // The confirmed prefix is carried over untouched, not re-executed.
+            expect(result.value.transactions[0]).toEqual(restored.value.confirmed[0]);
+          }
+          expect(harness.broadcast).toHaveBeenCalledTimes(1);
+          expect(harness.resumeReceiptLookup).toHaveBeenCalledTimes(
+            harness.resumeReceiptLookupsPerStep ?? 1,
+          );
+          expect(progress[0]).toMatchObject({ type: 'preflight-complete', resumedSteps: 1 });
+          expect(
+            progress
+              .filter((event) => event.type === 'step-started')
+              .map((event) => (event.type === 'step-started' ? event.stepId : '')),
+          ).toEqual(['two']);
+        },
+      );
+
+      it.each(['reverted', 'unavailable'] as const)(
+        'sends nothing when the resume proof receipt is %s',
+        async (kind) => {
+          const failed = await failedAfterFirstStep();
+          if (failed === undefined) return;
+          const derived = executionResumeStateFromError(failed.valuePlan, failed.error);
+          if (derived.isErr()) throw derived.error;
+          const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+          harness.fail?.({ stage: 'resume-receipt', kind });
+
+          const result = await harness.execute(failed.valuePlan, 'direct', undefined, {
+            resume: derived.value,
+          });
+
+          expect(result.isErr()).toBe(true);
+          if (result.isErr()) {
+            expect(result.error.code).toBe('CONFIRMATION_FAILED');
+            if (result.error.code === 'CONFIRMATION_FAILED') {
+              expect(result.error.execution).toMatchObject({
+                stage: 'confirmation',
+                stepId: 'one',
+                hash: derived.value.confirmed[0]?.hash,
+                completed: [],
+              });
+            }
+          }
+          expect(harness.broadcast).not.toHaveBeenCalled();
+        },
+      );
+
+      it('rejects resume state that claims a step the plan does not have before sending', async () => {
+        const failed = await failedAfterFirstStep();
+        if (failed === undefined) return;
+        const derived = executionResumeStateFromError(failed.valuePlan, failed.error);
+        if (derived.isErr()) throw derived.error;
+        const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        const tampered: ExecutionResumeState = {
+          planId: derived.value.planId,
+          confirmed: [{ ...derived.value.confirmed[0]!, stepId: 'two' }],
+        };
+
+        const result = await harness.execute(failed.valuePlan, 'direct', undefined, {
+          resume: tampered,
+        });
+
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+        expect(harness.broadcast).not.toHaveBeenCalled();
+        expect(harness.resumeReceiptLookup).not.toHaveBeenCalled();
+      });
+
+      it('reports the confirmed prefix when the quote expires before a later step', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-22T19:59:59Z'));
+        const harness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
+        const valuePlan = contractPlan('2026-07-22T20:00:00Z');
+        const result = await harness.execute(valuePlan, 'direct', undefined, {
+          onProgress: (event) => {
+            // The quote expires once the first step has confirmed.
+            if (event.type === 'step-confirmed') vi.setSystemTime(new Date('2026-07-22T20:00:00Z'));
+          },
+        });
+
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error.code).toBe('QUOTE_EXPIRED');
+          if (result.error.code === 'QUOTE_EXPIRED') {
+            expect(result.error.execution).toMatchObject({ stepId: 'two', stepIndex: 1 });
+            expect(result.error.execution?.completed).toHaveLength(1);
+            const derived = executionResumeStateFromError(valuePlan, result.error);
+            expect(derived.isOk()).toBe(true);
+            if (derived.isOk()) expect(derived.value.confirmed[0]?.stepId).toBe('one');
+          }
+        }
+        expect(harness.broadcast).toHaveBeenCalledTimes(1);
+      });
     });
 
     it('rejects a constrained plan with detached quote expiry before broadcasting', async () => {

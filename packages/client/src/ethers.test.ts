@@ -2,7 +2,12 @@ import { makeError, type Signer, type TransactionReceipt, type TransactionRespon
 import { type Mock, vi } from 'vitest';
 
 import { sendWith } from './ethers.js';
-import { defineAdapterContract, mockFn, type AdapterContractFactory } from './lib/_testing.js';
+import {
+  defineAdapterContract,
+  mockFn,
+  type AdapterContractFactory,
+  type AdapterFault,
+} from './lib/_testing.js';
 import { ConfirmationError, TransactionError } from './lib/errors.js';
 import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
 
@@ -58,23 +63,67 @@ function makeHarness(account: `0x${string}` = ACCOUNT, chainId = 8453): EthersHa
 
 const factory: AdapterContractFactory = (configuration = {}) => {
   const state = makeHarness(configuration.account ?? ACCOUNT, configuration.chainId ?? 8453);
+  let faults: { readonly fault: AdapterFault; readonly step: number }[] = [];
+  const faultFor = (stage: AdapterFault['stage'], step: number) =>
+    faults.find((entry) => entry.fault.stage === stage && entry.step === step)?.fault;
+  let estimated = 0;
+  state.estimateGas.mockImplementation(async () => {
+    estimated += 1;
+    if (faultFor('estimate', estimated) !== undefined) throw new Error('estimate failed');
+    return 100n;
+  });
   let sent = 0;
   state.sendTransaction.mockImplementation(async () => {
     sent += 1;
-    const transactionHash = hash(sent);
-    const wait = mockFn(async (_confirmations?: number, _timeout?: number) => ({
+    const step = sent;
+    const sendFault = faultFor('send', step);
+    if (sendFault?.stage === 'send') {
+      throw sendFault.kind === 'cancel'
+        ? makeError('user rejected', 'ACTION_REJECTED', {
+            action: 'sendTransaction',
+            reason: 'rejected',
+          })
+        : makeError('network unreachable', 'NETWORK_ERROR', { event: 'broadcast' });
+    }
+    const transactionHash = hash(step);
+    const receipt = {
       hash: transactionHash,
       status: 1,
       blockNumber: 123,
       gasUsed: 50n,
       gasPrice: 2n,
-    }));
+    };
+    const wait = mockFn(async (_confirmations?: number, _timeout?: number) => {
+      const receiptFault = faultFor('receipt', step);
+      if (receiptFault?.stage !== 'receipt') return receipt;
+      if (receiptFault.kind === 'timeout') throw new Error('receipt timeout');
+      if (receiptFault.kind === 'revert') return { ...receipt, status: 0 };
+      const replacementHash = hash(9_000 + step);
+      throw makeError('replaced', 'TRANSACTION_REPLACED', {
+        cancelled: receiptFault.kind === 'cancelled',
+        reason: receiptFault.kind,
+        hash: transactionHash,
+        replacement: { hash: replacementHash } as TransactionResponse,
+        receipt: { ...receipt, hash: replacementHash } as unknown as TransactionReceipt,
+      });
+    });
     return { hash: transactionHash, wait };
   });
   return {
     broadcast: state.sendTransaction,
-    execute(valuePlan, form, confirmations) {
-      const options = confirmations === undefined ? {} : { confirmations };
+    resumeReceiptLookup: state.getTransactionReceipt,
+    performs: { estimate: true },
+    fail(fault, step = 1) {
+      faults = [...faults, { fault, step }];
+      if (fault.stage === 'resume-receipt') {
+        state.getTransactionReceipt.mockImplementation(async (transactionHash: string) => {
+          if (fault.kind === 'unavailable') return null;
+          return { hash: transactionHash, status: 0 };
+        });
+      }
+    },
+    execute(valuePlan, form, confirmations, extra) {
+      const options = { ...(confirmations === undefined ? {} : { confirmations }), ...extra };
       return form === 'direct'
         ? sendWith(state.signer, valuePlan, options)
         : sendWith(state.signer, options)(valuePlan);

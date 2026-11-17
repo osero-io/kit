@@ -6,7 +6,7 @@ import {
   waitForCallsStatus,
 } from 'viem/actions';
 
-import { preflightExecutorCapabilities } from './lib/adapters.js';
+import { preflightExecutorCapabilities, toCompletedExecutionStep } from './lib/adapters.js';
 import {
   BroadcastError,
   CancelError,
@@ -240,6 +240,7 @@ function failureContext(
   stage: ExecutionStage,
   completed: readonly ConfirmedTransaction[],
   hash?: Hex,
+  batchId?: BatchId,
 ): ExecutionFailureContext {
   return {
     planId: plan.id,
@@ -248,13 +249,8 @@ function failureContext(
     operation: step.transaction.operation,
     stage,
     ...(hash === undefined ? {} : { hash }),
-    completed: completed.map((transaction) => ({
-      planId: transaction.planId,
-      stepId: transaction.stepId,
-      stepIndex: transaction.stepIndex,
-      operation: transaction.operation,
-      hash: transaction.hash,
-    })),
+    ...(batchId === undefined ? {} : { batchId }),
+    completed: completed.map(toCompletedExecutionStep),
   };
 }
 
@@ -522,7 +518,7 @@ function createBatchProgress(execution: Extract<PreparedExecution, { readonly ki
       await emit({ kind: 'plan-completed' }, { type: 'plan-completed', result });
     },
     /** The callback failure to report for a batch that confirmed, if any. */
-    failure(result: TransactionResult): ProgressCallbackError | undefined {
+    failure(result: TransactionResult, batchId: BatchId): ProgressCallbackError | undefined {
       if (failed === undefined) return undefined;
       const { cause, event } = failed;
       const last = execution.pending[execution.pending.length - 1];
@@ -543,7 +539,7 @@ function createBatchProgress(execution: Extract<PreparedExecution, { readonly ki
               );
       return ProgressCallbackError.from(
         cause,
-        failureContext(execution.plan, step, 'progress', completed),
+        failureContext(execution.plan, step, 'progress', completed, undefined, batchId),
       );
     },
   };
@@ -564,7 +560,7 @@ function decodeConfirmedBatchReceipt(
   const unconfirmed = (message: string, hash?: Hex): ConfirmationError =>
     new ConfirmationError(
       message,
-      failureContext(plan, lastStep, 'confirmation', completed, hash),
+      failureContext(plan, lastStep, 'confirmation', completed, hash, batchId),
       { cause: value },
     );
   if (
@@ -586,7 +582,7 @@ function decodeConfirmedBatchReceipt(
         new TransactionError(
           `Call batch ${batchId} failed at transaction ${lastReceipt.transactionHash}`,
           lastReceipt.transactionHash,
-          failureContext(plan, lastStep, 'revert', completed, lastReceipt.transactionHash),
+          failureContext(plan, lastStep, 'revert', completed, lastReceipt.transactionHash, batchId),
           { cause: value },
         ),
       );
@@ -670,7 +666,14 @@ async function executeAtomicBatch(
     return err(
       new ConfirmationError(
         `Failed while waiting for call batch ${batchId}`,
-        failureContext(execution.plan, lastStep, 'confirmation', execution.confirmed),
+        failureContext(
+          execution.plan,
+          lastStep,
+          'confirmation',
+          execution.confirmed,
+          undefined,
+          batchId,
+        ),
         { cause },
       ),
     );
@@ -713,6 +716,7 @@ async function executeAtomicBatch(
           'confirmation',
           execution.confirmed,
           submittedHash,
+          batchId,
         ),
       ),
     );
@@ -726,7 +730,14 @@ async function executeAtomicBatch(
         submittedHash,
         replacement,
         confirmed?.transactionHash ?? submittedHash,
-        failureContext(execution.plan, lastStep, 'replacement', execution.confirmed, submittedHash),
+        failureContext(
+          execution.plan,
+          lastStep,
+          'replacement',
+          execution.confirmed,
+          submittedHash,
+          batchId,
+        ),
       ),
     );
   }
@@ -736,7 +747,14 @@ async function executeAtomicBatch(
       new TransactionError(
         `Transaction ${revertedHash} reverted`,
         revertedHash,
-        failureContext(execution.plan, lastStep, 'revert', execution.confirmed, revertedHash),
+        failureContext(
+          execution.plan,
+          lastStep,
+          'revert',
+          execution.confirmed,
+          revertedHash,
+          batchId,
+        ),
         { cause: receipt },
       ),
     );
@@ -871,7 +889,15 @@ function executePlan(
         );
       }
 
-      const expiry = checkExecutionPlanExpiry(prepared.value.plan);
+      const expiry = checkExecutionPlanExpiry(
+        prepared.value.plan,
+        failureContext(
+          prepared.value.plan,
+          prepared.value.pending[0],
+          'preflight',
+          prepared.value.confirmed,
+        ),
+      );
       if (expiry.isErr()) return err(expiry.error);
       const batch = groupPendingSteps(prepared.value);
       const progress = createBatchProgress(prepared.value);
@@ -892,7 +918,7 @@ function executePlan(
       }
       const result = buildAtomicResult(prepared.value, outcome.value.receipt);
       await progress.confirmed(result);
-      const progressFailure = progress.failure(result);
+      const progressFailure = progress.failure(result, outcome.value.receipt.batchId);
       if (progressFailure !== undefined) return err(progressFailure);
       return ok(result);
     } catch (cause) {
