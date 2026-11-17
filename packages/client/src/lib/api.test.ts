@@ -3195,3 +3195,327 @@ describe('Transfer Status polling on a fake clock', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+const CANONICAL_REFRESH_BODY =
+  '{"provider":"enso","walletAddress":"0x1111111111111111111111111111111111111111",' +
+  '"sourceAssetId":"ethereum:usds","destinationAssetId":"ethereum:susds",' +
+  '"amount":"1000000000000000000","slippage":{"bps":"5","percent":"0.05"},"referralCode":null}';
+
+describe('Refresh Context forward compatibility', () => {
+  it('sends a Refresh Context without extra fields byte-for-byte as before', async () => {
+    const transport = fetchSequence({ body: ENSO_SAME_CHAIN_QUOTE });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    const first = await client.getSwapQuote(gasQuoteRequest());
+    if (first.isErr()) throw first.error;
+
+    await client.refreshSwapQuote(first.value.quote.refreshContext);
+
+    expect(Object.keys(first.value.quote.refreshContext)).toEqual([
+      'provider',
+      'walletAddress',
+      'sourceAssetId',
+      'destinationAssetId',
+      'amount',
+      'slippage',
+      'referralCode',
+    ]);
+    expect(transport.calls[1]?.init?.body).toBe(CANONICAL_REFRESH_BODY);
+  });
+
+  it('normalizes field order regardless of the order the API used', async () => {
+    const context = ENSO_SAME_CHAIN_QUOTE.refreshContext;
+    const shuffled = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      refreshContext: {
+        referralCode: context.referralCode,
+        slippage: context.slippage,
+        amount: context.amount,
+        destinationAssetId: context.destinationAssetId,
+        sourceAssetId: context.sourceAssetId,
+        walletAddress: context.walletAddress,
+        provider: context.provider,
+      },
+    };
+    const transport = fetchSequence({ body: shuffled }, { body: ENSO_SAME_CHAIN_QUOTE });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    const first = await client.getSwapQuote(gasQuoteRequest());
+    if (first.isErr()) throw first.error;
+
+    await client.refreshSwapQuote(first.value.quote.refreshContext);
+
+    expect(transport.calls[1]?.init?.body).toBe(CANONICAL_REFRESH_BODY);
+  });
+
+  it('preserves unknown primitive fields and echoes them unchanged on refresh', async () => {
+    const withExtras = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      refreshContext: {
+        signature: 'sig-abc',
+        ...ENSO_SAME_CHAIN_QUOTE.refreshContext,
+        issuedAt: 1_700_000_000,
+        sticky: true,
+        nested: { ignored: true },
+        list: ['ignored'],
+        nothing: null,
+      },
+    };
+    const transport = fetchSequence({ body: withExtras });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    const first = await client.getSwapQuote(gasQuoteRequest());
+    if (first.isErr()) throw first.error;
+
+    const refreshed = await client.refreshSwapQuote(first.value.quote.refreshContext);
+
+    expect(refreshed.isOk()).toBe(true);
+    expect(first.value.quote.refreshContext).toEqual({
+      ...ENSO_SAME_CHAIN_QUOTE.refreshContext,
+      signature: 'sig-abc',
+      issuedAt: 1_700_000_000,
+      sticky: true,
+    });
+    // Known fields first in their fixed order, then the extra primitives as the API sent them.
+    expect(transport.calls[1]?.init?.body).toBe(
+      `${CANONICAL_REFRESH_BODY.slice(0, -1)},"signature":"sig-abc","issuedAt":1700000000,"sticky":true}`,
+    );
+  });
+
+  it('echoes extra fields through the automatic executeSwap refresh', async () => {
+    const token = 'server-session-token';
+    const approval = {
+      ...quoteWithApproval(),
+      refreshContext: { ...ENSO_SAME_CHAIN_QUOTE.refreshContext, session: token },
+    };
+    const ready = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      refreshContext: { ...ENSO_SAME_CHAIN_QUOTE.refreshContext, session: token },
+    };
+    const transport = fetchSequence({ body: approval }, { body: ready });
+    const rpc = publicClient([0n, QUOTE_INPUT_RAW], 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:10.000Z'));
+    try {
+      const result = await client.executeSwap(gasQuoteRequest(), executionHandler().handler);
+
+      expect(result.isOk()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(transport.calls[1]?.url).toBe('https://api.osero.org/v1/swap/quote/refresh');
+    expect(JSON.parse(String(transport.calls[1]?.init?.body))).toMatchObject({ session: token });
+  });
+
+  it('never lets an extra field shadow a known field', async () => {
+    const hostile = JSON.stringify(ENSO_SAME_CHAIN_QUOTE).replace(
+      '"refreshContext":{',
+      '"refreshContext":{"__proto__":{"amount":"1"},"constructor":"x",',
+    );
+    const fetch: OseroApiFetch = async () => new Response(hostile);
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const first = await client.getSwapQuote(gasQuoteRequest());
+
+    expect(first.isOk()).toBe(true);
+    if (first.isOk()) {
+      expect(first.value.quote.refreshContext.amount).toBe('1000000000000000000');
+      expect(JSON.parse(JSON.stringify(first.value.quote.refreshContext))).toEqual({
+        ...ENSO_SAME_CHAIN_QUOTE.refreshContext,
+        constructor: 'x',
+      });
+    }
+  });
+});
+
+describe('waiting on a persisted status request', () => {
+  it('resumes polling after a restart from the persisted request alone', async () => {
+    // Process one: execute the swap and persist only the status request.
+    const quote = zeroXCrossChainQuoteFixture();
+    const persisted = JSON.stringify({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: quote.statusContext,
+    });
+
+    // Process two: a new client, no quote in memory.
+    const transport = fetchSequence(
+      { body: zeroXTransferStatusFixture('pending') },
+      { body: zeroXTransferStatusFixture('completed') },
+    );
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      baseUrl: 'https://contract.test/v1/',
+      fetch: transport.fetch,
+    });
+    const onStatus = mockFn();
+
+    const result = await client.waitForTransferStatus(JSON.parse(persisted), {
+      pollingIntervalMs: 1,
+      timeoutMs: 1_000,
+      onStatus,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('completed');
+      expect(result.value.destinationTransactionHash).toBe(DESTINATION_HASH);
+    }
+    expect(onStatus).toHaveBeenCalledTimes(2);
+    expect(transport.calls).toHaveLength(2);
+    expect(transport.calls[0]?.url).toBe(
+      `https://contract.test/v1/swap/status/${SOURCE_HASH}?provider=0x&sourceChainId=8453&destinationChainId=1&bridge=across_v4&providerQuoteId=${ZEROX_QUOTE_ID}`,
+    );
+  });
+
+  it('issues exactly the requests waitForSwapCompletion issues for the same quote', async () => {
+    const quote = crossChainQuoteFixture();
+    const byQuote = fetchSequence(
+      { body: ensoTransferStatusFixture('pending') },
+      { body: ensoTransferStatusFixture('completed') },
+    );
+    const byRequest = fetchSequence(
+      { body: ensoTransferStatusFixture('pending') },
+      { body: ensoTransferStatusFixture('completed') },
+    );
+    const options = { pollingIntervalMs: 1, timeoutMs: 1_000 } as const;
+
+    const fromQuote = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: byQuote.fetch,
+    }).waitForSwapCompletion(quote, SOURCE_HASH, options);
+    const fromRequest = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: byRequest.fetch,
+    }).waitForTransferStatus(
+      { sourceTransactionHash: SOURCE_HASH, statusContext: quote.statusContext! },
+      options,
+    );
+
+    expect(fromRequest).toEqual(fromQuote);
+    expect(byRequest.calls.map((call) => call.url)).toEqual(byQuote.calls.map((call) => call.url));
+    expect(byRequest.calls.map((call) => call.init?.method)).toEqual(
+      byQuote.calls.map((call) => call.init?.method),
+    );
+  });
+
+  it('shares waitForRecovery, timeout, and cancellation semantics', async () => {
+    const statusRequest = {
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: zeroXCrossChainQuoteFixture().statusContext!,
+    };
+    const pendingRecovery = zeroXRecoveryContextFixture({
+      state: 'pending',
+      action: null,
+      deadline: null,
+    });
+    const settledRecovery = zeroXRecoveryContextFixture({
+      state: 'completed',
+      action: null,
+      deadline: null,
+      settledAmount: '997500',
+    });
+    const recovering = fetchSequence(
+      { body: zeroXTransferStatusFixture('failed', pendingRecovery) },
+      { body: zeroXTransferStatusFixture('failed', settledRecovery) },
+    );
+    const firstFailure = fetchSequence({
+      body: zeroXTransferStatusFixture('failed', pendingRecovery),
+    });
+    const neverDone = fetchSequence({ body: zeroXTransferStatusFixture('pending') });
+    const controller = new AbortController();
+    controller.abort('stop');
+
+    const waited = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: recovering.fetch,
+    }).waitForTransferStatus(statusRequest, {
+      pollingIntervalMs: 1,
+      timeoutMs: 1_000,
+      waitForRecovery: true,
+    });
+    const immediate = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: firstFailure.fetch,
+    }).waitForTransferStatus(statusRequest, { pollingIntervalMs: 1, timeoutMs: 1_000 });
+    const timedOut = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: neverDone.fetch,
+    }).waitForTransferStatus(statusRequest, { pollingIntervalMs: 1, timeoutMs: 5 });
+    const cancelled = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: neverDone.fetch,
+    }).waitForTransferStatus(statusRequest, { signal: controller.signal });
+
+    expect(waited.isOk() && waited.value.recoveryContext?.state).toBe('completed');
+    expect(recovering.calls).toHaveLength(2);
+    expect(immediate.isOk() && immediate.value.recoveryContext?.state).toBe('pending');
+    expect(firstFailure.calls).toHaveLength(1);
+    expect(timedOut.isErr()).toBe(true);
+    if (timedOut.isErr()) {
+      expect(timedOut.error).toBeInstanceOf(TimeoutError);
+      if (timedOut.error instanceof TimeoutError) {
+        expect(timedOut.error.operation).toBe('waitForTransferStatus');
+        expect(timedOut.error.timeoutMs).toBe(5);
+      }
+    }
+    expect(cancelled.isErr() && cancelled.error.code).toBe('CANCELLED');
+  });
+
+  it.each([
+    ['a null request', null],
+    ['a malformed source hash', { sourceTransactionHash: '0x12', statusContext: {} }],
+    [
+      'a same-chain Status Context',
+      {
+        sourceTransactionHash: SOURCE_HASH,
+        statusContext: { provider: 'enso', sourceChainId: 1, destinationChainId: 1, bridge: 'x' },
+      },
+    ],
+    [
+      'a 0x Status Context without its Provider Quote ID',
+      {
+        sourceTransactionHash: SOURCE_HASH,
+        statusContext: {
+          provider: '0x',
+          sourceChainId: 8453,
+          destinationChainId: 1,
+          bridge: 'across_v4',
+        },
+      },
+    ],
+  ])('rejects %s before any request', async (_name, statusRequest) => {
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('completed') });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.waitForTransferStatus(statusRequest as never);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(transport.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['null options', null],
+    ['a zero polling interval', { pollingIntervalMs: 0 }],
+    ['an infinite timeout', { timeoutMs: Number.POSITIVE_INFINITY }],
+    ['a non-function status callback', { onStatus: 'log' }],
+    ['a non-boolean waitForRecovery', { waitForRecovery: 'yes' }],
+  ])('rejects %s before any request', async (_name, options) => {
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('completed') });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.waitForTransferStatus(
+      {
+        sourceTransactionHash: SOURCE_HASH,
+        statusContext: crossChainQuoteFixture().statusContext!,
+      },
+      options as never,
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(transport.calls).toHaveLength(0);
+  });
+});

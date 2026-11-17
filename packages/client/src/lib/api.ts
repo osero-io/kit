@@ -442,6 +442,14 @@ export type OseroApiRouteSummary = {
   readonly bridge: OseroApiBridgeProtocol | null;
 };
 
+/**
+ * The fields a quote issues for refreshing itself. Send it back unchanged.
+ *
+ * Primitive fields this SDK release does not know survive decoding and are
+ * returned verbatim on the next refresh, so a field the API adds later (for
+ * example a server-issued token) round-trips without an SDK upgrade. They are
+ * present at runtime after the known fields; read one with a cast if needed.
+ */
 export type OseroApiRefreshContext = {
   readonly provider: OseroApiQuoteProvider;
   readonly walletAddress: Address;
@@ -1268,10 +1276,43 @@ export class OseroApiClient {
         ValidationError.forField('quote', 'waitForSwapCompletion requires a cross-chain quote'),
       );
     }
-    const statusRequest = quote.statusContext;
     if (!isTransactionHash(txHash)) {
       return errAsync(ValidationError.forField('txHash', 'txHash must be a 32-byte hex string'));
     }
+    return this.pollTransferStatus(
+      { sourceTransactionHash: txHash, statusContext: quote.statusContext },
+      options,
+      'waitForSwapCompletion',
+    );
+  }
+
+  /**
+   * Polls a cross-chain transfer until it completes or fails, from a status
+   * request alone. Persist `{ sourceTransactionHash, statusContext }` when the
+   * source transaction is submitted and a process restarted later can resume
+   * waiting without the original quote.
+   *
+   * Options and semantics are those of {@link OseroApiClient.waitForSwapCompletion}:
+   * the same signal, timeout, polling interval, `onStatus`, and `waitForRecovery`.
+   */
+  waitForTransferStatus(
+    request: OseroApiTransferStatusRequest,
+    options: WaitForSwapCompletionOptions = {},
+  ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
+    if (typeof options !== 'object' || options === null) {
+      return errAsync(ValidationError.forField('options', 'options must be an object'));
+    }
+    // Reject a malformed request before polling starts, as a single status read would.
+    const encoded = encodeSwapStatusRequest(request);
+    if (encoded.isErr()) return errAsync(encoded.error);
+    return this.pollTransferStatus(request, options, 'waitForTransferStatus');
+  }
+
+  private pollTransferStatus(
+    request: OseroApiTransferStatusRequest,
+    options: WaitForSwapCompletionOptions,
+    operation: 'waitForSwapCompletion' | 'waitForTransferStatus',
+  ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
     const pollingIntervalMs = options.pollingIntervalMs ?? 5_000;
     const timeoutMs = options.timeoutMs ?? 30 * 60 * 1_000;
     if (!Number.isSafeInteger(pollingIntervalMs) || pollingIntervalMs <= 0) {
@@ -1308,15 +1349,12 @@ export class OseroApiClient {
         }
         const elapsed = Date.now() - startedAt;
         const remaining = timeoutMs - elapsed;
-        if (remaining <= 0) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+        if (remaining <= 0) return err(new TimeoutError(operation, timeoutMs));
 
         const status = await awaitPollingOperation(
           (signal) =>
             this.getSwapStatusWithTrace(
-              {
-                sourceTransactionHash: txHash,
-                statusContext: statusRequest,
-              },
+              request,
               {
                 ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
                 signal,
@@ -1326,6 +1364,7 @@ export class OseroApiClient {
           remaining,
           timeoutMs,
           options.signal,
+          operation,
         );
         if (status.isErr()) return err(status.error);
 
@@ -1335,7 +1374,7 @@ export class OseroApiClient {
           if (options.onStatus !== undefined) {
             const callbackRemaining = timeoutMs - (Date.now() - startedAt);
             if (callbackRemaining <= 0) {
-              return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+              return err(new TimeoutError(operation, timeoutMs));
             }
             const callback = await awaitPollingOperation(
               () =>
@@ -1347,6 +1386,7 @@ export class OseroApiClient {
               callbackRemaining,
               timeoutMs,
               options.signal,
+              operation,
             );
             if (callback.isErr()) return err(callback.error);
           }
@@ -1366,7 +1406,7 @@ export class OseroApiClient {
 
         const remainingBeforeSleep = timeoutMs - (Date.now() - startedAt);
         if (remainingBeforeSleep <= 0) {
-          return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+          return err(new TimeoutError(operation, timeoutMs));
         }
         const delay = Math.min(pollingIntervalMs, remainingBeforeSleep);
         const slept = await sleep(delay, options.signal);
@@ -1375,7 +1415,7 @@ export class OseroApiClient {
       // oxlint-enable no-await-in-loop
     };
     return observeResult(new ResultAsync(wait()), {
-      operation: 'api.waitForSwapCompletion',
+      operation: `api.${operation}`,
       trace,
     });
   }
@@ -1746,15 +1786,16 @@ async function awaitPollingOperation<Value, ErrorType>(
   remainingMs: number,
   timeoutMs: number,
   signal: AbortSignal | undefined,
+  label: string,
 ): Promise<Result<Value, ErrorType | CancelError | TimeoutError>> {
   if (signal?.aborted) return err(CancelError.from(signal.reason));
-  if (remainingMs <= 0) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+  if (remainingMs <= 0) return err(new TimeoutError(label, timeoutMs));
 
   const controller = new AbortController();
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
-    controller.abort(new TimeoutError('waitForSwapCompletion', timeoutMs));
+    controller.abort(new TimeoutError(label, timeoutMs));
   }, remainingMs);
   const abort = () => controller.abort(signal?.reason);
   signal?.addEventListener('abort', abort, { once: true });
@@ -1762,7 +1803,7 @@ async function awaitPollingOperation<Value, ErrorType>(
   clearTimeout(timeout);
   signal?.removeEventListener('abort', abort);
 
-  return timedOut ? err(new TimeoutError('waitForSwapCompletion', timeoutMs)) : result;
+  return timedOut ? err(new TimeoutError(label, timeoutMs)) : result;
 }
 
 function sleep(
@@ -2574,7 +2615,7 @@ function decodePreparedTransaction(value: unknown, path: string): OseroApiPrepar
 
 function decodeRefreshContext(value: unknown, path: string): OseroApiRefreshContext {
   const record = asRecord(value, path);
-  return {
+  const known: OseroApiRefreshContext = {
     provider: decodeQuoteProvider(
       requiredField(record, 'provider', `${path}.provider`),
       `${path}.provider`,
@@ -2593,6 +2634,17 @@ function decodeRefreshContext(value: unknown, path: string): OseroApiRefreshCont
     ),
     referralCode: nullableField(record, 'referralCode', `${path}.referralCode`, decodeReferralCode),
   };
+  // The API is the authority on what a Refresh Context contains. A primitive
+  // field a newer API adds is kept after the known fields and echoed back on
+  // refresh, mirroring the Status Context. Known fields are never overridden,
+  // and a context without extra fields serializes exactly as before.
+  const extras: Record<string, string | number | boolean> = {};
+  for (const [key, extra] of Object.entries(record)) {
+    if (Object.hasOwn(known, key)) continue;
+    if (typeof extra === 'string' || typeof extra === 'boolean') extras[key] = extra;
+    else if (typeof extra === 'number' && Number.isFinite(extra)) extras[key] = extra;
+  }
+  return Object.keys(extras).length === 0 ? known : { ...known, ...extras };
 }
 
 type StatusContextCommon = {
