@@ -1,5 +1,6 @@
 import { createMockClient, mockFn, type MockPublicClient } from './_testing.js';
 import { RpcError, SimulationError, UnsupportedCapabilityError } from './errors.js';
+import { OseroClient, type OseroPublicClient } from './OseroClient.js';
 import {
   createApprovalTransaction,
   createExecutionPlan,
@@ -194,5 +195,136 @@ describe('simulateExecutionPlan', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+  });
+});
+
+// F14: simulation is a read-only preflight. These pin the scope reported for a one-step plan
+// and prove the public client is only ever asked to read or estimate.
+
+function singleStepPlan(): ExecutionPlan {
+  const swap = createTransactionRequest({
+    id: 'swap',
+    chainId: 8453,
+    from: ACCOUNT,
+    to: TARGET,
+    data: '0x1234',
+    operation: 'SWAP_EXACT_IN',
+  });
+  if (swap.isErr()) throw swap.error;
+  const plan = createExecutionPlan({ steps: [swap.value] });
+  if (plan.isErr()) throw plan.error;
+  return plan.value;
+}
+
+const READ_ONLY_RPC_SURFACE = [
+  'estimateFeesPerGas',
+  'estimateGas',
+  'getBalance',
+  'getBlockNumber',
+  'readContract',
+] as const;
+
+function signingAndBroadcastSpies() {
+  return {
+    request: mockFn(async () => Promise.reject(new Error('Unexpected raw request'))),
+    sendRawTransaction: mockFn(async () => Promise.reject(new Error('Unexpected broadcast'))),
+    sendTransaction: mockFn(async () => Promise.reject(new Error('Unexpected broadcast'))),
+    signMessage: mockFn(async () => Promise.reject(new Error('Unexpected signature'))),
+    signTransaction: mockFn(async () => Promise.reject(new Error('Unexpected signature'))),
+    signTypedData: mockFn(async () => Promise.reject(new Error('Unexpected signature'))),
+    simulateContract: mockFn(async () => Promise.reject(new Error('Unexpected simulateContract'))),
+    writeContract: mockFn(async () => Promise.reject(new Error('Unexpected broadcast'))),
+  };
+}
+
+/**
+ * A simulation client whose public client also carries send/sign spies, wrapped so every
+ * function-valued member that simulation reaches for is recorded by name.
+ */
+function recordingSimulationClient() {
+  const spies = signingAndBroadcastSpies();
+  const { publicClient } = simulationClient(spies as Partial<MockPublicClient>);
+  const touched = new Set<string>();
+  const recording = new Proxy(publicClient, {
+    get(target, key, receiver) {
+      const value: unknown = Reflect.get(target, key, receiver);
+      if (typeof key === 'string' && (typeof value === 'function' || value === undefined)) {
+        touched.add(key);
+      }
+      return value;
+    },
+  });
+  const client = OseroClient.create({
+    publicClients: { 8453: recording as unknown as OseroPublicClient },
+  });
+  return { client, publicClient, spies, touched };
+}
+
+describe('simulateExecutionPlan read-only scope', () => {
+  it('reports single-step scope for a one-step plan', async () => {
+    const { client, publicClient } = simulationClient();
+    const plan = singleStepPlan();
+
+    const result = await simulateExecutionPlan(client, plan, ACCOUNT);
+
+    expect(plan.steps).toHaveLength(1);
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.scope).toBe('single-step');
+      expect(result.value.planId).toBe(plan.id);
+      expect(result.value.steps).toEqual([
+        {
+          stepId: 'swap',
+          stepIndex: 0,
+          operation: 'SWAP_EXACT_IN',
+          independentlySimulated: true,
+          conditionalOnPriorSteps: false,
+          result: { status: 'success', estimatedGas: 100n, estimatedNativeFee: 400n },
+        },
+      ]);
+      expect(result.value.allowances).toEqual([]);
+      expect(result.value.tokenBalances).toEqual([]);
+    }
+    expect(publicClient.estimateGas).toHaveBeenCalledOnce();
+    expect(publicClient.readContract).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a single-step plan', singleStepPlan, 'single-step', 1, 0],
+    ['a multi-step plan', executionPlan, 'independent-steps', 2, 2],
+  ] as const)(
+    'only reads and estimates for %s and never signs or broadcasts',
+    async (_label, buildPlan, scope, estimates, reads) => {
+      const { client, publicClient, spies, touched } = recordingSimulationClient();
+
+      const result = await simulateExecutionPlan(client, buildPlan(), ACCOUNT);
+
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) expect(result.value.scope).toBe(scope);
+      for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+      expect(publicClient.multicall).not.toHaveBeenCalled();
+      for (const method of touched) expect(READ_ONLY_RPC_SURFACE).toContain(method);
+      expect(touched).toContain('estimateGas');
+      expect(publicClient.getBlockNumber).toHaveBeenCalledOnce();
+      expect(publicClient.getBalance).toHaveBeenCalledOnce();
+      expect(publicClient.estimateFeesPerGas).toHaveBeenCalledOnce();
+      expect(publicClient.estimateGas).toHaveBeenCalledTimes(estimates);
+      expect(publicClient.readContract).toHaveBeenCalledTimes(reads);
+    },
+  );
+
+  it('does not sign or broadcast when a step simulation fails', async () => {
+    const { client, publicClient, spies, touched } = recordingSimulationClient();
+    publicClient.estimateGas.mockRejectedValue(new Error('swap would revert'));
+
+    const result = await simulateExecutionPlan(client, singleStepPlan(), ACCOUNT);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.scope).toBe('single-step');
+      expect(result.value.steps[0]?.result.status).toBe('failed');
+    }
+    for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+    for (const method of touched) expect(READ_ONLY_RPC_SURFACE).toContain(method);
   });
 });

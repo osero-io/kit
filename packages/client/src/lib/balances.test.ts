@@ -71,6 +71,32 @@ describe('single-token balance helpers', () => {
     expect(readContract).not.toHaveBeenCalled();
   });
 
+  it('rejects the unknown runtime token symbol DAI as a validation error without RPC access', async () => {
+    const readContract = mockFn(async () => 0n);
+    const multicall = mockFn(async () => []);
+    const { client, publicClient } = createMockClient(1, { readContract, multicall });
+
+    const result = await getTokenBalance(client, {
+      chainId: 1,
+      account: ACCOUNT,
+      token: 'DAI' as never,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+      expect(result.error.code).toBe('VALIDATION_ERROR');
+      if (result.error instanceof ValidationError) {
+        expect(result.error.field).toBe('token');
+        expect(result.error.message).toContain('DAI');
+      }
+    }
+    expect(readContract).not.toHaveBeenCalled();
+    expect(multicall).not.toHaveBeenCalled();
+    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+    expect(publicClient.getBalance).not.toHaveBeenCalled();
+  });
+
   it('returns RPC failures with operation and contract context', async () => {
     const { client } = createMockClient(42161, {
       readContract: mockFn(async () => {

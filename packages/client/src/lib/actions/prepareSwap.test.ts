@@ -491,6 +491,33 @@ describe('deterministic validation', () => {
     expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
   });
 
+  it('names the account field when account is invalid and receiver is omitted, without RPC', async () => {
+    const { client, publicClient } = setup(8453);
+    const result = await prepareSwap(client, {
+      mode: 'exact-in',
+      chainId: 8453,
+      account: '0x1234' as Address,
+      amountIn: amount('USDC'),
+      assetOut: 'USDS',
+      referral: false,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+      expect(result.error.code).toBe('VALIDATION_ERROR');
+      if (result.error instanceof ValidationError) {
+        expect(result.error.field).toBe('account');
+        expect(result.error.message).toContain('account');
+        expect(result.error.message).not.toContain('receiver');
+      }
+    }
+    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+    expect(publicClient.readContract).not.toHaveBeenCalled();
+    expect(publicClient.multicall).not.toHaveBeenCalled();
+    expect(publicClient.estimateGas).not.toHaveBeenCalled();
+  });
+
   it('rejects unknown runtime token symbols and invalid amounts before RPC', async () => {
     const { client, publicClient } = setup(8453);
     const unknown = await prepare(client, {

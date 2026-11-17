@@ -1,6 +1,9 @@
 import {
   AccountMismatchError,
   ApiRequestError,
+  ApiResponseError,
+  ApiTransportError,
+  ApprovalLimitError,
   BroadcastError,
   CancelError,
   ChainMismatchError,
@@ -9,6 +12,7 @@ import {
   InsufficientAllowanceError,
   ProgressCallbackError,
   QuoteExpiredError,
+  QuoteRefreshLimitError,
   RpcError,
   SigningError,
   SimulationError,
@@ -20,8 +24,10 @@ import {
   ValidationError,
   type ExecutionFailureContext,
   type OseroError,
+  type OseroErrorCode,
 } from './errors.js';
 import { createExecutionPlan, createTransactionRequest } from './plan.js';
+import type { SendWithError } from './types.js';
 
 const ACCOUNT = '0x1111111111111111111111111111111111111111' as const;
 const OTHER_ACCOUNT = '0x2222222222222222222222222222222222222222' as const;
@@ -193,5 +199,159 @@ describe('public error discriminants', () => {
       'UNEXPECTED_ERROR',
     ]);
     for (const error of errors) expect(error.cause).toBe(cause);
+  });
+});
+
+// F05: `error.code` is a literal discriminant on every concrete class, so a union of SDK errors
+// narrows to one class per `case`. Everything below is checked by `tsc` (the typecheck task
+// includes test files): widening or dropping any member's literal `code` breaks the build.
+
+/** Every concrete public error class, keyed by the literal `code` it declares. */
+type PublicErrorByCode = {
+  readonly VALIDATION_ERROR: ValidationError;
+  readonly CONFIGURATION_ERROR: ConfigurationError;
+  readonly UNSUPPORTED_CHAIN: UnsupportedChainError;
+  readonly ACCOUNT_MISMATCH: AccountMismatchError;
+  readonly CHAIN_MISMATCH: ChainMismatchError;
+  readonly UNSUPPORTED_CAPABILITY: UnsupportedCapabilityError;
+  readonly INSUFFICIENT_ALLOWANCE: InsufficientAllowanceError;
+  readonly QUOTE_EXPIRED: QuoteExpiredError;
+  readonly CANCELLED: CancelError;
+  readonly SIMULATION_FAILED: SimulationError;
+  readonly SIGNING_FAILED: SigningError;
+  readonly BROADCAST_FAILED: BroadcastError;
+  readonly CONFIRMATION_FAILED: ConfirmationError;
+  readonly TRANSACTION_REVERTED: TransactionError;
+  readonly RPC_REQUEST_FAILED: RpcError;
+  readonly API_REQUEST_FAILED: ApiRequestError;
+  readonly API_TRANSPORT_FAILED: ApiTransportError;
+  readonly API_RESPONSE_INVALID: ApiResponseError;
+  readonly TIMEOUT: TimeoutError;
+  readonly PROGRESS_CALLBACK_FAILED: ProgressCallbackError;
+  readonly APPROVAL_LIMIT_EXCEEDED: ApprovalLimitError;
+  readonly QUOTE_REFRESH_LIMIT_EXCEEDED: QuoteRefreshLimitError;
+  readonly UNEXPECTED_ERROR: UnexpectedError;
+};
+
+type PublicError = PublicErrorByCode[keyof PublicErrorByCode];
+
+type SendWithErrorClass = { readonly prototype: SendWithError };
+
+/**
+ * Narrows `SendWithError` on `error.code` alone. Each branch asserts the exact class the
+ * compiler narrowed to, and `default` only compiles while the switch is exhaustive.
+ */
+function sendWithErrorClassFor(error: SendWithError): SendWithErrorClass {
+  switch (error.code) {
+    case 'VALIDATION_ERROR':
+      expectTypeOf(error).toEqualTypeOf<ValidationError>();
+      return ValidationError;
+    case 'CONFIGURATION_ERROR':
+      expectTypeOf(error).toEqualTypeOf<ConfigurationError>();
+      return ConfigurationError;
+    case 'ACCOUNT_MISMATCH':
+      expectTypeOf(error).toEqualTypeOf<AccountMismatchError>();
+      return AccountMismatchError;
+    case 'CHAIN_MISMATCH':
+      expectTypeOf(error).toEqualTypeOf<ChainMismatchError>();
+      return ChainMismatchError;
+    case 'UNSUPPORTED_CAPABILITY':
+      expectTypeOf(error).toEqualTypeOf<UnsupportedCapabilityError>();
+      return UnsupportedCapabilityError;
+    case 'QUOTE_EXPIRED':
+      expectTypeOf(error).toEqualTypeOf<QuoteExpiredError>();
+      return QuoteExpiredError;
+    case 'CANCELLED':
+      expectTypeOf(error).toEqualTypeOf<CancelError>();
+      return CancelError;
+    case 'SIMULATION_FAILED':
+      expectTypeOf(error).toEqualTypeOf<SimulationError>();
+      return SimulationError;
+    case 'SIGNING_FAILED':
+      expectTypeOf(error).toEqualTypeOf<SigningError>();
+      return SigningError;
+    case 'BROADCAST_FAILED':
+      expectTypeOf(error).toEqualTypeOf<BroadcastError>();
+      return BroadcastError;
+    case 'CONFIRMATION_FAILED':
+      expectTypeOf(error).toEqualTypeOf<ConfirmationError>();
+      return ConfirmationError;
+    case 'TRANSACTION_REVERTED':
+      expectTypeOf(error).toEqualTypeOf<TransactionError>();
+      return TransactionError;
+    case 'PROGRESS_CALLBACK_FAILED':
+      expectTypeOf(error).toEqualTypeOf<ProgressCallbackError>();
+      return ProgressCallbackError;
+    case 'RPC_REQUEST_FAILED':
+      expectTypeOf(error).toEqualTypeOf<RpcError>();
+      return RpcError;
+    case 'UNEXPECTED_ERROR':
+      expectTypeOf(error).toEqualTypeOf<UnexpectedError>();
+      return UnexpectedError;
+    default: {
+      const exhausted: never = error;
+      return exhausted;
+    }
+  }
+}
+
+describe('error code narrowing', () => {
+  it('narrows SendWithError to one concrete class per code in an exhaustive switch', () => {
+    const plan = expiringPlan();
+    const cause = new Error('provider failure');
+    const errors: readonly SendWithError[] = [
+      new ValidationError('invalid', 'amount'),
+      new ConfigurationError('missing transport', 'transport'),
+      new AccountMismatchError(ACCOUNT, OTHER_ACCOUNT),
+      new ChainMismatchError(1, 8453),
+      new UnsupportedCapabilityError('atomic-batch', 'viem'),
+      new QuoteExpiredError(plan, plan.quoteExpiresAt!),
+      new CancelError('cancelled'),
+      new SimulationError('simulation'),
+      new SigningError('signing'),
+      new BroadcastError('broadcast'),
+      new ConfirmationError('confirmation', EXECUTION),
+      new TransactionError('reverted', HASH),
+      ProgressCallbackError.from(cause, EXECUTION),
+      RpcError.from({ cause, operation: 'readContract', chainId: 8453 }),
+      UnexpectedError.from(cause),
+    ];
+
+    const classes = errors.map((error) => sendWithErrorClassFor(error));
+
+    for (const [index, error] of errors.entries()) {
+      expect(error).toBeInstanceOf(classes[index]);
+      expect(error.constructor).toBe(classes[index]);
+    }
+    expect(new Set(classes).size).toBe(errors.length);
+    expectTypeOf<SendWithError['code']>().toEqualTypeOf<
+      | 'VALIDATION_ERROR'
+      | 'CONFIGURATION_ERROR'
+      | 'ACCOUNT_MISMATCH'
+      | 'CHAIN_MISMATCH'
+      | 'UNSUPPORTED_CAPABILITY'
+      | 'QUOTE_EXPIRED'
+      | 'CANCELLED'
+      | 'SIMULATION_FAILED'
+      | 'SIGNING_FAILED'
+      | 'BROADCAST_FAILED'
+      | 'CONFIRMATION_FAILED'
+      | 'TRANSACTION_REVERTED'
+      | 'PROGRESS_CALLBACK_FAILED'
+      | 'RPC_REQUEST_FAILED'
+      | 'UNEXPECTED_ERROR'
+    >();
+  });
+
+  it('maps every public error code to exactly one concrete class at compile time', () => {
+    expectTypeOf<PublicError['code']>().toEqualTypeOf<OseroErrorCode>();
+    expectTypeOf<keyof PublicErrorByCode>().toEqualTypeOf<OseroErrorCode>();
+    expectTypeOf<{
+      readonly [Code in OseroErrorCode]: Extract<PublicError, { readonly code: Code }>;
+    }>().toEqualTypeOf<PublicErrorByCode>();
+    expectTypeOf<{
+      readonly [Code in OseroErrorCode]: PublicErrorByCode[Code]['code'];
+    }>().toEqualTypeOf<{ readonly [Code in OseroErrorCode]: Code }>();
+    expectTypeOf<SendWithError>().toExtend<PublicError>();
   });
 });
