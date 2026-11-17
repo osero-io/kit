@@ -1,5 +1,6 @@
 import {
   decodeFunctionData,
+  encodeFunctionData,
   formatUnits,
   getAddress,
   isAddress,
@@ -2355,6 +2356,19 @@ function assertApprovalCalldata(approval: OseroApiApprovalStep, path: string): v
       `${path}.transaction.calldata must match approve(spender, requiredAmount.raw)`,
     );
   }
+  // ABI decoding ignores bytes after the last argument, so the decoded values
+  // alone do not prove what the wallet would sign. Only the exact canonical
+  // encoding of approve(spender, requiredAmount.raw) is accepted.
+  const canonical = encodeFunctionData({
+    abi: erc20Abi,
+    functionName: 'approve',
+    args: [approval.spender, BigInt(approval.requiredAmount.raw)],
+  });
+  if (approval.transaction.calldata.toLowerCase() !== canonical.toLowerCase()) {
+    throw new DecodeError(
+      `${path}.transaction.calldata must be the canonical encoding of approve(spender, requiredAmount.raw) with no extra bytes`,
+    );
+  }
 }
 
 function decode<T>(
@@ -2845,12 +2859,15 @@ function decodeLifiIncludedStep(value: unknown, path: string): OseroApiLifiInclu
   };
 }
 
+/**
+ * Structural decode of the normalized Transfer State. A state this SDK release
+ * does not know is reported as `unknown`, which is non-terminal: polling
+ * continues instead of failing on vocabulary the API may add later.
+ */
 function decodeTransferState(value: unknown, path: string): OseroApiTransferState {
   const state = decodeNonEmptyString(value, path);
-  if (state !== 'pending' && state !== 'completed' && state !== 'failed' && state !== 'unknown') {
-    throw new DecodeError(`${path} must be pending, completed, failed, or unknown`);
-  }
-  return state;
+  if (state === 'pending' || state === 'completed' || state === 'failed') return state;
+  return 'unknown';
 }
 
 function decodeTransferStatusProviderDetails(
@@ -3118,14 +3135,13 @@ function decodeNonNegativeSafeInteger(value: unknown, path: string): number {
   return number;
 }
 
+/**
+ * Structural only: the hosted API is the authority on which referral codes it
+ * accepts. Execution safety does not depend on a range here, because the
+ * decoded code is bound to the request in {@link assertSwapQuoteInvariants}.
+ */
 function decodeReferralCode(value: unknown, path: string): number {
-  const code = decodeNonNegativeSafeInteger(value, path);
-  if (code < OSERO_API_REFERRAL_CODE_MIN || code > OSERO_API_REFERRAL_CODE_MAX) {
-    throw new DecodeError(
-      `${path} must be between ${OSERO_API_REFERRAL_CODE_MIN} and ${OSERO_API_REFERRAL_CODE_MAX}`,
-    );
-  }
-  return code;
+  return decodeNonNegativeSafeInteger(value, path);
 }
 
 function addressField(

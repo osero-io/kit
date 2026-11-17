@@ -1,5 +1,6 @@
 import {
   decodeFunctionData,
+  encodeFunctionData,
   getAddress,
   isAddress,
   keccak256,
@@ -298,6 +299,22 @@ function validateApprovalIntegrity(
         ValidationError.forField(
           `${field}.data`,
           'approval calldata must encode approve(spender, amount) matching authorization metadata',
+        ),
+      );
+    }
+    // ABI decoding ignores bytes after the last argument, so a decode-only check
+    // would accept calldata carrying an unverified suffix. Require the exact
+    // canonical encoding of the approval that was just decoded.
+    const canonical = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: 'approve',
+      args: [spender.value, amount.value],
+    });
+    if (transaction.data.toLowerCase() !== canonical.toLowerCase()) {
+      return err(
+        ValidationError.forField(
+          `${field}.data`,
+          'approval calldata must be the canonical encoding of approve(spender, amount) with no extra bytes',
         ),
       );
     }

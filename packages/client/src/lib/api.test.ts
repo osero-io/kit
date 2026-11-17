@@ -1,4 +1,11 @@
-import { encodeFunctionData, formatUnits, type Address, type PublicClient } from 'viem';
+import {
+  encodeFunctionData,
+  erc20Abi as fullErc20Abi,
+  formatUnits,
+  type Address,
+  type Hex,
+  type PublicClient,
+} from 'viem';
 import { base } from 'viem/chains';
 import type { Mock } from 'vitest';
 
@@ -171,15 +178,26 @@ function quoteWithApproval(
     readonly recipient?: Address;
     readonly requiredAmount?: bigint;
     readonly tokenSymbol?: string;
+    /** Amount encoded in calldata when it should differ from `requiredAmount`. */
+    readonly encodedAmount?: bigint;
+    /** Replaces the approval calldata entirely. */
+    readonly calldata?: Hex;
+    readonly value?: `${bigint}`;
+    readonly transactionChainId?: number;
   } = {},
 ): OseroApiSwapQuoteResponse {
   const requiredAmount =
     options.requiredAmount ?? BigInt(ENSO_SAME_CHAIN_QUOTE.quote.inputAmount.raw);
-  const approvalData = encodeFunctionData({
-    abi: erc20Abi,
-    functionName: 'approve',
-    args: [options.encodedSpender ?? options.spender ?? SPENDER, requiredAmount],
-  });
+  const approvalData =
+    options.calldata ??
+    encodeFunctionData({
+      abi: erc20Abi,
+      functionName: 'approve',
+      args: [
+        options.encodedSpender ?? options.spender ?? SPENDER,
+        options.encodedAmount ?? requiredAmount,
+      ],
+    });
   return {
     ...ENSO_SAME_CHAIN_QUOTE,
     pair: {
@@ -204,16 +222,34 @@ function quoteWithApproval(
             formatted: formatUnits(requiredAmount, 18),
           },
           transaction: {
-            chainId: 1,
+            chainId: options.transactionChainId ?? 1,
             sender: options.sender ?? WALLET,
             recipient: options.recipient ?? ENSO_SAME_CHAIN_QUOTE.pair.source.address,
             calldata: approvalData,
-            value: '0',
+            value: options.value ?? '0',
             gasLimit: '50000',
           },
         },
       ],
     },
+  };
+}
+
+const QUOTE_INPUT_RAW = BigInt(ENSO_SAME_CHAIN_QUOTE.quote.inputAmount.raw);
+
+function canonicalApprovalCalldata(spender: Address = SPENDER, value = QUOTE_INPUT_RAW): Hex {
+  return encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, value] });
+}
+
+/** A quote that is internally consistent for a different input amount than the caller requested. */
+function quoteForOtherInputAmount(): OseroApiSwapQuoteResponse {
+  return {
+    ...ENSO_SAME_CHAIN_QUOTE,
+    quote: {
+      ...ENSO_SAME_CHAIN_QUOTE.quote,
+      inputAmount: { raw: '2000000000000000000', formatted: '2' },
+    },
+    refreshContext: { ...ENSO_SAME_CHAIN_QUOTE.refreshContext, amount: '2000000000000000000' },
   };
 }
 
@@ -537,6 +573,75 @@ describe('OseroApiClient request boundaries', () => {
       slippage: '12.5',
       referralCode: 3001,
     });
+  });
+
+  it.each([42, 0, 65_535, 4_000, Number.MAX_SAFE_INTEGER])(
+    'decodes referral code %d the API accepted without a client-side range',
+    async (code) => {
+      const referralResult = referral(BigInt(code));
+      if (referralResult.isErr()) throw referralResult.error;
+      const fixture = sameChainQuoteForAmount('1000000');
+      const transport = fetchSequence({
+        body: {
+          ...fixture,
+          quote: {
+            ...fixture.quote,
+            slippage: { bps: '5', percent: '0.05' },
+            referralAttribution: { requestedCode: code, status: 'not-applied' },
+          },
+          refreshContext: {
+            ...fixture.refreshContext,
+            slippage: { bps: '5', percent: '0.05' },
+            referralCode: code,
+          },
+        },
+      });
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+      const result = await client.getSwapQuote(
+        quoteRequest({ fromAssetId: 'ethereum:usds', referral: referralResult.value }),
+      );
+
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) {
+        expect(result.value.quote.quote.referralAttribution.requestedCode).toBe(code);
+        expect(result.value.quote.refreshContext.referralCode).toBe(code);
+      }
+    },
+  );
+
+  it.each([
+    ['a different code than requested', 3002],
+    ['a negative code', -1],
+    ['a fractional code', 3001.5],
+    ['a string code', '3001'],
+  ])('still rejects a response referral that is %s', async (_name, code) => {
+    const referralResult = referral(3001n);
+    if (referralResult.isErr()) throw referralResult.error;
+    const fixture = sameChainQuoteForAmount('1000000');
+    const transport = fetchSequence({
+      body: {
+        ...fixture,
+        quote: {
+          ...fixture.quote,
+          slippage: { bps: '5', percent: '0.05' },
+          referralAttribution: { requestedCode: code, status: 'applied' },
+        },
+        refreshContext: {
+          ...fixture.refreshContext,
+          slippage: { bps: '5', percent: '0.05' },
+          referralCode: code,
+        },
+      },
+    });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(
+      quoteRequest({ fromAssetId: 'ethereum:usds', referral: referralResult.value }),
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
   });
 
   it('preserves authoritative API error code, correlation ID, and retry timing', async () => {
@@ -1054,6 +1159,145 @@ describe('hosted quote verification and preparation', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
+  });
+
+  it.each([
+    [
+      'approval calldata carries one trailing byte',
+      quoteWithApproval({ calldata: `${canonicalApprovalCalldata()}00` }),
+      'canonical encoding of approve',
+    ],
+    [
+      'approval calldata carries a trailing 32-byte word',
+      quoteWithApproval({ calldata: `${canonicalApprovalCalldata()}${'11'.repeat(32)}` }),
+      'canonical encoding of approve',
+    ],
+    [
+      'approval calldata is truncated',
+      quoteWithApproval({ calldata: canonicalApprovalCalldata().slice(0, -2) as Hex }),
+      'calldata must encode ERC-20 approve',
+    ],
+    [
+      'an approval step carries an ERC-20 transfer selector',
+      quoteWithApproval({
+        calldata: encodeFunctionData({
+          abi: fullErc20Abi,
+          functionName: 'transfer',
+          args: [SPENDER, QUOTE_INPUT_RAW],
+        }),
+      }),
+      'calldata must encode ERC-20 approve',
+    ],
+    [
+      'approval calldata amount differs from requiredAmount for the correct spender',
+      quoteWithApproval({ encodedAmount: QUOTE_INPUT_RAW - 1n }),
+      'calldata must match approve(spender, requiredAmount.raw)',
+    ],
+    [
+      'approval calldata approves an unlimited amount',
+      quoteWithApproval({ encodedAmount: UINT256_MAX }),
+      'calldata must match approve(spender, requiredAmount.raw)',
+    ],
+    [
+      'approval recipient is not the approval token',
+      quoteWithApproval({ recipient: OTHER_SPENDER }),
+      'transaction.recipient must match the approval token',
+    ],
+    [
+      'approval carries native value',
+      quoteWithApproval({ value: '1' }),
+      'transaction.value must be 0',
+    ],
+    [
+      'approval chain differs from the source chain',
+      quoteWithApproval({ transactionChainId: 8453 }),
+      'transaction.chainId must match the source chain',
+    ],
+    [
+      'approval sender differs from fromAddress',
+      quoteWithApproval({ sender: OTHER_WALLET }),
+      'transaction.sender must match the requested wallet',
+    ],
+    [
+      'approval token lives on another chain than the route',
+      quoteWithApproval({ tokenChainId: 8453 }),
+      '$.routeSummary chains must match $.pair',
+    ],
+    [
+      'quote input amount differs from the requested amount',
+      quoteForOtherInputAmount(),
+      'amounts must match the requested amount',
+    ],
+  ])(
+    'rejects a hostile quote before any allowance read when %s',
+    async (_name, fixture, reason) => {
+      const transport = fetchSequence({ body: fixture });
+      const rpc = publicClient(0n, 1);
+      const client = OseroApiClient.create({
+        apiKey: API_KEY,
+        fetch: transport.fetch,
+        publicClientProvider: () => rpc.client,
+      });
+
+      const result = await client.getSwapQuote(
+        quoteRequest({
+          fromAssetId: 'ethereum:usds',
+          amount: amount(QUOTE_INPUT_RAW),
+        }),
+      );
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ApiResponseError);
+        expect(result.error.message).toContain(reason);
+      }
+      expect(rpc.getBlockNumber).not.toHaveBeenCalled();
+      expect(rpc.readContract).not.toHaveBeenCalled();
+    },
+  );
+
+  it('applies the same canonical-calldata check to a refreshed quote', async () => {
+    const transport = fetchSequence({
+      body: quoteWithApproval({ calldata: `${canonicalApprovalCalldata()}00` }),
+    });
+    const rpc = publicClient(0n, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.refreshSwapQuote(ENSO_SAME_CHAIN_QUOTE.refreshContext);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ApiResponseError);
+      expect(result.error.message).toContain('canonical encoding of approve');
+    }
+    expect(rpc.readContract).not.toHaveBeenCalled();
+  });
+
+  it('accepts canonical approval calldata with upper-case argument hex', async () => {
+    // viem matches the 4-byte selector case-sensitively, so only the arguments vary in case.
+    const canonical = canonicalApprovalCalldata();
+    const upper = `${canonical.slice(0, 10)}${canonical.slice(10).toUpperCase()}` as Hex;
+    const transport = fetchSequence({ body: quoteWithApproval({ calldata: upper }) });
+    const rpc = publicClient(0n, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.getSwapQuote(
+      quoteRequest({ fromAssetId: 'ethereum:usds', amount: amount(QUOTE_INPUT_RAW) }),
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('approval-required');
+      expect(result.value.walletExecutionPlan.steps[0]?.data).toBe(upper);
+    }
   });
 
   it.each([
@@ -1795,7 +2039,8 @@ describe('Transfer Status polling', () => {
     ['bridge', { bridge: 'another-bridge' }],
     ['source transaction hash', { sourceTransactionHash: DESTINATION_HASH }],
     ['destination transaction hash', { destinationTransactionHash: '0x12' }],
-    ['normalized state', { state: 'future-state' }],
+    ['normalized state', { state: '' }],
+    ['non-string normalized state', { state: 7 }],
     ['error', { error: '' }],
     ['Provider Details provider', { providerDetails: { provider: 'enso', status: 'DONE' } }],
     ['LI.FI Provider Details', { providerDetails: { provider: 'lifi', status: 'DONE' } }],
@@ -1810,6 +2055,35 @@ describe('Transfer Status polling', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
+  });
+
+  it('reports an unrecognized normalized state as unknown and keeps polling', async () => {
+    const future = { ...ensoTransferStatusFixture('pending', 'settling'), state: 'future-state' };
+    const completed = ensoTransferStatusFixture('completed', 'delivered');
+    const single = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: fetchSequence({ body: future }).fetch,
+    });
+    const transport = fetchSequence({ body: future }, { body: completed });
+    const polling = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    const onStatus = mockFn();
+
+    const status = await single.getSwapStatusForQuote(crossChainQuoteFixture(), SOURCE_HASH);
+    const waited = await polling.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 1,
+      timeoutMs: 1_000,
+      onStatus,
+    });
+
+    expect(status.isOk()).toBe(true);
+    if (status.isOk()) expect(status.value.state).toBe('unknown');
+    expect(waited.isOk()).toBe(true);
+    if (waited.isOk()) expect(waited.value.state).toBe('completed');
+    expect(onStatus.mock.calls.map(([value]) => (value as { state: string }).state)).toEqual([
+      'unknown',
+      'completed',
+    ]);
+    expect(transport.calls).toHaveLength(2);
   });
 
   it('rejects same-chain Status Context and same-chain quotes before HTTP', async () => {

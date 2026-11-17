@@ -1,4 +1,10 @@
-import { decodeFunctionData, getAddress } from 'viem';
+import {
+  decodeFunctionData,
+  encodeFunctionData,
+  erc20Abi as fullErc20Abi,
+  getAddress,
+  type Hex,
+} from 'viem';
 
 import { erc20Abi } from './abis/erc20.js';
 import { ValidationError } from './errors.js';
@@ -131,6 +137,123 @@ describe('transaction construction', () => {
 
     expect(result.isOk()).toBe(true);
     if (result.isOk()) expect(result.value.data).toBe(calldata.value.data);
+  });
+});
+
+describe('approval calldata integrity', () => {
+  const AMOUNT = 5n;
+  const canonical = encodeFunctionData({
+    abi: erc20Abi,
+    functionName: 'approve',
+    args: [TARGET, AMOUNT],
+  });
+
+  function prepared(
+    overrides: Partial<Parameters<typeof createPreparedApprovalTransaction>[0]> = {},
+  ) {
+    return createPreparedApprovalTransaction({
+      id: 'approve',
+      chainId: 8453,
+      sender: ACCOUNT,
+      recipient: TOKEN,
+      calldata: canonical,
+      value: 0n,
+      token: TOKEN,
+      spender: TARGET,
+      requiredAmount: AMOUNT,
+      ...overrides,
+    });
+  }
+
+  it('accepts the canonical encoding with upper-case argument hex', () => {
+    // viem matches the 4-byte selector case-sensitively, so only the arguments vary in case.
+    const upper = `${canonical.slice(0, 10)}${canonical.slice(10).toUpperCase()}` as Hex;
+
+    expect(prepared().isOk()).toBe(true);
+    expect(prepared({ calldata: upper }).isOk()).toBe(true);
+  });
+
+  it.each([
+    ['one trailing byte', { calldata: `${canonical}00` as Hex }, 'transaction.data'],
+    [
+      'a trailing 32-byte word',
+      { calldata: `${canonical}${'00'.repeat(32)}` as Hex },
+      'transaction.data',
+    ],
+    [
+      'a trailing word that looks like a second amount',
+      { calldata: `${canonical}${'ff'.repeat(32)}` as Hex },
+      'transaction.data',
+    ],
+    ['truncated calldata', { calldata: canonical.slice(0, -2) as Hex }, 'transaction.data'],
+    [
+      'an ERC-20 transfer selector',
+      {
+        calldata: encodeFunctionData({
+          abi: fullErc20Abi,
+          functionName: 'transfer',
+          args: [TARGET, AMOUNT],
+        }),
+      },
+      'transaction.data',
+    ],
+    [
+      'a calldata amount that differs from the authorized amount',
+      {
+        calldata: encodeFunctionData({
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [TARGET, AMOUNT + 1n],
+        }),
+      },
+      'transaction.data',
+    ],
+    [
+      'a calldata spender that differs from the authorized spender',
+      {
+        calldata: encodeFunctionData({
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [OTHER_ACCOUNT, AMOUNT],
+        }),
+      },
+      'transaction.data',
+    ],
+    ['a recipient that is not the token', { recipient: TARGET }, 'transaction.authorization'],
+    ['native value', { value: 1n }, 'transaction.value'],
+  ])('rejects a prepared approval with %s', (_name, overrides, field) => {
+    const result = prepared(overrides);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+      expect(result.error.field).toBe(field);
+    }
+  });
+
+  it('rejects non-canonical approval calldata in custom, serialized, and resumed plans', () => {
+    const approval = prepared();
+    if (approval.isErr()) throw approval.error;
+    const padded = { ...approval.value, data: `${canonical}00` as Hex };
+
+    const custom = createExecutionPlan({ steps: [padded] });
+    const valid = createExecutionPlan({ steps: [approval.value] });
+    if (valid.isErr()) throw valid.error;
+    const serialized = serializeExecutionPlan(valid.value);
+    if (serialized.isErr()) throw serialized.error;
+    const tampered = deserializeExecutionPlan(
+      serialized.value.replace(canonical, `${canonical}00`),
+    );
+    const resumed = resumeExecutionPlan({ ...valid.value, steps: [padded] });
+    const directlySerialized = serializeExecutionPlan({ ...valid.value, steps: [padded] });
+
+    for (const result of [custom, tampered, resumed, directlySerialized]) {
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ValidationError);
+        expect(result.error.field).toMatch(/steps\[0\]\.data$/);
+      }
+    }
   });
 });
 
