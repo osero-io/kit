@@ -69,6 +69,10 @@ jobs:
         if: matrix.node == 24
         run: pnpm --filter @osero/client test:coverage
 
+      - name: Check browser bundles import no Node.js built-in
+        if: matrix.node == 24
+        run: pnpm browser:check
+
       - name: Validate clean tarball and packed consumers
         if: matrix.node == 24
         run: pnpm package:validate

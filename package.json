@@ -6,6 +6,7 @@
   "scripts": {
     "api:report:check": "node scripts/check-client-api.mjs",
     "api:report:write": "node scripts/check-client-api.mjs --write",
+    "browser:check": "node scripts/check-browser-bundle.mjs",
     "build": "turbo run build",
     "changeset": "changeset",
     "check": "turbo run format:check lint build typecheck test",
@@ -35,6 +36,7 @@
     "@privy-io/node": "^0.36.0",
     "@types/node": "26.6.5",
     "@vitest/coverage-v8": "~4.1.0",
+    "esbuild": "^0.28.1",
     "ethers": "^6.16.0",
     "oxfmt": "^0.74.0",
     "oxlint": "^1.60.0",
