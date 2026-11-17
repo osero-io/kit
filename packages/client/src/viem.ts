@@ -10,7 +10,6 @@ import {
   estimateGas as estimateGasWithViem,
   getTransactionReceipt,
   sendTransaction as sendTransactionWithViem,
-  waitForTransactionReceipt,
 } from 'viem/actions';
 
 import {
@@ -47,6 +46,7 @@ import {
   validateExecutorBinding,
   validateResumeState,
 } from './lib/validation.js';
+import { nonRepricedReplacementError, waitForViemReceipt } from './lib/viemReceipt.js';
 
 export type ConnectedWalletClient = WalletClient<Transport, Chain, Account>;
 
@@ -141,13 +141,24 @@ function sendSingleTransaction(
     .andThen((submittedHash) => {
       const confirmation = async (): Promise<SingleTransactionResult> => {
         await context.notifySubmitted(submittedHash);
-        const receipt = await waitForTransactionReceipt(walletClient, {
+        const { receipt, replacement } = await waitForViemReceipt(walletClient, {
           hash: submittedHash,
           confirmations: context.confirmations,
           ...(options.confirmationTimeoutMs === undefined
             ? {}
             : { timeout: options.confirmationTimeoutMs }),
         });
+        // A cancellation, or a different transaction reusing the nonce, is not this
+        // plan step. Continuing would broadcast later steps on top of a step that
+        // never executed, so only a same-transaction fee bump counts as confirmed.
+        if (replacement !== undefined && replacement !== 'repriced') {
+          throw nonRepricedReplacementError(
+            submittedHash,
+            replacement,
+            receipt.transactionHash,
+            context.failure('replacement', submittedHash),
+          );
+        }
         if (receipt.status === 'reverted') {
           throw new TransactionError(
             `Transaction ${receipt.transactionHash} reverted`,
@@ -159,11 +170,11 @@ function sendSingleTransaction(
         return {
           submittedHash,
           hash: effectiveHash,
-          ...(effectiveHash.toLowerCase() === submittedHash.toLowerCase()
+          ...(replacement === undefined
             ? {}
             : {
                 replacement: {
-                  reason: 'replaced',
+                  reason: replacement,
                   originalHash: submittedHash,
                   replacementHash: effectiveHash,
                 },
@@ -180,7 +191,7 @@ function sendSingleTransaction(
       };
 
       return ResultAsync.fromPromise(confirmation(), (cause) => {
-        if (cause instanceof TransactionError) return cause;
+        if (cause instanceof ConfirmationError || cause instanceof TransactionError) return cause;
         return ConfirmationError.from(cause, context.failure('confirmation', submittedHash));
       });
     });

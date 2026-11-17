@@ -4,15 +4,20 @@ import { base, mainnet } from 'viem/chains';
 import { type Mock, vi } from 'vitest';
 
 import { defineAdapterContract, mockFn, type AdapterContractFactory } from './lib/_testing.js';
-import { ConfirmationError, TransactionError } from './lib/errors.js';
+import { ConfirmationError, TransactionError, ValidationError } from './lib/errors.js';
 import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
 import { sendWith, type PrivyWallet } from './privy.js';
+
+type ReceiptWaitInput = {
+  readonly hash: Hex;
+  readonly onReplaced?: (replacement: { readonly reason: string }) => void;
+};
 
 const actions = vi.hoisted(() => ({
   getTransactionReceipt:
     vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   waitForTransactionReceipt:
-    vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
+    vi.fn<(_client: unknown, input: ReceiptWaitInput) => Promise<unknown>>(),
 }));
 
 vi.mock('viem/actions', () => actions);
@@ -306,4 +311,129 @@ describe('Privy stage behavior', () => {
     if (missing.isErr()) expect(missing.error.code).toBe('CONFIGURATION_ERROR');
     expect(configured.isOk()).toBe(true);
   });
+
+  it.each([
+    ['a null plan', null],
+    ['a plan without steps', { __typename: 'ExecutionPlan', version: 1, id: 'plan-x' }],
+    ['a plan whose steps are not an array', { ...singlePlan(), steps: null }],
+    ['a plan with a malformed later step', undefined],
+  ])(
+    'returns a validation error for %s combined with idempotency keys',
+    async (_name, candidate) => {
+      const valid = twoStepPlan();
+      const malformed =
+        candidate === undefined
+          ? { ...valid, steps: [valid.steps[0], { ...valid.steps[1], data: '0x123' }] }
+          : candidate;
+      const options = {
+        chainId: 8453,
+        receiptClient: receiptClient(8453),
+        idempotencyKeys: { swap: 'key-swap', 'swap-two': 'key-swap-two' },
+      } as const;
+      const wallet = { id: 'wallet-1', address: ACCOUNT } satisfies PrivyWallet;
+      const direct = makePrivy();
+      const curried = makePrivy();
+
+      const directResult = await sendWith(direct.privy, wallet, malformed as never, options);
+      const curriedResult = await sendWith(curried.privy, wallet, options)(malformed as never);
+
+      for (const result of [directResult, curriedResult]) {
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error).toBeInstanceOf(ValidationError);
+          expect(result.error.code).toBe('VALIDATION_ERROR');
+        }
+      }
+      expect(direct.sendTransaction).not.toHaveBeenCalled();
+      expect(curried.sendTransaction).not.toHaveBeenCalled();
+      expect(actions.waitForTransactionReceipt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects idempotency keys that are not an object without throwing', async () => {
+    const state = makePrivy();
+
+    const result = await sendWith(state.privy, { id: 'wallet-1', address: ACCOUNT }, singlePlan(), {
+      chainId: 8453,
+      receiptClient: receiptClient(8453),
+      idempotencyKeys: null as never,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+      if (result.error instanceof ValidationError) {
+        expect(result.error.field).toBe('idempotencyKeys');
+      }
+    }
+    expect(state.sendTransaction).not.toHaveBeenCalled();
+  });
+});
+
+function replaceFirstReceipt(reason: string | undefined, replacementHash: Hex): void {
+  actions.waitForTransactionReceipt.mockImplementationOnce(async (_client, input) => {
+    if (reason !== undefined) input.onReplaced?.({ reason });
+    return {
+      status: 'success',
+      transactionHash: replacementHash,
+      blockNumber: 124n,
+      gasUsed: 55n,
+      effectiveGasPrice: 3n,
+    };
+  });
+}
+
+describe('Privy transaction replacement', () => {
+  beforeEach(resetReceipts);
+
+  const options = {
+    chainId: 8453,
+    receiptClient: receiptClient(8453),
+    idempotencyKeys: { swap: 'key-swap', 'swap-two': 'key-swap-two' },
+  } as const;
+  const wallet = { id: 'wallet-1', address: ACCOUNT } satisfies PrivyWallet;
+
+  it('records a repriced replacement and continues with the next step', async () => {
+    const state = makePrivy();
+    replaceFirstReceipt('repriced', hash(99));
+
+    const result = await sendWith(state.privy, wallet, twoStepPlan(), options);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.transactions[0]).toMatchObject({
+        submittedHash: hash(1),
+        hash: hash(99),
+        replacement: { reason: 'repriced', originalHash: hash(1), replacementHash: hash(99) },
+      });
+    }
+    expect(state.sendTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['cancelled', 'replaced', undefined] as const)(
+    'fails at the replacement stage and sends nothing further when the reason is %s',
+    async (reason) => {
+      const state = makePrivy();
+      replaceFirstReceipt(reason, hash(99));
+
+      const result = await sendWith(state.privy, wallet, twoStepPlan(), options);
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ConfirmationError);
+        expect(result.error.message).toBe(
+          `Transaction ${hash(1)} was ${reason ?? 'replaced'} and cannot be treated as this plan step`,
+        );
+        if (result.error instanceof ConfirmationError) {
+          expect(result.error.execution).toMatchObject({
+            stepId: 'swap',
+            stage: 'replacement',
+            hash: hash(1),
+            completed: [],
+          });
+        }
+      }
+      expect(state.sendTransaction).toHaveBeenCalledTimes(1);
+    },
+  );
 });

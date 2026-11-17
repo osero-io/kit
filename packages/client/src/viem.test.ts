@@ -15,13 +15,18 @@ import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
 import { _configureTelemetryForTesting, type TelemetryEvent } from './lib/telemetry.js';
 import { sendWith } from './viem.js';
 
+type ReceiptWaitInput = {
+  readonly hash: Hex;
+  readonly onReplaced?: (replacement: { readonly reason: string }) => void;
+};
+
 const actions = vi.hoisted(() => ({
   estimateGas: vi.fn<(...args: unknown[]) => Promise<bigint>>(),
   getTransactionReceipt:
     vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
   sendTransaction: vi.fn<(...args: unknown[]) => Promise<Hex>>(),
   waitForTransactionReceipt:
-    vi.fn<(_client: unknown, input: { readonly hash: Hex }) => Promise<unknown>>(),
+    vi.fn<(_client: unknown, input: ReceiptWaitInput) => Promise<unknown>>(),
 }));
 
 vi.mock('viem/actions', () => actions);
@@ -223,6 +228,142 @@ describe('viem stage behavior', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error).toBeInstanceOf(TransactionError);
+  });
+});
+
+function twoStepPlan() {
+  const steps = ['first', 'second'].map((id, index) => {
+    const transaction = createTransactionRequest({
+      id,
+      chainId: 8453,
+      from: ACCOUNT,
+      to: TARGET,
+      data: index === 0 ? '0x01' : '0x02',
+      operation: 'SWAP_EXACT_IN',
+    });
+    if (transaction.isErr()) throw transaction.error;
+    return transaction.value;
+  });
+  const valuePlan = createExecutionPlan({ steps });
+  if (valuePlan.isErr()) throw valuePlan.error;
+  return valuePlan.value;
+}
+
+/** Models viem: `onReplaced` fires, then the wait resolves with the replacement's receipt. */
+function replaceFirstReceipt(
+  reason: string | undefined,
+  replacementHash: Hex,
+  status = 'success',
+): void {
+  actions.waitForTransactionReceipt.mockImplementationOnce(async (_client, input) => {
+    if (reason !== undefined) input.onReplaced?.({ reason });
+    return {
+      status,
+      transactionHash: replacementHash,
+      blockNumber: 124n,
+      gasUsed: 55n,
+      effectiveGasPrice: 3n,
+    };
+  });
+}
+
+describe('viem transaction replacement', () => {
+  beforeEach(resetActions);
+
+  it('records a repriced replacement and continues with the next step', async () => {
+    replaceFirstReceipt('repriced', hash(99));
+
+    const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan());
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.transactions[0]).toMatchObject({
+        submittedHash: hash(1),
+        hash: hash(99),
+        replacement: { reason: 'repriced', originalHash: hash(1), replacementHash: hash(99) },
+        confirmation: { status: 'success', transactionHash: hash(99) },
+      });
+      expect(result.value.transactions[1]?.replacement).toBeUndefined();
+    }
+    expect(actions.sendTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['cancelled', 'replaced'] as const)(
+    'fails at the replacement stage and broadcasts nothing further when a step is %s',
+    async (reason) => {
+      replaceFirstReceipt(reason, hash(99));
+      const onProgress = vi.fn<(event: { readonly type: string }) => void>();
+
+      const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { onProgress });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ConfirmationError);
+        expect(result.error.code).toBe('CONFIRMATION_FAILED');
+        expect(result.error.message).toBe(
+          `Transaction ${hash(1)} was ${reason} and cannot be treated as this plan step`,
+        );
+        if (result.error instanceof ConfirmationError) {
+          expect(result.error.execution).toMatchObject({
+            stepId: 'first',
+            stepIndex: 0,
+            stage: 'replacement',
+            hash: hash(1),
+            completed: [],
+          });
+          expect(result.error.cause).toEqual({
+            reason,
+            originalHash: hash(1),
+            replacementHash: hash(99),
+          });
+        }
+      }
+      expect(actions.sendTransaction).toHaveBeenCalledTimes(1);
+      expect(onProgress.mock.calls.map(([event]) => event.type)).toEqual([
+        'preflight-complete',
+        'step-started',
+        'step-submitted',
+      ]);
+    },
+  );
+
+  it('fails closed when the receipt belongs to another hash and viem named no reason', async () => {
+    replaceFirstReceipt(undefined, hash(99));
+
+    const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan());
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr() && result.error instanceof ConfirmationError) {
+      expect(result.error.execution?.stage).toBe('replacement');
+      expect(result.error.execution?.hash).toBe(hash(1));
+    }
+    expect(result.isErr() && result.error).toBeInstanceOf(ConfirmationError);
+    expect(actions.sendTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an unrecognized replacement reason as not repriced', async () => {
+    replaceFirstReceipt('future-reason', hash(99));
+
+    const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan());
+
+    expect(result.isErr() && result.error).toBeInstanceOf(ConfirmationError);
+    expect(actions.sendTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a reverted repriced replacement as a revert of the effective hash', async () => {
+    replaceFirstReceipt('repriced', hash(99), 'reverted');
+
+    const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan());
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(TransactionError);
+      if (result.error instanceof TransactionError) {
+        expect(result.error.txHash).toBe(hash(99));
+        expect(result.error.execution?.stage).toBe('revert');
+      }
+    }
+    expect(actions.sendTransaction).toHaveBeenCalledTimes(1);
   });
 });
 

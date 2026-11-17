@@ -279,4 +279,52 @@ describe('ethers stage behavior', () => {
       });
     }
   });
+
+  it.each([
+    { name: 'cancelled', reason: 'cancelled', cancelled: true },
+    { name: 'replaced by a different transaction', reason: 'replaced', cancelled: false },
+    { name: 'repriced but flagged cancelled', reason: 'repriced', cancelled: true },
+  ] as const)(
+    'fails at the replacement stage and broadcasts nothing further when a step is $name',
+    async ({ reason, cancelled }) => {
+      const state = makeHarness();
+      const replacementHash = hash(2);
+      state.wait.mockRejectedValue(
+        makeError('replaced', 'TRANSACTION_REPLACED', {
+          cancelled,
+          reason,
+          hash: hash(1),
+          replacement: { hash: replacementHash } as TransactionResponse,
+          receipt: {
+            hash: replacementHash,
+            status: 1,
+            blockNumber: 124,
+            gasUsed: 55n,
+            gasPrice: 3n,
+          } as unknown as TransactionReceipt,
+        }),
+      );
+      state.sendTransaction.mockResolvedValue({ hash: hash(1), wait: state.wait });
+
+      const result = await sendWith(state.signer, twoStepPlan());
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ConfirmationError);
+        expect(result.error.message).toBe(
+          `Transaction ${hash(1)} was ${reason} and cannot be treated as this plan step`,
+        );
+        if (result.error instanceof ConfirmationError) {
+          expect(result.error.execution).toMatchObject({
+            stepId: 'swap',
+            stepIndex: 0,
+            stage: 'replacement',
+            hash: hash(1),
+            completed: [],
+          });
+        }
+      }
+      expect(state.sendTransaction).toHaveBeenCalledTimes(1);
+    },
+  );
 });
