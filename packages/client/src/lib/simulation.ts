@@ -338,8 +338,11 @@ export function simulateExecutionPlan(
   }
 
   const simulation = async (): Promise<Result<PlanSimulation, SimulationErrorType>> => {
-    const block = await ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
-      RpcError.from({ cause, operation: 'getBlockNumber', chainId: firstChainId }),
+    // `cacheTime: 0`: viem would otherwise answer from a cached head that can predate the
+    // caller's most recent transaction, and every read below is pinned to this block.
+    const block = await ResultAsync.fromPromise(
+      publicClient.value.getBlockNumber({ cacheTime: 0 }),
+      (cause) => RpcError.from({ cause, operation: 'getBlockNumber', chainId: firstChainId }),
     );
     if (block.isErr()) return err(block.error);
 

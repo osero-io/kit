@@ -114,8 +114,9 @@ export function quoteSwap(
   if (publicClient.isErr()) return errAsync(publicClient.error);
 
   const quotation = async (): Promise<Result<SwapQuote, QuoteSwapError>> => {
+    // `cacheTime: 0`: a head served from viem's cache can predate the caller's last transaction.
     const block = await quoteRpc(
-      publicClient.value.getBlockNumber(),
+      publicClient.value.getBlockNumber({ cacheTime: 0 }),
       'getBlockNumber',
       resolved.value.chainId,
     );

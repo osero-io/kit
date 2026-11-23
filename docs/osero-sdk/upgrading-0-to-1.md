@@ -378,7 +378,7 @@ const api = OseroApiClient.create({
 
 API key precedence is request override, `apiKeyProvider`, then static `apiKey`. Empty keys or keys containing whitespace, controls, or non-ASCII characters fail locally. A printable key rejected by server policy is a 401 `ApiRequestError`.
 
-A quote may contain Approval Steps. When at least one step has a positive required amount, the SDK needs `publicClientProvider` to read the source-chain allowance and expose only the first currently required approval. Quotes without a positive-amount Approval Step do not require this provider. The returned client must match the requested chain and implement `getBlockNumber` and `readContract`.
+A quote may contain Approval Steps. When at least one step has a positive required amount, the SDK needs `publicClientProvider` to read the source-chain allowance and expose only the first currently required approval. Quotes without a positive-amount Approval Step do not require this provider. The returned client must match the requested chain and implement `getBlockNumber` and `readContract`. The SDK calls `getBlockNumber({ cacheTime: 0 })`, so the allowance is read at a current block and not at a head that viem has cached.
 
 Hosted chain support is independent from the local-action `SUPPORTED_CHAIN_IDS` registry. Do not route hosted requests through `OseroClient.getPublicClient()` unless that local client actually supports every hosted source chain your application accepts.
 

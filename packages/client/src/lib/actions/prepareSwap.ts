@@ -124,12 +124,16 @@ export function prepareSwap(
   if (publicClient.isErr()) return errAsync(publicClient.error);
 
   const preparation = async (): Promise<Result<PreparedSwapQuote, PrepareSwapError>> => {
-    const block = await ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
-      RpcError.from({
-        cause,
-        operation: 'getBlockNumber',
-        chainId: resolved.value.chainId,
-      }),
+    // `cacheTime: 0`: a head served from viem's cache can predate an approval the caller has
+    // just confirmed, and the allowance decision below is pinned to this block.
+    const block = await ResultAsync.fromPromise(
+      publicClient.value.getBlockNumber({ cacheTime: 0 }),
+      (cause) =>
+        RpcError.from({
+          cause,
+          operation: 'getBlockNumber',
+          chainId: resolved.value.chainId,
+        }),
     );
     if (block.isErr()) return err(block.error);
 
