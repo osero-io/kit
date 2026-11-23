@@ -39,7 +39,8 @@ listed here rather than hidden.
 The buffered limit is `ceil(estimate × (10000 + gasBufferBps) / 10000)`. An out-of-range
 `gasBufferBps` is a `ValidationError` before any RPC call. The viem adapter estimates the calldata
 it broadcasts: with a wallet client created with `dataSuffix`, that is the step's calldata with the
-suffix appended, as viem 2.45.0 and later send it.
+suffix appended, as viem 2.45.0 and later send it. A step whose target rejects the suffix therefore
+fails at stage `simulation` before anything is broadcast.
 
 ## Confirmations
 

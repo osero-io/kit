@@ -331,8 +331,8 @@ describe('waitForViemReceipt against the real viem waiter', () => {
           },
         );
 
-        // Pins `waitForViemReceipt`'s contract without `submitted`. Only the
-        // EIP-5792 extra-confirmation wait (2+ confirmations) omits it.
+        // Pins `waitForViemReceipt`'s `'wallet-built'` contract. Only the EIP-5792
+        // extra-confirmation wait (2+ confirmations) uses it.
         it('takes a repricing viem names without the submitted transaction to compare against', async () => {
           const { client } = publicClient(REPRICED);
 
@@ -506,8 +506,8 @@ describe('waitForViemReceipt against the real viem waiter as it behaved before 2
     },
   );
 
-  // Pins `waitForViemReceipt`'s contract without `submitted`. Only the EIP-5792
-  // extra-confirmation wait (2+ confirmations) omits it.
+  // Pins `waitForViemReceipt`'s `'wallet-built'` contract. Only the EIP-5792
+  // extra-confirmation wait (2+ confirmations) uses it.
   it('takes a repricing viem names with one confirmation without the submitted transaction', async () => {
     const { client } = publicClient(REPRICED);
 

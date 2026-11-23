@@ -11,6 +11,11 @@ on:
       - 'packages/client/src/viem*'
       - 'packages/client/src/privy*'
       - 'packages/client/src/eip5792*'
+      # The adapter tests' shared mocks, the client's viem ranges, and the lock
+      # (a dependabot viem bump).
+      - 'packages/client/src/lib/_testing.ts'
+      - 'packages/client/package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/viem-peer-range.yml'
   schedule:
     # Weekly, for viem releases published since the lockfile was last bumped.
@@ -60,8 +65,14 @@ jobs:
           VIEM_VERSION: ${{ matrix.viem }}
         run: pnpm --filter @osero/client add -D "viem@${VIEM_VERSION}"
 
-      - name: Show the viem the client resolves
-        run: node -p "require('./packages/client/node_modules/viem/package.json').version"
+      # A pinned entry must test exactly that release, not whatever resolved.
+      - name: Show and check the viem the client resolves
+        env:
+          VIEM_VERSION: ${{ matrix.viem }}
+        run: |
+          v=$(node -p "require('./packages/client/node_modules/viem/package.json').version")
+          echo "$v"
+          [ "$VIEM_VERSION" = latest ] || [ "$v" = "$VIEM_VERSION" ]
 
       - name: Test the client
         run: pnpm --filter @osero/client test
