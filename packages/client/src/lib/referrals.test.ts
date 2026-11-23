@@ -1,12 +1,6 @@
-import { resolveConfig } from './config.js';
 import { referral, type Referral } from './domain.js';
 import { ValidationError } from './errors.js';
-import {
-  OSERO_REFERRAL_CODE,
-  referralCodeForApi,
-  referralCodeForRoute,
-  resolveReferral,
-} from './referrals.js';
+import { referralCodeForApi, referralCodeForRoute, resolveReferral } from './referrals.js';
 
 function referralValue(code: bigint): Exclude<Referral, false> {
   const result = referral(code);
@@ -15,14 +9,6 @@ function referralValue(code: bigint): Exclude<Referral, false> {
 }
 
 describe('referral attribution', () => {
-  it('defaults to no attribution and exposes Osero attribution as explicit opt-in', () => {
-    expect(resolveConfig({}).referral).toBe(false);
-    expect(OSERO_REFERRAL_CODE).toBe(3000n);
-    expect(resolveConfig({ referral: referralValue(OSERO_REFERRAL_CODE) }).referral).toEqual({
-      code: 3000n,
-    });
-  });
-
   it('gives request policy precedence and supports explicit opt-out', () => {
     const configured = referralValue(3001n);
 

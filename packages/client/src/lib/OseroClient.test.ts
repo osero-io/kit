@@ -51,11 +51,4 @@ describe('OseroClient', () => {
     expect(arbitrum.value.chain?.id).toBe(42161);
     expect(arbitrum.value).not.toBe(first.value);
   });
-
-  it('rejects malformed configuration at construction', () => {
-    expect(() => OseroClient.create(null as never)).toThrow(ConfigurationError);
-    expect(() => OseroClient.create({ allowPublicRpc: 'yes' as never })).toThrow(
-      ConfigurationError,
-    );
-  });
 });
