@@ -1,7 +1,13 @@
 import type { Address, Hex } from 'viem';
 
 import type { HostedSwapProgressType } from './hostedSwap.js';
-import type { ExecutionPlan, QuoteExpiry, TransactionResult } from './types.js';
+import type {
+  ConfirmedTransaction,
+  ExecutionPlan,
+  QuoteExpiry,
+  TransactionConfirmation,
+  TransactionResult,
+} from './types.js';
 
 export type ExecutionStage =
   | 'preflight'
@@ -18,7 +24,22 @@ export type CompletedExecutionStep = {
   readonly stepId: string;
   readonly stepIndex: number;
   readonly operation: string;
+  /** Effective transaction hash of the confirmed step. */
   readonly hash: Hex;
+  /**
+   * Hash originally submitted for the step. Differs from `hash` only when the
+   * transaction was repriced. Set by the bundled adapters since 1.1.0.
+   */
+  readonly submittedHash?: Hex;
+  /** Present when the confirmed transaction replaced the submitted one. */
+  readonly replacement?: ConfirmedTransaction['replacement'];
+  /**
+   * Receipt evidence for the step. Together with `submittedHash` this is
+   * everything a `ConfirmedTransaction` needs, so a failure can be turned into
+   * resume state with `executionResumeStateFromError`. Set by the bundled
+   * adapters since 1.1.0; a custom executor may omit it.
+   */
+  readonly confirmation?: TransactionConfirmation;
 };
 
 export type ExecutionFailureContext = {
@@ -28,6 +49,11 @@ export type ExecutionFailureContext = {
   readonly operation: string;
   readonly stage: ExecutionStage;
   readonly hash?: Hex;
+  /**
+   * EIP-5792 call-batch identifier, set once a wallet has accepted a batch.
+   * Use it to query the wallet for the batch outcome after an ambiguous failure.
+   */
+  readonly batchId?: string;
   readonly completed: readonly CompletedExecutionStep[];
 };
 
@@ -191,6 +217,11 @@ export class UnsupportedCapabilityError extends OseroError<'UNSUPPORTED_CAPABILI
   constructor(
     readonly capability: string,
     readonly executor: string,
+    /**
+     * Set when the gap was discovered while a plan was executing rather than in
+     * preflight: names the step and lists the steps already confirmed.
+     */
+    readonly execution?: ExecutionFailureContext,
   ) {
     super(`${executor} does not support required capability: ${capability}`);
   }
@@ -220,6 +251,11 @@ export class QuoteExpiredError extends OseroError<'QUOTE_EXPIRED'> {
   constructor(
     readonly plan: ExecutionPlan,
     readonly quoteExpiresAt: QuoteExpiry,
+    /**
+     * Set when the quote expired while a plan was executing: names the step
+     * that was not submitted and lists the steps already confirmed.
+     */
+    readonly execution?: ExecutionFailureContext,
   ) {
     super(`Execution plan ${plan.id} expired with its hosted quote at ${quoteExpiresAt}`);
   }

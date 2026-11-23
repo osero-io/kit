@@ -28,11 +28,18 @@ pnpm add @privy-io/node
 
 Requirements:
 
-- Node.js 20 or newer
 - ESM
 - viem `>=2.28.0 <3`
 - ethers v6 for `@osero/client/ethers`
 - `@privy-io/node` v0.19 for `@osero/client/privy`
+
+Supported runtimes:
+
+- **Node.js 20 or newer** for every entrypoint.
+- **Modern browsers** that provide ES modules, `BigInt`, and a global `fetch`, for `@osero/client`, `/actions`, `/api`, `/contracts`, `/viem`, `/eip5792`, and `/ethers`. CI bundles each of these entrypoints for the browser with its dependencies and fails if any of them needs a Node.js built-in module (`pnpm browser:check`).
+- `@osero/client/privy` wraps the server-side `@privy-io/node` SDK and is supported on Node.js only.
+
+The peer ranges are tested at their floors: the packed-consumer check installs viem 2.28.0, ethers 6.14.0, and `@privy-io/node` 0.19.0 and typechecks every entrypoint against them.
 
 ## Public entrypoints
 
@@ -48,6 +55,8 @@ Requirements:
 | `@osero/client/privy`     | Privy server-wallet executor                                               |
 
 Unexported files under `src/lib` and `dist/lib` are implementation details. Package export-map enforcement prevents importing them as public subpaths.
+
+Every operation returns a neverthrow `Result` or `ResultAsync`, and the root entrypoint exports those two as types only. That is the whole contract: the methods on a returned result (`isOk()`, `isErr()`, `map`, `andThen`, `match`, and awaiting a `ResultAsync`) are stable, but neverthrow's helper functions such as `ok`, `err`, and `ResultAsync.fromPromise` are not re-exported and are not part of this package's API. Install `neverthrow` yourself if you want to construct results.
 
 ## Configure reads explicitly
 
@@ -183,17 +192,40 @@ if (prepared.isOk()) {
 }
 ```
 
-The chain capability matrix determines which pair/mode combinations are deployed. Unsupported combinations return `ValidationError`; the SDK does not guess protocol liquidity from a generic ABI.
+The chain capability matrix determines which pair/mode combinations are deployed. Unsupported combinations return `ValidationError`; the SDK does not guess protocol liquidity from a generic ABI. List what a chain supports with [`listSwapRoutes`](#supported-chains).
+
+### Optional local gas estimates
+
+By default a local plan carries no gas estimate and `prepareSwap` makes no estimation call. Pass `gasEstimates: 'independent-steps'` to attach an advisory estimate, taken at the quote block, to the steps that can be estimated on current chain state:
+
+```ts
+const prepared = await prepareSwap(client, {
+  chainId: 8453,
+  account,
+  mode: 'exact-in',
+  amountIn: amountIn.value,
+  assetOut: 'sUSDS',
+  gasEstimates: 'independent-steps',
+});
+
+if (prepared.isOk()) {
+  console.log(prepared.value.plan.steps[0]?.estimatedGas); // { gas, source: 'local-simulation', observedAtBlock }
+}
+```
+
+Only the first step is estimated. Every later step of a sequential plan depends on an earlier one: a swap that follows an approval cannot be estimated until the approval has executed. A failed estimate omits the field and never fails `prepareSwap`. Estimates are advisory metadata: they are not part of the plan ID, and no adapter uses them as a gas limit.
 
 ## Approval policy
 
-`prepareSwap` and hosted quote preparation accept:
+`prepareSwap` accepts an `approvalPolicy`:
 
 - `exact` (default): add an approval only when current allowance is insufficient; approve the required amount
 - `max`: explicit opt-in to `uint256.max` approval
 - `none`: never add an approval; insufficient allowance returns `InsufficientAllowanceError`
 
 Allowance observations, block number, required amount, policy, and selected approval amount are recorded in plan metadata. They are evidence from preparation time, not a guarantee that execution cannot race or revert.
+
+Hosted quotes take no approval policy. An Approval Step is authored by the API as an exact approval of the returned spender for the returned amount. The SDK verifies that its calldata is exactly `approve(spender, requiredAmount)` and includes it in the Wallet Execution Plan only when the current allowance is insufficient.
 
 ## Execute with viem
 
@@ -230,6 +262,8 @@ Before transaction 1, every adapter validates the complete plan, connected accou
 
 The viem and ethers executors perform a fresh gas estimate and apply a bounded buffer. Hosted/local `estimatedGas` remains advisory and never becomes an automatic hard gas limit.
 
+Gas buffers, confirmation and timeout defaults, replacement handling, and the error each stage returns differ slightly between adapters. They are specified in the [adapter behaviour contract](../../docs/osero-sdk/adapters.md). Two defaults to know: the ethers adapter waits for a receipt without a timeout unless you pass `confirmationTimeoutMs`, and a transaction that was cancelled or replaced by a different transaction fails the step in every adapter.
+
 ## Execute with ethers
 
 ```ts
@@ -241,7 +275,7 @@ const result = await sendWith(signer, prepared.value.plan, {
 });
 ```
 
-The signer must already be attached to the plan chain. The adapter does not switch networks. Repriced replacement transactions preserve both the submitted hash and effective replacement hash in `ConfirmedTransaction`.
+The signer must already be attached to the plan chain. The adapter does not switch networks. Repriced replacement transactions preserve both the submitted hash and effective replacement hash in `ConfirmedTransaction`; a cancelled or otherwise replaced transaction returns `ConfirmationError` at stage `replacement`.
 
 ## Execute with Privy
 
@@ -272,26 +306,47 @@ A confirmation failure includes:
 - submitted transaction hash when one exists
 - the ordered confirmed prefix
 
-Persist plans and resume state with canonical serializers:
+Every bundled adapter attaches the confirmed prefix, with its receipts, to the error it returns. Turn a failure into resume state, persist it, and resume later:
 
 ```ts
 import {
   deserializeExecutionPlan,
-  resumeExecutionPlan,
+  deserializeExecutionResumeState,
+  executionResumeStateFromError,
   serializeExecutionPlan,
+  serializeExecutionResumeState,
 } from '@osero/client';
 
-const serialized = serializeExecutionPlan(prepared.value.plan);
-if (serialized.isErr()) throw serialized.error;
+const result = await sendWith(walletClient, plan);
+if (result.isErr()) {
+  const resume = executionResumeStateFromError(plan, result.error);
+  if (resume.isOk()) {
+    const savedPlan = serializeExecutionPlan(plan);
+    const savedResume = serializeExecutionResumeState(resume.value);
+    // Store both strings. They are bigint-safe canonical JSON.
+  } else {
+    // Nothing is safe to resume automatically yet. For an unresolved step,
+    // resume.error.details names the stage and the hash or batch id to check.
+  }
+}
 
-const restored = deserializeExecutionPlan(serialized.value);
-if (restored.isErr()) throw restored.error;
-
-const resumed = resumeExecutionPlan(restored.value, savedResumeState);
-if (resumed.isErr()) throw resumed.error;
+// Later, possibly in another process:
+const restoredPlan = deserializeExecutionPlan(savedPlanJson);
+const restoredResume = deserializeExecutionResumeState(savedResumeJson);
+if (restoredPlan.isOk() && restoredResume.isOk()) {
+  await sendWith(walletClient, restoredPlan.value, { resume: restoredResume.value });
+}
 ```
 
-Adapters re-fetch receipts for a supplied confirmed prefix before skipping it. Resume state must match the plan ID, step order, operation, and hashes exactly.
+Resuming sends every step after the confirmed prefix, starting with the step that failed. `executionResumeStateFromError` therefore refuses to return state that could send a step twice:
+
+- **The failed step provably did not take effect**: it was never sent (preflight, a failed gas estimate, an explicit wallet rejection), or it was mined and reverted. Resume state is returned.
+- **The failed step may already have been submitted**: a receipt wait timed out, a broadcast failed ambiguously, the transaction was replaced, a resume proof could not be verified, an EIP-5792 batch status never arrived, or a Privy request was aborted. With the ethers adapter this also covers a reverted transaction, which ethers reports as a confirmation failure. A `ValidationError` is returned, and its `details` carry the `stage` and any `hash` or `batchId`. Check that transaction or batch first. If it did not execute, pass `{ unresolvedStep: 'assume-not-executed' }` to get the confirmed prefix. If it did execute, do not resume from the prefix: that would execute the step again.
+- **The error cannot be trusted as evidence**: it carries no execution context, belongs to another plan, or lists a completed step without its confirmation, as an error from a custom executor might. A `ValidationError` is returned.
+
+`deserializeExecutionResumeState` validates the shape of the state; whether it matches a plan is checked when it is used. Adapters re-fetch receipts for a supplied confirmed prefix before skipping it. Resume state must match the plan ID, step order, operation, and hashes exactly. `resumeExecutionPlan(plan, state)` performs the same match without a wallet and returns the pending steps.
+
+A quote that expires partway through a plan returns `QuoteExpiredError` whose `execution.completed` lists the steps already confirmed. `JSON.stringify(error.execution)` is safe for logging: bigint receipt fields are written as decimal strings.
 
 ## Honest simulation
 
@@ -302,6 +357,10 @@ const simulation = await simulateExecutionPlan(client, prepared.value.plan, acco
 ```
 
 Simulation reports the pinned block, native balance, relevant token balances/allowances, fee data, per-step estimate, and RPC provenance. Multi-step plans are labeled `independent-steps`: later estimates do not pretend earlier state transitions have occurred.
+
+- `feeData.basis` says what `feeData.gasPrice` is. With `'max-fee-per-gas'` it is the EIP-1559 fee cap (also exposed as `feeData.maxFeePerGas`), so each `estimatedNativeFee` is an upper bound rather than the expected cost. With `'gas-price'` it is the legacy gas price.
+- A failed step carries `result.revert` when the node returned a revert reason or raw revert data. Both fields are best effort: custom error data stays raw in `revert.data` without a decoded `reason`.
+- Pass the prepared quote to see its bounds next to the simulation: `simulateExecutionPlan(client, prepared.value.plan, account, { quote: prepared.value })` adds a `quote` field with the expected amount and the minimum output or maximum input. The quote must belong to the plan being simulated. These are the quote's values; independent step simulation does not measure the swap output.
 
 ## Hosted API
 
@@ -341,7 +400,7 @@ const quote = await api.getSwapQuote({
 });
 ```
 
-Hosted decoding accepts future asset, protocol, and Quote Provider vocabulary, but executable fields and normalized Transfer Status states are strict. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
+Hosted decoding accepts future asset, protocol, and Quote Provider vocabulary, but executable fields are strict. A normalized Transfer Status state this release does not know is decoded as `unknown`, and `waitForSwapCompletion` keeps polling on it. The client verifies sender and amount against the request, validates chain relationships, decodes ERC-20 approval calldata, and checks token/spender/amount semantics before making allowance reads or exposing a Wallet Execution Plan.
 
 Every normalized quote includes an API Execution Plan for inspection and diagnostics. Do not pass `workflow.quote.executionPlan` to a wallet adapter: its later actions become stale after any Approval Step. The discriminated Hosted Swap Workflow exposes only the currently safe Wallet Execution Plan:
 
@@ -366,6 +425,8 @@ if (workflow.value.state === 'approval-required') {
 This manual path is appropriate for frontends that need explicit prompts, persistence, pausing, or resume control. Quote Refresh is provider-locked: it returns a replacement from the selected Quote Provider rather than selecting a provider again. A Wallet Execution Plan is bound to `quote.expiresAt`; adapters reject it at or after expiry. Refresh an expired quote before submission.
 
 Use `executeSwap(request, handler)` for bounded high-level execution. It submits at most one approval-only Wallet Execution Plan at a time, performs Quote Refresh after confirmation or expiry, and then submits the fresh execution-only plan. The defaults allow three approval transactions and five total Quote Refreshes; `approvalTransactionLimit` and `quoteRefreshLimit` accept deliberate positive-integer overrides.
+
+Every allowance check reads at the chain head, which the SDK requests from your public client with `cacheTime: 0`, so a response that viem has cached cannot hide an approval that has just confirmed. Inside `executeSwap`, the check that follows a confirmed approval also never reads below that approval's receipt block. If the RPC still reports an older head, the SDK asks again for up to about one second and then reads at the receipt block. An RPC that cannot serve that block returns `RpcError`; the approval is not requested a second time.
 
 ```ts
 const execution = await api.executeSwap(request, sendWith(walletClient), {
@@ -394,6 +455,17 @@ const completion = await api.waitForSwapCompletion(
 ```
 
 The helper sends the source transaction hash with the quote's complete Status Context: Quote Provider, source chain, destination chain, bridge, and — for 0x only — the Provider Quote ID. It polls normalized `pending` and `unknown` states and stops on `completed` or `failed`. A terminal `failed` state is a successful Transfer Status observation whose payload preserves the nullable error and Provider Details. Caller cancellation, HTTP failure, malformed response, callback failure, and timeout remain distinct typed errors. Same-chain quotes have no Status Context and reject Transfer Status polling before an HTTP request.
+
+To keep waiting after a restart, persist `{ sourceTransactionHash, statusContext }` when the source transaction is submitted and pass it to `waitForTransferStatus`, which takes the same options and behaves the same way without needing the quote:
+
+```ts
+const statusRequest = {
+  sourceTransactionHash: execution.value.executionResult.txHash,
+  statusContext: finalQuote.statusContext, // non-null for a cross-chain quote
+};
+// Persist statusRequest as JSON. After a restart:
+const completion = await api.waitForTransferStatus(statusRequest, { timeoutMs: 30 * 60_000 });
+```
 
 Status Context is a provider-discriminated union. Persist it whole alongside the quote and submit it unchanged: a 0x context additionally carries `providerQuoteId` (0x's `quoteId`), which the client serializes into every status poll and refuses to poll without, because bundled transactions cannot be disambiguated otherwise. `isOseroApiZeroXStatusContext` narrows to it.
 
@@ -453,7 +525,7 @@ const usdc = await getTokenBalance(client, {
 const apy = await getSUsdsApy(client, { chainId: 8453 });
 ```
 
-`multicall: 'prefer'` falls back to isolated reads only when the aggregate call itself cannot execute. Per-contract failures retain token and operation context. `ssrToApy` uses stable log-domain compounding and returns a validation `Result` for invalid or numerically unrepresentable rates.
+`multicall: 'prefer'` falls back to isolated reads only when the aggregate call itself cannot execute. `getTokenBalances` is all-or-nothing: if any one of the three token reads fails, the whole call returns that `RpcError` and no partial balances. Per-contract failures retain token and operation context. `ssrToApy` uses stable log-domain compounding and returns a validation `Result` for invalid or numerically unrepresentable rates.
 
 ## Errors
 
@@ -491,7 +563,27 @@ if (result.isErr()) {
 | Base         |  8453 | Spark PSM3              |
 | Arbitrum One | 42161 | Spark PSM3              |
 
-Use `listChains()` and `CHAIN_CAPABILITIES`-backed discovery APIs rather than copying addresses. Raw ABIs and intentionally supported addresses are available through `@osero/client/contracts`.
+Use `listChains()`, `getChain()`, `listTokens()`, and `getToken()` rather than copying addresses. Raw ABIs and intentionally supported addresses are available through `@osero/client/contracts`.
+
+`listSwapRoutes(chainId)` lists the local routes on a chain. It is a synchronous lookup derived from the same capability matrix `quoteSwap` and `prepareSwap` use, so a listed pair and mode is one they accept:
+
+```ts
+import { listSwapRoutes } from '@osero/client';
+
+for (const route of listSwapRoutes(1)) {
+  for (const mode of route.modes) {
+    console.log(
+      route.assetIn,
+      route.assetOut,
+      mode.mode, // 'exact-in' | 'exact-out'
+      mode.slippageProtection.enforcedBy, // 'calldata' | 'allowance' | 'none'
+      mode.referral, // 'none' | 'uint16' | 'uint256'
+    );
+  }
+}
+```
+
+A mode whose `slippageProtection.enforcedBy` is `'none'` cannot enforce its quoted bound on chain, and `prepareSwap` requires `allowUnprotectedSlippage: true` for it. A mode enforced by `'allowance'` is capped by an allowance of exactly the maximum input: with `approvalPolicy: 'exact'` the plan sets the allowance to that amount even when a larger one exists, `'none'` fails unless the allowance already equals it, and `'max'` is rejected. A mode whose `referral` is `'none'` rejects a referral code. The listing describes what is deployed, not current liquidity, and returns an empty list for a chain without local routes. Hosted API pairs are listed by `OseroApiClient.getSupportedAssets()` instead.
 
 ## Telemetry
 

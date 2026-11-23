@@ -3,6 +3,7 @@ import { litePsmAbi } from '../abis/litePsm.js';
 import { psm3Abi } from '../abis/psm3.js';
 import {
   CHAIN_CAPABILITIES,
+  slippageEnforcementFor,
   type OseroChainId,
   type RouteCapability,
   type TokenSymbol,
@@ -113,8 +114,9 @@ export function quoteSwap(
   if (publicClient.isErr()) return errAsync(publicClient.error);
 
   const quotation = async (): Promise<Result<SwapQuote, QuoteSwapError>> => {
+    // `cacheTime: 0`: a head served from viem's cache can predate the caller's last transaction.
     const block = await quoteRpc(
-      publicClient.value.getBlockNumber(),
+      publicClient.value.getBlockNumber({ cacheTime: 0 }),
       'getBlockNumber',
       resolved.value.chainId,
     );
@@ -198,16 +200,12 @@ export function resolveSwapQuoteRequest(
     );
   }
 
-  const slippageEnforcedBy =
-    capability.protocol === 'psm3'
-      ? 'calldata'
-      : request.mode === 'exact-out' &&
-          assetIn === 'USDS' &&
-          (assetOut === 'USDC' || assetOut === 'sUSDS')
-        ? 'allowance'
-        : request.mode === 'exact-in' && assetIn === 'sUSDS' && assetOut === 'USDC'
-          ? 'calldata'
-          : 'none';
+  const slippageEnforcedBy = slippageEnforcementFor(
+    capability.protocol,
+    assetIn,
+    assetOut,
+    request.mode,
+  );
 
   return ok({
     chainId,

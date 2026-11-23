@@ -170,6 +170,12 @@ export type ExecutorCapabilities = {
   readonly sponsoredTransactions: boolean;
   readonly chainSwitching: 'none' | 'explicit';
   readonly simulation: 'none' | 'independent-steps' | 'full-plan';
+  /**
+   * Chains this executor can submit to. When present, a plan with a step on any
+   * other chain is rejected before broadcasting. Omit it for an executor that
+   * is not limited to a known chain set; the bundled adapters omit it.
+   */
+  readonly supportedChainIds?: readonly number[];
 };
 
 export type ConfirmationOptions = {

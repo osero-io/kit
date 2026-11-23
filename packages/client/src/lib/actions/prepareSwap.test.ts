@@ -8,8 +8,10 @@ import { parseSlippage, referral, tokenAmount, UINT256_MAX, type TokenAmount } f
 import { InsufficientAllowanceError, ValidationError } from '../errors.js';
 import { applySlippageDown, applySlippageUp, USDC_TO_USDS_SCALE } from '../math.js';
 import { OseroClient, type OseroPublicClient } from '../OseroClient.js';
+import { deserializeExecutionPlan, serializeExecutionPlan } from '../plan.js';
 import type { Result } from '../result.js';
 import type { PreparedSwapQuote } from '../types.js';
+import { computeExecutionPlanId } from '../validation.js';
 import { prepareSwap, type PrepareSwapRequest } from './prepareSwap.js';
 
 const ACCOUNT = '0x1111111111111111111111111111111111111111' as const;
@@ -284,6 +286,23 @@ describe('approval policy', () => {
     }
   });
 
+  it('decides the approval at an uncached head', async () => {
+    const { client, publicClient } = setup(8453, 0n);
+
+    const result = await prepareSwap(client, {
+      mode: 'exact-in',
+      chainId: 8453,
+      account: ACCOUNT,
+      amountIn: amount('USDC'),
+      assetOut: 'USDS',
+      referral: false,
+    });
+
+    expect(result.isOk()).toBe(true);
+    // A cached head can predate an approval the caller has just confirmed.
+    expect(publicClient.getBlockNumber.mock.calls).toEqual([[{ cacheTime: 0 }]]);
+  });
+
   it('requires explicit max policy and never defaults to unlimited approval', async () => {
     const { client } = setup(8453, 0n);
     const result = await prepareSwap(client, {
@@ -491,6 +510,33 @@ describe('deterministic validation', () => {
     expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
   });
 
+  it('names the account field when account is invalid and receiver is omitted, without RPC', async () => {
+    const { client, publicClient } = setup(8453);
+    const result = await prepareSwap(client, {
+      mode: 'exact-in',
+      chainId: 8453,
+      account: '0x1234' as Address,
+      amountIn: amount('USDC'),
+      assetOut: 'USDS',
+      referral: false,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+      expect(result.error.code).toBe('VALIDATION_ERROR');
+      if (result.error instanceof ValidationError) {
+        expect(result.error.field).toBe('account');
+        expect(result.error.message).toContain('account');
+        expect(result.error.message).not.toContain('receiver');
+      }
+    }
+    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+    expect(publicClient.readContract).not.toHaveBeenCalled();
+    expect(publicClient.multicall).not.toHaveBeenCalled();
+    expect(publicClient.estimateGas).not.toHaveBeenCalled();
+  });
+
   it('rejects unknown runtime token symbols and invalid amounts before RPC', async () => {
     const { client, publicClient } = setup(8453);
     const unknown = await prepare(client, {
@@ -562,5 +608,203 @@ describe('deterministic validation', () => {
 
     expect(result.isErr()).toBe(true);
     expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+  });
+});
+
+function withEstimator(
+  chainId: OseroChainId,
+  allowance: bigint,
+  estimateGas: MockPublicClient['estimateGas'],
+) {
+  const base = setup(chainId, allowance);
+  // The shared setup rejects estimateGas; replace it for tests that opt in.
+  (base.publicClient as { estimateGas: unknown }).estimateGas = estimateGas;
+  return base;
+}
+
+describe('opt-in local gas estimates', () => {
+  const psm3Request = {
+    chainId: 8453,
+    account: ACCOUNT,
+    mode: 'exact-in',
+    amountIn: amount('USDC'),
+    assetOut: 'sUSDS',
+    slippage: slippage(),
+    referral: false,
+  } as const;
+
+  it('makes no estimate call and attaches nothing by default', async () => {
+    const estimateGas = mockFn(async () => 55_000n);
+    const defaults = withEstimator(8453, 0n, estimateGas);
+    const explicit = withEstimator(8453, 0n, estimateGas);
+
+    const omitted = await prepare(defaults.client, psm3Request);
+    const none = await prepare(explicit.client, { ...psm3Request, gasEstimates: 'none' });
+
+    for (const result of [omitted, none]) {
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) {
+        expect(result.value.plan.steps).toHaveLength(2);
+        expect(result.value.plan.steps.some((step) => 'estimatedGas' in step)).toBe(false);
+      }
+    }
+    expect(estimateGas).not.toHaveBeenCalled();
+  });
+
+  it('estimates only the approval when a swap depends on it, at the quote block', async () => {
+    const estimateGas = mockFn(async () => 55_000n);
+    const estimated = withEstimator(8453, 0n, estimateGas);
+    const plain = setup(8453, 0n);
+
+    const result = await prepare(estimated.client, {
+      ...psm3Request,
+      gasEstimates: 'independent-steps',
+    });
+    const baseline = await prepare(plain.client, psm3Request);
+
+    expect(result.isOk()).toBe(true);
+    expect(baseline.isOk()).toBe(true);
+    if (result.isErr() || baseline.isErr()) return;
+    const [approval, swap] = result.value.plan.steps;
+    expect(approval?.operation).toBe('APPROVE_ERC20');
+    expect(approval?.estimatedGas).toEqual({
+      gas: 55_000n,
+      source: 'local-simulation',
+      observedAtBlock: BLOCK,
+    });
+    expect(swap?.operation).toBe('SWAP_EXACT_IN');
+    expect(swap !== undefined && 'estimatedGas' in swap).toBe(false);
+    expect(estimateGas).toHaveBeenCalledTimes(1);
+    expect(estimateGas).toHaveBeenCalledWith({
+      account: ACCOUNT,
+      to: approval?.to,
+      data: approval?.data,
+      value: 0n,
+      blockNumber: BLOCK,
+    });
+    // Advisory gas is not part of plan identity or of anything the wallet signs.
+    expect(result.value.plan.id).toBe(baseline.value.plan.id);
+    expect(
+      computeExecutionPlanId(
+        result.value.plan.steps,
+        result.value.plan.requirements,
+        result.value.plan.quoteExpiresAt,
+      ),
+    ).toBe(baseline.value.plan.id);
+    expect(result.value.plan.steps.map(({ estimatedGas: _gas, ...step }) => step)).toEqual(
+      baseline.value.plan.steps,
+    );
+    expect(result.value.plan.metadata).toEqual(baseline.value.plan.metadata);
+    expect(result.value.route).toEqual(baseline.value.route);
+  });
+
+  it('estimates the swap itself when no approval precedes it', async () => {
+    const estimateGas = mockFn(async () => 180_000n);
+    const { client } = withEstimator(8453, UINT256_MAX, estimateGas);
+
+    const result = await prepare(client, { ...psm3Request, gasEstimates: 'independent-steps' });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.plan.steps).toHaveLength(1);
+      expect(result.value.plan.steps[0]).toMatchObject({
+        operation: 'SWAP_EXACT_IN',
+        estimatedGas: { gas: 180_000n, source: 'local-simulation', observedAtBlock: BLOCK },
+      });
+    }
+    expect(estimateGas).toHaveBeenCalledTimes(1);
+  });
+
+  it('estimates only the first step of a mainnet multi-step plan', async () => {
+    const estimateGas = mockFn(async () => 46_000n);
+    const { client } = withEstimator(1, 0n, estimateGas);
+
+    const result = await prepare(client, {
+      chainId: 1,
+      account: ACCOUNT,
+      mode: 'exact-in',
+      amountIn: amount('USDC'),
+      assetOut: 'sUSDS',
+      slippage: slippage(),
+      referral: false,
+      allowUnprotectedSlippage: true,
+      gasEstimates: 'independent-steps',
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.plan.steps).toHaveLength(4);
+      expect(result.value.plan.steps.map((step) => 'estimatedGas' in step)).toEqual(
+        result.value.plan.steps.map((_step, index) => index === 0),
+      );
+    }
+    expect(estimateGas).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['the estimate reverts', mockFn(async () => Promise.reject(new Error('would revert')))],
+    ['the node returns zero', mockFn(async () => 0n)],
+    ['the node returns a non-bigint', mockFn(async () => 21_000 as unknown as bigint)],
+  ])('omits the estimate and still prepares when %s', async (_name, estimateGas) => {
+    const estimated = withEstimator(8453, 0n, estimateGas);
+    const plain = setup(8453, 0n);
+
+    const result = await prepare(estimated.client, {
+      ...psm3Request,
+      gasEstimates: 'independent-steps',
+    });
+    const baseline = await prepare(plain.client, psm3Request);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk() && baseline.isOk()) {
+      expect(result.value.plan).toEqual(baseline.value.plan);
+    }
+    expect(estimateGas).toHaveBeenCalledTimes(1);
+  });
+
+  it('prepares without estimates when the public client cannot estimate gas', async () => {
+    const base = setup(8453, 0n);
+    (base.publicClient as { estimateGas: unknown }).estimateGas = undefined;
+
+    const result = await prepare(base.client, {
+      ...psm3Request,
+      gasEstimates: 'independent-steps',
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.plan.steps.some((step) => 'estimatedGas' in step)).toBe(false);
+    }
+  });
+
+  it('keeps an estimated plan serializable under the same id', async () => {
+    const { client } = withEstimator(
+      8453,
+      0n,
+      mockFn(async () => 55_000n),
+    );
+    const result = await prepare(client, { ...psm3Request, gasEstimates: 'independent-steps' });
+    if (result.isErr()) throw result.error;
+
+    const serialized = serializeExecutionPlan(result.value.plan);
+    if (serialized.isErr()) throw serialized.error;
+    const restored = deserializeExecutionPlan(serialized.value);
+
+    expect(restored.isOk()).toBe(true);
+    if (restored.isOk()) expect(restored.value).toEqual(result.value.plan);
+  });
+
+  it('rejects an unknown gasEstimates value before any RPC call', async () => {
+    const { client, publicClient } = setup(8453, 0n);
+
+    const result = await prepare(client, { ...psm3Request, gasEstimates: 'all' as never });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationError);
+      if (result.error instanceof ValidationError) expect(result.error.field).toBe('gasEstimates');
+    }
+    expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+    expect(publicClient.readContract).not.toHaveBeenCalled();
   });
 });

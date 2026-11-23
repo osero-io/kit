@@ -128,6 +128,21 @@ describe('quoteSwap economics', () => {
     }
   });
 
+  it('quotes at an uncached head', async () => {
+    const { client, publicClient } = setup(8453);
+
+    const result = await quoteSwap(client, {
+      chainId: 8453,
+      mode: 'exact-in',
+      amountIn: amount('USDC'),
+      assetOut: 'USDS',
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.quotedAt.blockNumber).toBe(BLOCK);
+    expect(publicClient.getBlockNumber.mock.calls).toEqual([[{ cacheTime: 0 }]]);
+  });
+
   it('returns unprotected-route economics without requiring execution consent', async () => {
     const { client } = setup(1);
 

@@ -1,4 +1,11 @@
-import { encodeFunctionData, formatUnits, type Address, type PublicClient } from 'viem';
+import {
+  encodeFunctionData,
+  erc20Abi as fullErc20Abi,
+  formatUnits,
+  type Address,
+  type Hex,
+  type PublicClient,
+} from 'viem';
 import { base } from 'viem/chains';
 import type { Mock } from 'vitest';
 
@@ -37,16 +44,18 @@ import { parseSlippage, referral, UINT256_MAX } from './domain.js';
 import {
   ApiRequestError,
   ApiResponseError,
+  ApiTransportError,
   ApprovalLimitError,
   BroadcastError,
   ConfigurationError,
   ProgressCallbackError,
   QuoteExpiredError,
   QuoteRefreshLimitError,
+  RpcError,
   TimeoutError,
 } from './errors.js';
 import { errAsync } from './result.js';
-import type { ExecutionPlanHandler } from './types.js';
+import type { ExecutionPlanHandler, TransactionResult } from './types.js';
 
 const WALLET: Address = '0x1111111111111111111111111111111111111111';
 const OTHER_WALLET: Address = '0x9999999999999999999999999999999999999999';
@@ -171,15 +180,26 @@ function quoteWithApproval(
     readonly recipient?: Address;
     readonly requiredAmount?: bigint;
     readonly tokenSymbol?: string;
+    /** Amount encoded in calldata when it should differ from `requiredAmount`. */
+    readonly encodedAmount?: bigint;
+    /** Replaces the approval calldata entirely. */
+    readonly calldata?: Hex;
+    readonly value?: `${bigint}`;
+    readonly transactionChainId?: number;
   } = {},
 ): OseroApiSwapQuoteResponse {
   const requiredAmount =
     options.requiredAmount ?? BigInt(ENSO_SAME_CHAIN_QUOTE.quote.inputAmount.raw);
-  const approvalData = encodeFunctionData({
-    abi: erc20Abi,
-    functionName: 'approve',
-    args: [options.encodedSpender ?? options.spender ?? SPENDER, requiredAmount],
-  });
+  const approvalData =
+    options.calldata ??
+    encodeFunctionData({
+      abi: erc20Abi,
+      functionName: 'approve',
+      args: [
+        options.encodedSpender ?? options.spender ?? SPENDER,
+        options.encodedAmount ?? requiredAmount,
+      ],
+    });
   return {
     ...ENSO_SAME_CHAIN_QUOTE,
     pair: {
@@ -204,16 +224,34 @@ function quoteWithApproval(
             formatted: formatUnits(requiredAmount, 18),
           },
           transaction: {
-            chainId: 1,
+            chainId: options.transactionChainId ?? 1,
             sender: options.sender ?? WALLET,
             recipient: options.recipient ?? ENSO_SAME_CHAIN_QUOTE.pair.source.address,
             calldata: approvalData,
-            value: '0',
+            value: options.value ?? '0',
             gasLimit: '50000',
           },
         },
       ],
     },
+  };
+}
+
+const QUOTE_INPUT_RAW = BigInt(ENSO_SAME_CHAIN_QUOTE.quote.inputAmount.raw);
+
+function canonicalApprovalCalldata(spender: Address = SPENDER, value = QUOTE_INPUT_RAW): Hex {
+  return encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, value] });
+}
+
+/** A quote that is internally consistent for a different input amount than the caller requested. */
+function quoteForOtherInputAmount(): OseroApiSwapQuoteResponse {
+  return {
+    ...ENSO_SAME_CHAIN_QUOTE,
+    quote: {
+      ...ENSO_SAME_CHAIN_QUOTE.quote,
+      inputAmount: { raw: '2000000000000000000', formatted: '2' },
+    },
+    refreshContext: { ...ENSO_SAME_CHAIN_QUOTE.refreshContext, amount: '2000000000000000000' },
   };
 }
 
@@ -537,6 +575,75 @@ describe('OseroApiClient request boundaries', () => {
       slippage: '12.5',
       referralCode: 3001,
     });
+  });
+
+  it.each([42, 0, 65_535, 4_000, Number.MAX_SAFE_INTEGER])(
+    'decodes referral code %d the API accepted without a client-side range',
+    async (code) => {
+      const referralResult = referral(BigInt(code));
+      if (referralResult.isErr()) throw referralResult.error;
+      const fixture = sameChainQuoteForAmount('1000000');
+      const transport = fetchSequence({
+        body: {
+          ...fixture,
+          quote: {
+            ...fixture.quote,
+            slippage: { bps: '5', percent: '0.05' },
+            referralAttribution: { requestedCode: code, status: 'not-applied' },
+          },
+          refreshContext: {
+            ...fixture.refreshContext,
+            slippage: { bps: '5', percent: '0.05' },
+            referralCode: code,
+          },
+        },
+      });
+      const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+      const result = await client.getSwapQuote(
+        quoteRequest({ fromAssetId: 'ethereum:usds', referral: referralResult.value }),
+      );
+
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) {
+        expect(result.value.quote.quote.referralAttribution.requestedCode).toBe(code);
+        expect(result.value.quote.refreshContext.referralCode).toBe(code);
+      }
+    },
+  );
+
+  it.each([
+    ['a different code than requested', 3002],
+    ['a negative code', -1],
+    ['a fractional code', 3001.5],
+    ['a string code', '3001'],
+  ])('still rejects a response referral that is %s', async (_name, code) => {
+    const referralResult = referral(3001n);
+    if (referralResult.isErr()) throw referralResult.error;
+    const fixture = sameChainQuoteForAmount('1000000');
+    const transport = fetchSequence({
+      body: {
+        ...fixture,
+        quote: {
+          ...fixture.quote,
+          slippage: { bps: '5', percent: '0.05' },
+          referralAttribution: { requestedCode: code, status: 'applied' },
+        },
+        refreshContext: {
+          ...fixture.refreshContext,
+          slippage: { bps: '5', percent: '0.05' },
+          referralCode: code,
+        },
+      },
+    });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(
+      quoteRequest({ fromAssetId: 'ethereum:usds', referral: referralResult.value }),
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
   });
 
   it('preserves authoritative API error code, correlation ID, and retry timing', async () => {
@@ -1054,6 +1161,145 @@ describe('hosted quote verification and preparation', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
+  });
+
+  it.each([
+    [
+      'approval calldata carries one trailing byte',
+      quoteWithApproval({ calldata: `${canonicalApprovalCalldata()}00` }),
+      'canonical encoding of approve',
+    ],
+    [
+      'approval calldata carries a trailing 32-byte word',
+      quoteWithApproval({ calldata: `${canonicalApprovalCalldata()}${'11'.repeat(32)}` }),
+      'canonical encoding of approve',
+    ],
+    [
+      'approval calldata is truncated',
+      quoteWithApproval({ calldata: canonicalApprovalCalldata().slice(0, -2) as Hex }),
+      'calldata must encode ERC-20 approve',
+    ],
+    [
+      'an approval step carries an ERC-20 transfer selector',
+      quoteWithApproval({
+        calldata: encodeFunctionData({
+          abi: fullErc20Abi,
+          functionName: 'transfer',
+          args: [SPENDER, QUOTE_INPUT_RAW],
+        }),
+      }),
+      'calldata must encode ERC-20 approve',
+    ],
+    [
+      'approval calldata amount differs from requiredAmount for the correct spender',
+      quoteWithApproval({ encodedAmount: QUOTE_INPUT_RAW - 1n }),
+      'calldata must match approve(spender, requiredAmount.raw)',
+    ],
+    [
+      'approval calldata approves an unlimited amount',
+      quoteWithApproval({ encodedAmount: UINT256_MAX }),
+      'calldata must match approve(spender, requiredAmount.raw)',
+    ],
+    [
+      'approval recipient is not the approval token',
+      quoteWithApproval({ recipient: OTHER_SPENDER }),
+      'transaction.recipient must match the approval token',
+    ],
+    [
+      'approval carries native value',
+      quoteWithApproval({ value: '1' }),
+      'transaction.value must be 0',
+    ],
+    [
+      'approval chain differs from the source chain',
+      quoteWithApproval({ transactionChainId: 8453 }),
+      'transaction.chainId must match the source chain',
+    ],
+    [
+      'approval sender differs from fromAddress',
+      quoteWithApproval({ sender: OTHER_WALLET }),
+      'transaction.sender must match the requested wallet',
+    ],
+    [
+      'approval token lives on another chain than the route',
+      quoteWithApproval({ tokenChainId: 8453 }),
+      '$.routeSummary chains must match $.pair',
+    ],
+    [
+      'quote input amount differs from the requested amount',
+      quoteForOtherInputAmount(),
+      'amounts must match the requested amount',
+    ],
+  ])(
+    'rejects a hostile quote before any allowance read when %s',
+    async (_name, fixture, reason) => {
+      const transport = fetchSequence({ body: fixture });
+      const rpc = publicClient(0n, 1);
+      const client = OseroApiClient.create({
+        apiKey: API_KEY,
+        fetch: transport.fetch,
+        publicClientProvider: () => rpc.client,
+      });
+
+      const result = await client.getSwapQuote(
+        quoteRequest({
+          fromAssetId: 'ethereum:usds',
+          amount: amount(QUOTE_INPUT_RAW),
+        }),
+      );
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ApiResponseError);
+        expect(result.error.message).toContain(reason);
+      }
+      expect(rpc.getBlockNumber).not.toHaveBeenCalled();
+      expect(rpc.readContract).not.toHaveBeenCalled();
+    },
+  );
+
+  it('applies the same canonical-calldata check to a refreshed quote', async () => {
+    const transport = fetchSequence({
+      body: quoteWithApproval({ calldata: `${canonicalApprovalCalldata()}00` }),
+    });
+    const rpc = publicClient(0n, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.refreshSwapQuote(ENSO_SAME_CHAIN_QUOTE.refreshContext);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ApiResponseError);
+      expect(result.error.message).toContain('canonical encoding of approve');
+    }
+    expect(rpc.readContract).not.toHaveBeenCalled();
+  });
+
+  it('accepts canonical approval calldata with upper-case argument hex', async () => {
+    // viem matches the 4-byte selector case-sensitively, so only the arguments vary in case.
+    const canonical = canonicalApprovalCalldata();
+    const upper = `${canonical.slice(0, 10)}${canonical.slice(10).toUpperCase()}` as Hex;
+    const transport = fetchSequence({ body: quoteWithApproval({ calldata: upper }) });
+    const rpc = publicClient(0n, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.getSwapQuote(
+      quoteRequest({ fromAssetId: 'ethereum:usds', amount: amount(QUOTE_INPUT_RAW) }),
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('approval-required');
+      expect(result.value.walletExecutionPlan.steps[0]?.data).toBe(upper);
+    }
   });
 
   it.each([
@@ -1690,6 +1936,437 @@ describe('Hosted Swap Workflow execution', () => {
   });
 });
 
+/** An RPC client for mainnet built from the two calls the hosted workflow makes. */
+function rpcClient(calls: {
+  readonly getBlockNumber: (args?: { readonly cacheTime?: number }) => Promise<bigint>;
+  readonly readContract: (args: { readonly blockNumber?: bigint }) => Promise<bigint>;
+}): { readonly client: PublicClient; readonly getBlockNumber: Mock; readonly readContract: Mock } {
+  const getBlockNumber = mockFn(calls.getBlockNumber);
+  const readContract = mockFn(calls.readContract);
+  const client = { chain: { ...base, id: 1 }, getBlockNumber, readContract };
+  return { client: client as unknown as PublicClient, getBlockNumber, readContract };
+}
+
+/** The block each allowance read was pinned to, in call order. */
+function allowanceBlocks(readContract: Mock): unknown[] {
+  return readContract.mock.calls.map(([args]) => (args as { blockNumber?: bigint }).blockNumber);
+}
+
+/** Reports `blockNumber` as the receipt block of a single-step wallet result. */
+function withReceiptBlock(result: TransactionResult, blockNumber: bigint): TransactionResult {
+  const transaction = result.transactions[0]!;
+  return {
+    ...result,
+    transactions: [{ ...transaction, confirmation: { ...transaction.confirmation, blockNumber } }],
+  };
+}
+
+/** Replaces the receipt of a single-step wallet result with one that throws when read. */
+function withUnreadableReceipt(result: TransactionResult): TransactionResult {
+  const transaction = Object.defineProperty({ ...result.transactions[0]! }, 'confirmation', {
+    enumerable: true,
+    get(): never {
+      throw new Error('unreadable receipt');
+    },
+  });
+  return { ...result, transactions: [transaction] };
+}
+
+/**
+ * A wallet that confirms every plan and, when `blockNumber` is given, reports it as the receipt
+ * block. `onConfirm` runs once per confirmed plan, before the result is returned.
+ */
+function confirmingWallet(options: {
+  readonly blockNumber?: bigint;
+  readonly onConfirm?: () => void;
+}): { readonly handler: ExecutionPlanHandler; readonly operations: () => string[][] } {
+  const wallet = executionHandler();
+  const handler: ExecutionPlanHandler = (plan) =>
+    wallet.handler(plan).map((result) => {
+      options.onConfirm?.();
+      return options.blockNumber === undefined
+        ? result
+        : withReceiptBlock(result, options.blockNumber);
+    });
+  return {
+    handler,
+    operations: () => wallet.calls.map((plan) => plan.steps.map((step) => step.operation)),
+  };
+}
+
+/** Runs the fake clock until `pending` settles, however many timers it schedules. */
+async function settleOnFakeClock<Value>(pending: PromiseLike<Value>): Promise<Value> {
+  const state = { settled: false };
+  const done = Promise.resolve(pending).finally(() => {
+    state.settled = true;
+  });
+  // oxlint-disable-next-line no-await-in-loop -- Each tick depends on the previous one.
+  while (!state.settled) await vi.advanceTimersByTimeAsync(250);
+  return done;
+}
+
+describe('allowance block selection', () => {
+  const REQUIRED = 1_000_000_000_000_000_000n;
+  const FRESH_HEAD = [{ cacheTime: 0 }];
+  const swapRequest = () =>
+    quoteRequest({ fromAssetId: 'ethereum:usds', amount: amount(REQUIRED) });
+
+  afterEach(() => vi.useRealTimers());
+
+  it('requests an uncached head for the initial quote and for a refresh', async () => {
+    const approvalQuote = quoteWithApproval();
+    const transport = fetchSequence({ body: approvalQuote });
+    const rpc = publicClient(REQUIRED, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const initial = await client.getSwapQuote(swapRequest());
+    if (initial.isErr()) throw initial.error;
+    const refreshed = await client.refreshSwapQuote(initial.value.quote.refreshContext);
+
+    expect(refreshed.isOk()).toBe(true);
+    expect(rpc.getBlockNumber.mock.calls).toEqual([FRESH_HEAD, FRESH_HEAD]);
+  });
+
+  it('sends one approval when the cached head predates the approval', async () => {
+    const approvalQuote = quoteWithApproval();
+    const transport = fetchSequence({ body: approvalQuote });
+    const CACHED_HEAD = 100n;
+    let head = CACHED_HEAD;
+    let approvedAt: bigint | undefined;
+    // Models viem: the head is served from a cache unless the caller opts out with cacheTime 0.
+    const rpc = rpcClient({
+      getBlockNumber: async (args) => (args?.cacheTime === 0 ? head : CACHED_HEAD),
+      readContract: async ({ blockNumber }) =>
+        approvedAt !== undefined && blockNumber !== undefined && blockNumber >= approvedAt
+          ? REQUIRED
+          : 0n,
+    });
+    // The receipt carries no block number, so only the uncached head keeps the read fresh.
+    const wallet = confirmingWallet({
+      onConfirm: () => {
+        head += 1n;
+        approvedAt ??= head;
+      },
+    });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), wallet.handler);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.approvalResults).toHaveLength(1);
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([100n, 101n]);
+  });
+
+  it('never reads the allowance below the block of the confirmed approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    // The RPC head stays behind the approval for as long as the SDK waits.
+    const rpc = rpcClient({
+      getBlockNumber: async () => 150n,
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 200n ? REQUIRED : 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), wallet.handler));
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.approvalResults).toHaveLength(1);
+      expect(result.value.executionResult.transactions[0]?.operation).toBe('SWAP_EXACT_IN');
+    }
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 200n]);
+    expect(rpc.readContract).toHaveBeenLastCalledWith(
+      expect.objectContaining({ functionName: 'allowance', blockNumber: 200n }),
+    );
+    // One head request for the initial quote, then one plus four bounded re-polls.
+    expect(rpc.getBlockNumber.mock.calls).toEqual(Array.from({ length: 6 }, () => FRESH_HEAD));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reads at the head once a lagging RPC catches up with the approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    const heads = [150n, 150n, 199n, 203n];
+    let headIndex = 0;
+    const rpc = rpcClient({
+      getBlockNumber: async () => {
+        const head = heads[Math.min(headIndex, heads.length - 1)]!;
+        headIndex += 1;
+        return head;
+      },
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 200n ? REQUIRED : 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), wallet.handler));
+
+    expect(result.isOk()).toBe(true);
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 203n]);
+    expect(rpc.getBlockNumber).toHaveBeenCalledTimes(4);
+  });
+
+  it('reads at the fresh head without waiting when the receipt has no block number', async () => {
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    let head = 150n;
+    const rpc = rpcClient({
+      getBlockNumber: async () => head,
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 151n ? REQUIRED : 0n,
+    });
+    const wallet = confirmingWallet({
+      onConfirm: () => {
+        head = 151n;
+      },
+    });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), wallet.handler);
+
+    expect(result.isOk()).toBe(true);
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 151n]);
+    expect(rpc.getBlockNumber.mock.calls).toEqual([FRESH_HEAD, FRESH_HEAD]);
+  });
+
+  it('ignores a wallet result that reports no usable receipt block', async () => {
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    const rpc = publicClient([0n, REQUIRED], 1);
+    const wallet = executionHandler();
+    // A handler is caller code and may return less than its declared result.
+    const handler: ExecutionPlanHandler = (plan) =>
+      wallet.handler(plan).map(({ planId, txHash }) => ({ planId, txHash }) as never);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), handler);
+
+    expect(result.isOk()).toBe(true);
+    expect(wallet.calls).toHaveLength(2);
+    expect(rpc.getBlockNumber).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues on the fresh head when reading the receipt of a wallet result throws', async () => {
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    const rpc = publicClient([0n, REQUIRED], 1);
+    const wallet = executionHandler();
+    const handler: ExecutionPlanHandler = (plan) =>
+      wallet.handler(plan).map((result) => withUnreadableReceipt(result));
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), handler);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.approvalResults).toHaveLength(1);
+    expect(wallet.calls).toHaveLength(2);
+    expect(rpc.getBlockNumber.mock.calls).toEqual([FRESH_HEAD, FRESH_HEAD]);
+  });
+
+  it('raises the floor to the block of each later approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    // The allowance is only sufficient from the block of the second approval.
+    const rpc = rpcClient({
+      getBlockNumber: async () => 150n,
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 300n ? REQUIRED : 0n,
+    });
+    const receiptBlocks = [200n, 300n, 301n];
+    const wallet = executionHandler();
+    const handler: ExecutionPlanHandler = (plan) =>
+      wallet
+        .handler(plan)
+        .map((result) => withReceiptBlock(result, receiptBlocks[wallet.calls.length - 1]!));
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), handler));
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.approvalResults).toHaveLength(2);
+    expect(wallet.calls.map((plan) => plan.steps.map((step) => step.operation))).toEqual([
+      ['APPROVE_ERC20'],
+      ['APPROVE_ERC20'],
+      ['SWAP_EXACT_IN'],
+    ]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 200n, 300n]);
+  });
+
+  it('keeps the floor for a refresh caused by quote expiry', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(new Date('2030-01-01T00:01:00.000Z'));
+    const expired = quoteWithApproval();
+    const fresh = {
+      ...expired,
+      quote: {
+        ...expired.quote,
+        quotedAt: '2030-01-01T00:01:00.000Z',
+        expiresAt: '2030-01-01T00:02:00.000Z',
+      },
+    } as OseroApiSwapQuoteResponse;
+    const transport = fetchSequence({ body: expired }, { body: expired }, { body: fresh });
+    const rpc = rpcClient({
+      getBlockNumber: async () => 150n,
+      readContract: async ({ blockNumber }) =>
+        blockNumber !== undefined && blockNumber >= 200n ? REQUIRED : 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const refreshReasons: string[] = [];
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(
+      client.executeSwap(swapRequest(), wallet.handler, {
+        onProgress: (event) => {
+          if (event.type === 'quote-refresh') refreshReasons.push(event.reason);
+        },
+      }),
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(refreshReasons).toEqual(['approval-confirmed', 'quote-expired']);
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20'], ['SWAP_EXACT_IN']]);
+    // The head never passes the approval, so both refreshes read at the receipt block.
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 200n, 200n]);
+  });
+
+  it('returns the head request failure when it fails while waiting for the approval block', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    let headRequests = 0;
+    const rpc = rpcClient({
+      getBlockNumber: async () => {
+        headRequests += 1;
+        if (headRequests === 3) throw new Error('head unavailable');
+        return 150n;
+      },
+      readContract: async () => 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), wallet.handler));
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(RpcError);
+      if (result.error instanceof RpcError) expect(result.error.operation).toBe('getBlockNumber');
+    }
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20']]);
+    expect(rpc.getBlockNumber).toHaveBeenCalledTimes(3);
+    expect(rpc.readContract).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the RPC cannot serve the block of the confirmed approval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    const rpc = rpcClient({
+      getBlockNumber: async () => 150n,
+      readContract: async ({ blockNumber }) => {
+        if (blockNumber === 200n) throw new Error('header not found');
+        return 0n;
+      },
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await settleOnFakeClock(client.executeSwap(swapRequest(), wallet.handler));
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(RpcError);
+      if (result.error instanceof RpcError) {
+        expect(result.error.operation).toBe('readContract');
+        expect(result.error.functionName).toBe('allowance');
+        expect(result.error.chainId).toBe(1);
+      }
+    }
+    // The approval is not requested again and nothing is executed.
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20']]);
+    expect(allowanceBlocks(rpc.readContract)).toEqual([150n, 200n]);
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  it('cancels while waiting for a lagging RPC to reach the approval block', async () => {
+    const controller = new AbortController();
+    const transport = fetchSequence({ body: quoteWithApproval() });
+    let headRequests = 0;
+    const rpc = rpcClient({
+      getBlockNumber: async () => {
+        headRequests += 1;
+        // The second head request is the first one after the approval; the SDK then waits
+        // before asking again, and the caller aborts during that wait.
+        if (headRequests === 2) setTimeout(() => controller.abort('stop waiting'), 5);
+        return 150n;
+      },
+      readContract: async () => 0n,
+    });
+    const wallet = confirmingWallet({ blockNumber: 200n });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.executeSwap(swapRequest(), wallet.handler, {
+      signal: controller.signal,
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('CANCELLED');
+    expect(wallet.operations()).toEqual([['APPROVE_ERC20']]);
+    expect(rpc.getBlockNumber).toHaveBeenCalledTimes(2);
+    expect(rpc.readContract).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('Transfer Status polling', () => {
   it('serializes the complete Status Context and decodes normalized Transfer Status', async () => {
     const fixture = lifiTransferStatusFixture();
@@ -1795,7 +2472,8 @@ describe('Transfer Status polling', () => {
     ['bridge', { bridge: 'another-bridge' }],
     ['source transaction hash', { sourceTransactionHash: DESTINATION_HASH }],
     ['destination transaction hash', { destinationTransactionHash: '0x12' }],
-    ['normalized state', { state: 'future-state' }],
+    ['normalized state', { state: '' }],
+    ['non-string normalized state', { state: 7 }],
     ['error', { error: '' }],
     ['Provider Details provider', { providerDetails: { provider: 'enso', status: 'DONE' } }],
     ['LI.FI Provider Details', { providerDetails: { provider: 'lifi', status: 'DONE' } }],
@@ -1810,6 +2488,35 @@ describe('Transfer Status polling', () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error).toBeInstanceOf(ApiResponseError);
+  });
+
+  it('reports an unrecognized normalized state as unknown and keeps polling', async () => {
+    const future = { ...ensoTransferStatusFixture('pending', 'settling'), state: 'future-state' };
+    const completed = ensoTransferStatusFixture('completed', 'delivered');
+    const single = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: fetchSequence({ body: future }).fetch,
+    });
+    const transport = fetchSequence({ body: future }, { body: completed });
+    const polling = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    const onStatus = mockFn();
+
+    const status = await single.getSwapStatusForQuote(crossChainQuoteFixture(), SOURCE_HASH);
+    const waited = await polling.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 1,
+      timeoutMs: 1_000,
+      onStatus,
+    });
+
+    expect(status.isOk()).toBe(true);
+    if (status.isOk()) expect(status.value.state).toBe('unknown');
+    expect(waited.isOk()).toBe(true);
+    if (waited.isOk()) expect(waited.value.state).toBe('completed');
+    expect(onStatus.mock.calls.map(([value]) => (value as { state: string }).state)).toEqual([
+      'unknown',
+      'completed',
+    ]);
+    expect(transport.calls).toHaveLength(2);
   });
 
   it('rejects same-chain Status Context and same-chain quotes before HTTP', async () => {
@@ -2586,5 +3293,661 @@ describe('0x Transfer Status and recovery', () => {
 
     expect(result.isOk()).toBe(true);
     if (result.isOk()) expect(result.value.recoveryContext?.reason).toBe(reason);
+  });
+});
+
+/** A fetch that stays in flight until its request signal aborts, like a real transport. */
+function hangingFetch(): {
+  readonly fetch: OseroApiFetch;
+  readonly started: Promise<void>;
+  readonly signals: AbortSignal[];
+} {
+  const signals: AbortSignal[] = [];
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const fetch: OseroApiFetch = (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal ?? undefined;
+      if (signal !== undefined) {
+        signals.push(signal);
+        signal.addEventListener(
+          'abort',
+          () => reject(new DOMException('The operation was aborted.', 'AbortError')),
+          { once: true },
+        );
+      }
+      markStarted();
+    });
+  return { fetch, started, signals };
+}
+
+describe('hosted transport failures', () => {
+  it('maps a network failure to ApiTransportError with the request context', async () => {
+    const cause = new TypeError('fetch failed');
+    const fetch = mockFn(async (): Promise<Response> => {
+      throw cause;
+    });
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      baseUrl: 'https://contract.test/v1/',
+      fetch,
+    });
+
+    const assets = await client.getSupportedAssets();
+    const quote = await client.getSwapQuote(quoteRequest());
+
+    for (const [result, method, url] of [
+      [assets, 'GET', 'https://contract.test/v1/swap/assets'],
+      [quote, 'POST', 'https://contract.test/v1/swap/quote'],
+    ] as const) {
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ApiTransportError);
+        expect(result.error.code).toBe('API_TRANSPORT_FAILED');
+        expect(result.error.cause).toBe(cause);
+        if (result.error instanceof ApiTransportError) {
+          expect(result.error.method).toBe(method);
+          expect(result.error.url).toBe(url);
+        }
+      }
+    }
+    // A transport failure is never retried implicitly.
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps a failure while reading the response body to ApiTransportError', async () => {
+    const cause = new Error('socket closed');
+    const fetch: OseroApiFetch = async () =>
+      ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        text: () => Promise.reject(cause),
+      }) as unknown as Response;
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const result = await client.getSupportedAssets();
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ApiTransportError);
+      expect(result.error.cause).toBe(cause);
+    }
+  });
+
+  it('maps an abort while the fetch is in flight to CancelError', async () => {
+    const controller = new AbortController();
+    const transport = hangingFetch();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.getSwapQuote(quoteRequest(), { signal: controller.signal });
+    await transport.started;
+    controller.abort('user navigated away');
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error.code).toBe('CANCELLED');
+      expect(result.error).not.toBeInstanceOf(ApiTransportError);
+    }
+    expect(transport.signals).toHaveLength(1);
+    expect(transport.signals[0]?.aborted).toBe(true);
+  });
+});
+
+function quoteWithExecutionGas(gasLimit: string | null): OseroApiSwapQuoteResponse {
+  return changedQuote(
+    ['executionPlan', 'executionStep', 'transaction', 'gasLimit'],
+    gasLimit,
+  ) as OseroApiSwapQuoteResponse;
+}
+
+function quoteWithApprovalGas(gasLimit: string | null): OseroApiSwapQuoteResponse {
+  const quote = structuredClone(quoteWithApproval()) as unknown as {
+    executionPlan: { approvalSteps: { transaction: { gasLimit: string | null } }[] };
+  };
+  quote.executionPlan.approvalSteps[0]!.transaction.gasLimit = gasLimit;
+  return quote as unknown as OseroApiSwapQuoteResponse;
+}
+
+const gasQuoteRequest = () =>
+  quoteRequest({ fromAssetId: 'ethereum:usds', amount: amount(QUOTE_INPUT_RAW) });
+
+describe('advisory gas from hosted quotes', () => {
+  it.each([
+    ['null', null],
+    ['"0"', '0'],
+  ])('attaches no estimatedGas to the execution step when gasLimit is %s', async (_name, gas) => {
+    const transport = fetchSequence({ body: quoteWithExecutionGas(gas) });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.getSwapQuote(gasQuoteRequest());
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      const step = result.value.walletExecutionPlan.steps[0]!;
+      expect(step.estimatedGas).toBeUndefined();
+      expect('estimatedGas' in step).toBe(false);
+      // The API Execution Plan keeps what the API said.
+      expect(result.value.quote.executionPlan.executionStep.transaction.gasLimit).toBe(gas);
+    }
+  });
+
+  it.each([
+    ['null', null],
+    ['"0"', '0'],
+  ])('attaches no estimatedGas to the approval step when gasLimit is %s', async (_name, gas) => {
+    const transport = fetchSequence({ body: quoteWithApprovalGas(gas) });
+    const rpc = publicClient(0n, 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+
+    const result = await client.getSwapQuote(gasQuoteRequest());
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('approval-required');
+      const step = result.value.walletExecutionPlan.steps[0]!;
+      expect(step.operation).toBe('APPROVE_ERC20');
+      expect('estimatedGas' in step).toBe(false);
+    }
+  });
+
+  it('carries a positive gasLimit as advisory hosted-api metadata without changing identity', async () => {
+    const withGas = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: fetchSequence({ body: quoteWithExecutionGas('250000') }).fetch,
+    });
+    const withoutGas = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: fetchSequence({ body: quoteWithExecutionGas(null) }).fetch,
+    });
+
+    const estimated = await withGas.getSwapQuote(gasQuoteRequest());
+    const bare = await withoutGas.getSwapQuote(gasQuoteRequest());
+
+    expect(estimated.isOk()).toBe(true);
+    expect(bare.isOk()).toBe(true);
+    if (estimated.isOk() && bare.isOk()) {
+      expect(estimated.value.walletExecutionPlan.steps[0]?.estimatedGas).toEqual({
+        gas: 250_000n,
+        source: 'hosted-api',
+      });
+      // Advisory gas is metadata: it is not part of what the wallet signs or of the plan id.
+      expect(estimated.value.walletExecutionPlan.id).toBe(bare.value.walletExecutionPlan.id);
+    }
+  });
+});
+
+describe('Transfer Status polling on a fake clock', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00.000Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('polls once per interval through every transition until completion', async () => {
+    const transport = fetchSequence(
+      { body: ensoTransferStatusFixture('pending', 'submitted') },
+      { body: ensoTransferStatusFixture('pending', 'submitted') },
+      { body: ensoTransferStatusFixture('pending', 'bridging') },
+      { body: ensoTransferStatusFixture('unknown', 'future-provider-state') },
+      { body: ensoTransferStatusFixture('completed', 'delivered') },
+    );
+    const seen: string[] = [];
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 60_000,
+      onStatus: (status) => {
+        const details = status.providerDetails as { readonly status?: string };
+        seen.push(`${status.state}:${details.status}`);
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(transport.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(transport.calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(transport.calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(transport.calls).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pending;
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) expect(result.value.state).toBe('completed');
+    expect(transport.calls).toHaveLength(5);
+    // An unchanged status is not reported twice.
+    expect(seen).toEqual([
+      'pending:submitted',
+      'pending:bridging',
+      'unknown:future-provider-state',
+      'completed:delivered',
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('times out at the deadline without an extra request', async () => {
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 12_000,
+    });
+    await vi.advanceTimersByTimeAsync(11_999);
+    expect(transport.calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(TimeoutError);
+      if (result.error instanceof TimeoutError) {
+        expect(result.error.operation).toBe('waitForSwapCompletion');
+        expect(result.error.timeoutMs).toBe(12_000);
+      }
+    }
+    expect(transport.calls).toHaveLength(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stops immediately when aborted during the sleep between polls', async () => {
+    const controller = new AbortController();
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(transport.calls).toHaveLength(1);
+    controller.abort('stop during sleep');
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('CANCELLED');
+    // The pending sleep timer is cleared and no further poll is ever issued.
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  it('cancels the in-flight status request when aborted mid-fetch', async () => {
+    const controller = new AbortController();
+    const transport = hangingFetch();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await transport.started;
+    controller.abort('stop during fetch');
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('CANCELLED');
+    expect(transport.signals).toHaveLength(1);
+    expect(transport.signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('times out and aborts a status request that never answers', async () => {
+    const transport = hangingFetch();
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const pending = client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
+      pollingIntervalMs: 5_000,
+      timeoutMs: 8_000,
+    });
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(transport.signals[0]?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await pending;
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(TimeoutError);
+    expect(transport.signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+const CANONICAL_REFRESH_BODY =
+  '{"provider":"enso","walletAddress":"0x1111111111111111111111111111111111111111",' +
+  '"sourceAssetId":"ethereum:usds","destinationAssetId":"ethereum:susds",' +
+  '"amount":"1000000000000000000","slippage":{"bps":"5","percent":"0.05"},"referralCode":null}';
+
+describe('Refresh Context forward compatibility', () => {
+  it('sends a Refresh Context without extra fields byte-for-byte as before', async () => {
+    const transport = fetchSequence({ body: ENSO_SAME_CHAIN_QUOTE });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    const first = await client.getSwapQuote(gasQuoteRequest());
+    if (first.isErr()) throw first.error;
+
+    await client.refreshSwapQuote(first.value.quote.refreshContext);
+
+    expect(Object.keys(first.value.quote.refreshContext)).toEqual([
+      'provider',
+      'walletAddress',
+      'sourceAssetId',
+      'destinationAssetId',
+      'amount',
+      'slippage',
+      'referralCode',
+    ]);
+    expect(transport.calls[1]?.init?.body).toBe(CANONICAL_REFRESH_BODY);
+  });
+
+  it('normalizes field order regardless of the order the API used', async () => {
+    const context = ENSO_SAME_CHAIN_QUOTE.refreshContext;
+    const shuffled = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      refreshContext: {
+        referralCode: context.referralCode,
+        slippage: context.slippage,
+        amount: context.amount,
+        destinationAssetId: context.destinationAssetId,
+        sourceAssetId: context.sourceAssetId,
+        walletAddress: context.walletAddress,
+        provider: context.provider,
+      },
+    };
+    const transport = fetchSequence({ body: shuffled }, { body: ENSO_SAME_CHAIN_QUOTE });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    const first = await client.getSwapQuote(gasQuoteRequest());
+    if (first.isErr()) throw first.error;
+
+    await client.refreshSwapQuote(first.value.quote.refreshContext);
+
+    expect(transport.calls[1]?.init?.body).toBe(CANONICAL_REFRESH_BODY);
+  });
+
+  it('preserves unknown primitive fields and echoes them unchanged on refresh', async () => {
+    const withExtras = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      refreshContext: {
+        signature: 'sig-abc',
+        ...ENSO_SAME_CHAIN_QUOTE.refreshContext,
+        issuedAt: 1_700_000_000,
+        sticky: true,
+        nested: { ignored: true },
+        list: ['ignored'],
+        nothing: null,
+      },
+    };
+    const transport = fetchSequence({ body: withExtras });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+    const first = await client.getSwapQuote(gasQuoteRequest());
+    if (first.isErr()) throw first.error;
+
+    const refreshed = await client.refreshSwapQuote(first.value.quote.refreshContext);
+
+    expect(refreshed.isOk()).toBe(true);
+    expect(first.value.quote.refreshContext).toEqual({
+      ...ENSO_SAME_CHAIN_QUOTE.refreshContext,
+      signature: 'sig-abc',
+      issuedAt: 1_700_000_000,
+      sticky: true,
+    });
+    // Known fields first in their fixed order, then the extra primitives as the API sent them.
+    expect(transport.calls[1]?.init?.body).toBe(
+      `${CANONICAL_REFRESH_BODY.slice(0, -1)},"signature":"sig-abc","issuedAt":1700000000,"sticky":true}`,
+    );
+  });
+
+  it('echoes extra fields through the automatic executeSwap refresh', async () => {
+    const token = 'server-session-token';
+    const approval = {
+      ...quoteWithApproval(),
+      refreshContext: { ...ENSO_SAME_CHAIN_QUOTE.refreshContext, session: token },
+    };
+    const ready = {
+      ...ENSO_SAME_CHAIN_QUOTE,
+      refreshContext: { ...ENSO_SAME_CHAIN_QUOTE.refreshContext, session: token },
+    };
+    const transport = fetchSequence({ body: approval }, { body: ready });
+    const rpc = publicClient([0n, QUOTE_INPUT_RAW], 1);
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: transport.fetch,
+      publicClientProvider: () => rpc.client,
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:10.000Z'));
+    try {
+      const result = await client.executeSwap(gasQuoteRequest(), executionHandler().handler);
+
+      expect(result.isOk()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(transport.calls[1]?.url).toBe('https://api.osero.org/v1/swap/quote/refresh');
+    expect(JSON.parse(String(transport.calls[1]?.init?.body))).toMatchObject({ session: token });
+  });
+
+  it('never lets an extra field shadow a known field', async () => {
+    const hostile = JSON.stringify(ENSO_SAME_CHAIN_QUOTE).replace(
+      '"refreshContext":{',
+      '"refreshContext":{"__proto__":{"amount":"1"},"constructor":"x",',
+    );
+    const fetch: OseroApiFetch = async () => new Response(hostile);
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch });
+
+    const first = await client.getSwapQuote(gasQuoteRequest());
+
+    expect(first.isOk()).toBe(true);
+    if (first.isOk()) {
+      expect(first.value.quote.refreshContext.amount).toBe('1000000000000000000');
+      expect(JSON.parse(JSON.stringify(first.value.quote.refreshContext))).toEqual({
+        ...ENSO_SAME_CHAIN_QUOTE.refreshContext,
+        constructor: 'x',
+      });
+    }
+  });
+});
+
+describe('waiting on a persisted status request', () => {
+  it('resumes polling after a restart from the persisted request alone', async () => {
+    // Process one: execute the swap and persist only the status request.
+    const quote = zeroXCrossChainQuoteFixture();
+    const persisted = JSON.stringify({
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: quote.statusContext,
+    });
+
+    // Process two: a new client, no quote in memory.
+    const transport = fetchSequence(
+      { body: zeroXTransferStatusFixture('pending') },
+      { body: zeroXTransferStatusFixture('completed') },
+    );
+    const client = OseroApiClient.create({
+      apiKey: API_KEY,
+      baseUrl: 'https://contract.test/v1/',
+      fetch: transport.fetch,
+    });
+    const onStatus = mockFn();
+
+    const result = await client.waitForTransferStatus(JSON.parse(persisted), {
+      pollingIntervalMs: 1,
+      timeoutMs: 1_000,
+      onStatus,
+    });
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.state).toBe('completed');
+      expect(result.value.destinationTransactionHash).toBe(DESTINATION_HASH);
+    }
+    expect(onStatus).toHaveBeenCalledTimes(2);
+    expect(transport.calls).toHaveLength(2);
+    expect(transport.calls[0]?.url).toBe(
+      `https://contract.test/v1/swap/status/${SOURCE_HASH}?provider=0x&sourceChainId=8453&destinationChainId=1&bridge=across_v4&providerQuoteId=${ZEROX_QUOTE_ID}`,
+    );
+  });
+
+  it('issues exactly the requests waitForSwapCompletion issues for the same quote', async () => {
+    const quote = crossChainQuoteFixture();
+    const byQuote = fetchSequence(
+      { body: ensoTransferStatusFixture('pending') },
+      { body: ensoTransferStatusFixture('completed') },
+    );
+    const byRequest = fetchSequence(
+      { body: ensoTransferStatusFixture('pending') },
+      { body: ensoTransferStatusFixture('completed') },
+    );
+    const options = { pollingIntervalMs: 1, timeoutMs: 1_000 } as const;
+
+    const fromQuote = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: byQuote.fetch,
+    }).waitForSwapCompletion(quote, SOURCE_HASH, options);
+    const fromRequest = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: byRequest.fetch,
+    }).waitForTransferStatus(
+      { sourceTransactionHash: SOURCE_HASH, statusContext: quote.statusContext! },
+      options,
+    );
+
+    expect(fromRequest).toEqual(fromQuote);
+    expect(byRequest.calls.map((call) => call.url)).toEqual(byQuote.calls.map((call) => call.url));
+    expect(byRequest.calls.map((call) => call.init?.method)).toEqual(
+      byQuote.calls.map((call) => call.init?.method),
+    );
+  });
+
+  it('shares waitForRecovery, timeout, and cancellation semantics', async () => {
+    const statusRequest = {
+      sourceTransactionHash: SOURCE_HASH,
+      statusContext: zeroXCrossChainQuoteFixture().statusContext!,
+    };
+    const pendingRecovery = zeroXRecoveryContextFixture({
+      state: 'pending',
+      action: null,
+      deadline: null,
+    });
+    const settledRecovery = zeroXRecoveryContextFixture({
+      state: 'completed',
+      action: null,
+      deadline: null,
+      settledAmount: '997500',
+    });
+    const recovering = fetchSequence(
+      { body: zeroXTransferStatusFixture('failed', pendingRecovery) },
+      { body: zeroXTransferStatusFixture('failed', settledRecovery) },
+    );
+    const firstFailure = fetchSequence({
+      body: zeroXTransferStatusFixture('failed', pendingRecovery),
+    });
+    const neverDone = fetchSequence({ body: zeroXTransferStatusFixture('pending') });
+    const controller = new AbortController();
+    controller.abort('stop');
+
+    const waited = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: recovering.fetch,
+    }).waitForTransferStatus(statusRequest, {
+      pollingIntervalMs: 1,
+      timeoutMs: 1_000,
+      waitForRecovery: true,
+    });
+    const immediate = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: firstFailure.fetch,
+    }).waitForTransferStatus(statusRequest, { pollingIntervalMs: 1, timeoutMs: 1_000 });
+    const timedOut = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: neverDone.fetch,
+    }).waitForTransferStatus(statusRequest, { pollingIntervalMs: 1, timeoutMs: 5 });
+    const cancelled = await OseroApiClient.create({
+      apiKey: API_KEY,
+      fetch: neverDone.fetch,
+    }).waitForTransferStatus(statusRequest, { signal: controller.signal });
+
+    expect(waited.isOk() && waited.value.recoveryContext?.state).toBe('completed');
+    expect(recovering.calls).toHaveLength(2);
+    expect(immediate.isOk() && immediate.value.recoveryContext?.state).toBe('pending');
+    expect(firstFailure.calls).toHaveLength(1);
+    expect(timedOut.isErr()).toBe(true);
+    if (timedOut.isErr()) {
+      expect(timedOut.error).toBeInstanceOf(TimeoutError);
+      if (timedOut.error instanceof TimeoutError) {
+        expect(timedOut.error.operation).toBe('waitForTransferStatus');
+        expect(timedOut.error.timeoutMs).toBe(5);
+      }
+    }
+    expect(cancelled.isErr() && cancelled.error.code).toBe('CANCELLED');
+  });
+
+  it.each([
+    ['a null request', null],
+    ['a malformed source hash', { sourceTransactionHash: '0x12', statusContext: {} }],
+    [
+      'a same-chain Status Context',
+      {
+        sourceTransactionHash: SOURCE_HASH,
+        statusContext: { provider: 'enso', sourceChainId: 1, destinationChainId: 1, bridge: 'x' },
+      },
+    ],
+    [
+      'a 0x Status Context without its Provider Quote ID',
+      {
+        sourceTransactionHash: SOURCE_HASH,
+        statusContext: {
+          provider: '0x',
+          sourceChainId: 8453,
+          destinationChainId: 1,
+          bridge: 'across_v4',
+        },
+      },
+    ],
+  ])('rejects %s before any request', async (_name, statusRequest) => {
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('completed') });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.waitForTransferStatus(statusRequest as never);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(transport.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['null options', null],
+    ['a zero polling interval', { pollingIntervalMs: 0 }],
+    ['an infinite timeout', { timeoutMs: Number.POSITIVE_INFINITY }],
+    ['a non-function status callback', { onStatus: 'log' }],
+    ['a non-boolean waitForRecovery', { waitForRecovery: 'yes' }],
+  ])('rejects %s before any request', async (_name, options) => {
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('completed') });
+    const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
+
+    const result = await client.waitForTransferStatus(
+      {
+        sourceTransactionHash: SOURCE_HASH,
+        statusContext: crossChainQuoteFixture().statusContext!,
+      },
+      options as never,
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe('VALIDATION_ERROR');
+    expect(transport.calls).toHaveLength(0);
   });
 });

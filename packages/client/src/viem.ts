@@ -10,12 +10,12 @@ import {
   estimateGas as estimateGasWithViem,
   getTransactionReceipt,
   sendTransaction as sendTransactionWithViem,
-  waitForTransactionReceipt,
 } from 'viem/actions';
 
 import {
   preflightExecutorCapabilities,
   runExecutionPlan,
+  toCompletedExecutionStep,
   type SingleTransactionContext,
   type SingleTransactionResult,
   type SingleTxExecutor,
@@ -47,6 +47,7 @@ import {
   validateExecutorBinding,
   validateResumeState,
 } from './lib/validation.js';
+import { nonRepricedReplacementError, waitForViemReceipt } from './lib/viemReceipt.js';
 
 export type ConnectedWalletClient = WalletClient<Transport, Chain, Account>;
 
@@ -124,7 +125,7 @@ function sendSingleTransaction(
       return (numerator + 9_999n) / 10_000n;
     })
     .andThen((gas) => {
-      const expiry = checkExecutionPlanExpiry(plan);
+      const expiry = checkExecutionPlanExpiry(plan, context.failure('preflight'));
       if (expiry.isErr()) return errAsync(expiry.error);
       return ResultAsync.fromPromise(
         sendTransactionWithViem(walletClient, {
@@ -141,13 +142,30 @@ function sendSingleTransaction(
     .andThen((submittedHash) => {
       const confirmation = async (): Promise<SingleTransactionResult> => {
         await context.notifySubmitted(submittedHash);
-        const receipt = await waitForTransactionReceipt(walletClient, {
+        const { receipt, replacement } = await waitForViemReceipt(walletClient, {
           hash: submittedHash,
           confirmations: context.confirmations,
+          submitted: {
+            from: walletClient.account.address,
+            to: request.to,
+            data: request.data,
+            value: request.value,
+          },
           ...(options.confirmationTimeoutMs === undefined
             ? {}
             : { timeout: options.confirmationTimeoutMs }),
         });
+        // A cancellation, or a different transaction reusing the nonce, is not this
+        // plan step. Continuing would broadcast later steps on top of a step that
+        // never executed, so only a same-transaction fee bump counts as confirmed.
+        if (replacement !== undefined && replacement !== 'repriced') {
+          throw nonRepricedReplacementError(
+            submittedHash,
+            replacement,
+            receipt.transactionHash,
+            context.failure('replacement', submittedHash),
+          );
+        }
         if (receipt.status === 'reverted') {
           throw new TransactionError(
             `Transaction ${receipt.transactionHash} reverted`,
@@ -159,11 +177,11 @@ function sendSingleTransaction(
         return {
           submittedHash,
           hash: effectiveHash,
-          ...(effectiveHash.toLowerCase() === submittedHash.toLowerCase()
+          ...(replacement === undefined
             ? {}
             : {
                 replacement: {
-                  reason: 'replaced',
+                  reason: replacement,
                   originalHash: submittedHash,
                   replacementHash: effectiveHash,
                 },
@@ -180,7 +198,7 @@ function sendSingleTransaction(
       };
 
       return ResultAsync.fromPromise(confirmation(), (cause) => {
-        if (cause instanceof TransactionError) return cause;
+        if (cause instanceof ConfirmationError || cause instanceof TransactionError) return cause;
         return ConfirmationError.from(cause, context.failure('confirmation', submittedHash));
       });
     });
@@ -226,13 +244,7 @@ function verifyResumeReceipts(
           operation: step.operation,
           stage,
           ...(hash === undefined ? {} : { hash }),
-          completed: resume.value.slice(0, transaction.stepIndex).map((completed) => ({
-            planId: completed.planId,
-            stepId: completed.stepId,
-            stepIndex: completed.stepIndex,
-            operation: completed.operation,
-            hash: completed.hash,
-          })),
+          completed: resume.value.slice(0, transaction.stepIndex).map(toCompletedExecutionStep),
         }),
       };
       const receipt = await ResultAsync.fromPromise(

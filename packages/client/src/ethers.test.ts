@@ -2,9 +2,18 @@ import { makeError, type Signer, type TransactionReceipt, type TransactionRespon
 import { type Mock, vi } from 'vitest';
 
 import { sendWith } from './ethers.js';
-import { defineAdapterContract, mockFn, type AdapterContractFactory } from './lib/_testing.js';
+import {
+  defineAdapterContract,
+  mockFn,
+  type AdapterContractFactory,
+  type AdapterFault,
+} from './lib/_testing.js';
 import { ConfirmationError, TransactionError } from './lib/errors.js';
-import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
+import {
+  createExecutionPlan,
+  createTransactionRequest,
+  executionResumeStateFromError,
+} from './lib/plan.js';
 
 const ACCOUNT = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as const;
 const TARGET = '0x2222222222222222222222222222222222222222' as const;
@@ -56,25 +65,89 @@ function makeHarness(account: `0x${string}` = ACCOUNT, chainId = 8453): EthersHa
   };
 }
 
+/** The error ethers v6 `TransactionResponse.wait()` throws for a reverted receipt. */
+function revertedByEthers(receipt: { readonly hash: string; readonly status: number }) {
+  return makeError('transaction execution reverted', 'CALL_EXCEPTION', {
+    action: 'sendTransaction',
+    data: null,
+    reason: null,
+    invocation: null,
+    revert: null,
+    transaction: { to: TARGET, from: ACCOUNT, data: '' },
+    receipt: receipt as unknown as TransactionReceipt,
+  });
+}
+
 const factory: AdapterContractFactory = (configuration = {}) => {
   const state = makeHarness(configuration.account ?? ACCOUNT, configuration.chainId ?? 8453);
+  let faults: { readonly fault: AdapterFault; readonly step: number }[] = [];
+  const faultFor = (stage: AdapterFault['stage'], step: number) =>
+    faults.find((entry) => entry.fault.stage === stage && entry.step === step)?.fault;
+  let estimated = 0;
+  state.estimateGas.mockImplementation(async () => {
+    estimated += 1;
+    if (faultFor('estimate', estimated) !== undefined) throw new Error('estimate failed');
+    return 100n;
+  });
   let sent = 0;
   state.sendTransaction.mockImplementation(async () => {
     sent += 1;
-    const transactionHash = hash(sent);
-    const wait = mockFn(async (_confirmations?: number, _timeout?: number) => ({
+    const step = sent;
+    const sendFault = faultFor('send', step);
+    if (sendFault?.stage === 'send') {
+      throw sendFault.kind === 'cancel'
+        ? makeError('user rejected', 'ACTION_REJECTED', {
+            action: 'sendTransaction',
+            reason: 'rejected',
+          })
+        : makeError('network unreachable', 'NETWORK_ERROR', { event: 'broadcast' });
+    }
+    const transactionHash = hash(step);
+    const receipt = {
       hash: transactionHash,
       status: 1,
       blockNumber: 123,
       gasUsed: 50n,
       gasPrice: 2n,
-    }));
+    };
+    const wait = mockFn(async (_confirmations?: number, _timeout?: number) => {
+      const receiptFault = faultFor('receipt', step);
+      if (receiptFault?.stage !== 'receipt') return receipt;
+      if (receiptFault.kind === 'timeout') throw new Error('receipt timeout');
+      if (receiptFault.kind === 'revert') {
+        // What ethers v6 really does: wait() throws CALL_EXCEPTION for a status-0 receipt.
+        throw revertedByEthers({ ...receipt, status: 0 });
+      }
+      const replacementHash = hash(9_000 + step);
+      throw makeError('replaced', 'TRANSACTION_REPLACED', {
+        cancelled: receiptFault.kind === 'cancelled',
+        reason: receiptFault.kind,
+        hash: transactionHash,
+        replacement: { hash: replacementHash } as TransactionResponse,
+        receipt: { ...receipt, hash: replacementHash } as unknown as TransactionReceipt,
+      });
+    });
     return { hash: transactionHash, wait };
   });
   return {
     broadcast: state.sendTransaction,
-    execute(valuePlan, form, confirmations) {
-      const options = confirmations === undefined ? {} : { confirmations };
+    resumeReceiptLookup: state.getTransactionReceipt,
+    performs: { estimate: true },
+    revertSurfacesAt: 'confirmation',
+    // An ethers revert is reported at the confirmation stage, so the provable
+    // failure for resume tests is an explicit wallet rejection instead.
+    provableFailure: { stage: 'send', kind: 'cancel' },
+    fail(fault, step = 1) {
+      faults = [...faults, { fault, step }];
+      if (fault.stage === 'resume-receipt') {
+        state.getTransactionReceipt.mockImplementation(async (transactionHash: string) => {
+          if (fault.kind === 'unavailable') return null;
+          return { hash: transactionHash, status: 0 };
+        });
+      }
+    },
+    execute(valuePlan, form, confirmations, extra) {
+      const options = { ...(confirmations === undefined ? {} : { confirmations }), ...extra };
       return form === 'direct'
         ? sendWith(state.signer, valuePlan, options)
         : sendWith(state.signer, options)(valuePlan);
@@ -278,5 +351,80 @@ describe('ethers stage behavior', () => {
         },
       });
     }
+  });
+
+  it.each([
+    { name: 'cancelled', reason: 'cancelled', cancelled: true },
+    { name: 'replaced by a different transaction', reason: 'replaced', cancelled: false },
+    { name: 'repriced but flagged cancelled', reason: 'repriced', cancelled: true },
+  ] as const)(
+    'fails at the replacement stage and broadcasts nothing further when a step is $name',
+    async ({ reason, cancelled }) => {
+      const state = makeHarness();
+      const replacementHash = hash(2);
+      state.wait.mockRejectedValue(
+        makeError('replaced', 'TRANSACTION_REPLACED', {
+          cancelled,
+          reason,
+          hash: hash(1),
+          replacement: { hash: replacementHash } as TransactionResponse,
+          receipt: {
+            hash: replacementHash,
+            status: 1,
+            blockNumber: 124,
+            gasUsed: 55n,
+            gasPrice: 3n,
+          } as unknown as TransactionReceipt,
+        }),
+      );
+      state.sendTransaction.mockResolvedValue({ hash: hash(1), wait: state.wait });
+
+      const result = await sendWith(state.signer, twoStepPlan());
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ConfirmationError);
+        expect(result.error.message).toBe(
+          `Transaction ${hash(1)} was ${reason} and cannot be treated as this plan step`,
+        );
+        if (result.error instanceof ConfirmationError) {
+          expect(result.error.execution).toMatchObject({
+            stepId: 'swap',
+            stepIndex: 0,
+            stage: 'replacement',
+            hash: hash(1),
+            completed: [],
+          });
+        }
+      }
+      expect(state.sendTransaction).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('reports a real ethers revert as a confirmation failure that keeps the hash', async () => {
+    // ethers v6 wait() throws CALL_EXCEPTION for a status-0 receipt, so the
+    // status check after wait() is reached only for a repriced replacement.
+    // This is the mapping on main; it is documented rather than changed.
+    const state = makeHarness();
+    state.wait.mockRejectedValue(revertedByEthers({ hash: hash(1), status: 0 }));
+    state.sendTransaction.mockResolvedValue({ hash: hash(1), wait: state.wait });
+    const valuePlan = twoStepPlan();
+
+    const result = await sendWith(state.signer, valuePlan);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ConfirmationError);
+      if (result.error instanceof ConfirmationError) {
+        expect(result.error.execution).toMatchObject({
+          stage: 'confirmation',
+          stepId: 'swap',
+          hash: hash(1),
+        });
+        // Resuming would send the step again, so it needs the caller's acknowledgement.
+        expect(executionResumeStateFromError(valuePlan, result.error).isErr()).toBe(true);
+      }
+    }
+    expect(state.sendTransaction).toHaveBeenCalledTimes(1);
   });
 });

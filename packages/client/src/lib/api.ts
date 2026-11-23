@@ -1,5 +1,6 @@
 import {
   decodeFunctionData,
+  encodeFunctionData,
   formatUnits,
   getAddress,
   isAddress,
@@ -50,6 +51,7 @@ import {
   type TelemetryTrace,
 } from './telemetry.js';
 import type {
+  ConfirmedTransaction,
   ExecutionPlan,
   ExecutionPlanHandler,
   SendWithError,
@@ -60,6 +62,13 @@ import { validateQuoteExpiry } from './validation.js';
 export const DEFAULT_OSERO_API_BASE_URL = 'https://api.osero.org/v1/';
 export const DEFAULT_APPROVAL_TRANSACTION_LIMIT = 3;
 export const DEFAULT_QUOTE_REFRESH_LIMIT = 5;
+
+/**
+ * How long an allowance check waits for an RPC whose head is still behind an approval that has
+ * already confirmed: at most this many extra head requests, this far apart.
+ */
+const APPROVAL_BLOCK_REPOLL_LIMIT = 4;
+const APPROVAL_BLOCK_REPOLL_DELAY_MS = 250;
 
 export {
   ApiRequestError,
@@ -441,6 +450,14 @@ export type OseroApiRouteSummary = {
   readonly bridge: OseroApiBridgeProtocol | null;
 };
 
+/**
+ * The fields a quote issues for refreshing itself. Send it back unchanged.
+ *
+ * Primitive fields this SDK release does not know survive decoding and are
+ * returned verbatim on the next refresh, so a field the API adds later (for
+ * example a server-issued token) round-trips without an SDK upgrade. They are
+ * present at runtime after the known fields; read one with a cast if needed.
+ */
 export type OseroApiRefreshContext = {
   readonly provider: OseroApiQuoteProvider;
   readonly walletAddress: Address;
@@ -996,6 +1013,7 @@ export class OseroApiClient {
     refreshContext: OseroApiRefreshContext,
     options: OseroApiRequestOptions | undefined,
     trace: TelemetryTrace | undefined,
+    approvalBlockFloors?: ReadonlyMap<number, bigint>,
   ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
     return this.requestJson({
       method: 'POST',
@@ -1013,7 +1031,9 @@ export class OseroApiClient {
           referralCode: refreshContext.referralCode,
           provider: refreshContext.provider,
         }),
-    }).andThen((response) => this.prepareHostedWorkflow(response, options?.signal));
+    }).andThen((response) =>
+      this.prepareHostedWorkflow(response, options?.signal, approvalBlockFloors),
+    );
   }
 
   executeSwap(
@@ -1031,6 +1051,9 @@ export class OseroApiClient {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       };
       const approvalResults: TransactionResult[] = [];
+      // Per chain, the highest block an approval of this run confirmed in, for the approvals
+      // whose handler reported a receipt block. A later allowance check never reads below it.
+      const approvalBlockFloors = new Map<number, bigint>();
       const emit = async (
         progress: OseroApiHostedSwapProgress,
         executionResult?: TransactionResult,
@@ -1102,6 +1125,7 @@ export class OseroApiClient {
           current.quote.refreshContext,
           requestOptions,
           trace,
+          approvalBlockFloors,
         );
         if (refreshed.isErr()) return err(refreshed.error);
         const refreshReceived = await emit({
@@ -1141,6 +1165,11 @@ export class OseroApiClient {
           }
           if (approvalResult.isErr()) return err(approvalResult.error);
           approvalResults.push(approvalResult.value);
+          recordApprovalBlockFloors(
+            approvalBlockFloors,
+            workflow.walletExecutionPlan,
+            approvalResult.value,
+          );
           const confirmed = await emit({
             type: 'approval-confirmed',
             quote: workflow.quote,
@@ -1267,10 +1296,43 @@ export class OseroApiClient {
         ValidationError.forField('quote', 'waitForSwapCompletion requires a cross-chain quote'),
       );
     }
-    const statusRequest = quote.statusContext;
     if (!isTransactionHash(txHash)) {
       return errAsync(ValidationError.forField('txHash', 'txHash must be a 32-byte hex string'));
     }
+    return this.pollTransferStatus(
+      { sourceTransactionHash: txHash, statusContext: quote.statusContext },
+      options,
+      'waitForSwapCompletion',
+    );
+  }
+
+  /**
+   * Polls a cross-chain transfer until it completes or fails, from a status
+   * request alone. Persist `{ sourceTransactionHash, statusContext }` when the
+   * source transaction is submitted and a process restarted later can resume
+   * waiting without the original quote.
+   *
+   * Options and semantics are those of {@link OseroApiClient.waitForSwapCompletion}:
+   * the same signal, timeout, polling interval, `onStatus`, and `waitForRecovery`.
+   */
+  waitForTransferStatus(
+    request: OseroApiTransferStatusRequest,
+    options: WaitForSwapCompletionOptions = {},
+  ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
+    if (typeof options !== 'object' || options === null) {
+      return errAsync(ValidationError.forField('options', 'options must be an object'));
+    }
+    // Reject a malformed request before polling starts, as a single status read would.
+    const encoded = encodeSwapStatusRequest(request);
+    if (encoded.isErr()) return errAsync(encoded.error);
+    return this.pollTransferStatus(request, options, 'waitForTransferStatus');
+  }
+
+  private pollTransferStatus(
+    request: OseroApiTransferStatusRequest,
+    options: WaitForSwapCompletionOptions,
+    operation: 'waitForSwapCompletion' | 'waitForTransferStatus',
+  ): ResultAsync<OseroApiTransferStatus, OseroApiClientError> {
     const pollingIntervalMs = options.pollingIntervalMs ?? 5_000;
     const timeoutMs = options.timeoutMs ?? 30 * 60 * 1_000;
     if (!Number.isSafeInteger(pollingIntervalMs) || pollingIntervalMs <= 0) {
@@ -1307,15 +1369,12 @@ export class OseroApiClient {
         }
         const elapsed = Date.now() - startedAt;
         const remaining = timeoutMs - elapsed;
-        if (remaining <= 0) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+        if (remaining <= 0) return err(new TimeoutError(operation, timeoutMs));
 
         const status = await awaitPollingOperation(
           (signal) =>
             this.getSwapStatusWithTrace(
-              {
-                sourceTransactionHash: txHash,
-                statusContext: statusRequest,
-              },
+              request,
               {
                 ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
                 signal,
@@ -1325,6 +1384,7 @@ export class OseroApiClient {
           remaining,
           timeoutMs,
           options.signal,
+          operation,
         );
         if (status.isErr()) return err(status.error);
 
@@ -1334,7 +1394,7 @@ export class OseroApiClient {
           if (options.onStatus !== undefined) {
             const callbackRemaining = timeoutMs - (Date.now() - startedAt);
             if (callbackRemaining <= 0) {
-              return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+              return err(new TimeoutError(operation, timeoutMs));
             }
             const callback = await awaitPollingOperation(
               () =>
@@ -1346,6 +1406,7 @@ export class OseroApiClient {
               callbackRemaining,
               timeoutMs,
               options.signal,
+              operation,
             );
             if (callback.isErr()) return err(callback.error);
           }
@@ -1365,7 +1426,7 @@ export class OseroApiClient {
 
         const remainingBeforeSleep = timeoutMs - (Date.now() - startedAt);
         if (remainingBeforeSleep <= 0) {
-          return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+          return err(new TimeoutError(operation, timeoutMs));
         }
         const delay = Math.min(pollingIntervalMs, remainingBeforeSleep);
         const slept = await sleep(delay, options.signal);
@@ -1374,7 +1435,7 @@ export class OseroApiClient {
       // oxlint-enable no-await-in-loop
     };
     return observeResult(new ResultAsync(wait()), {
-      operation: 'api.waitForSwapCompletion',
+      operation: `api.${operation}`,
       trace,
     });
   }
@@ -1382,6 +1443,7 @@ export class OseroApiClient {
   private prepareHostedWorkflow(
     response: OseroApiSwapQuoteResponse,
     signal?: AbortSignal,
+    approvalBlockFloors?: ReadonlyMap<number, bigint>,
   ): ResultAsync<OseroApiHostedSwapWorkflow, OseroApiClientError> {
     const preparation = async (): Promise<
       Result<OseroApiHostedSwapWorkflow, OseroApiClientError>
@@ -1435,10 +1497,10 @@ export class OseroApiClient {
                 ),
               );
             }
-            const block = await awaitResultWithCancellation(
-              ResultAsync.fromPromise(publicClient.value.getBlockNumber(), (cause) =>
-                RpcError.from({ cause, operation: 'getBlockNumber', chainId }),
-              ),
+            const block = await readAllowanceBlockNumber(
+              publicClient.value,
+              chainId,
+              approvalBlockFloors?.get(chainId),
               signal,
             );
             if (signal?.aborted) return err(CancelError.from(signal.reason));
@@ -1719,6 +1781,69 @@ function isAbortFailure(cause: unknown, signal: AbortSignal | undefined): boolea
   );
 }
 
+/**
+ * Records the block each confirmed approval landed in, keyed by the chain of its plan step. The
+ * receipt block is optional on a result, and a handler is caller code, so anything that is not a
+ * block number for a known step is skipped: the allowance check then relies on the fresh head.
+ */
+function recordApprovalBlockFloors(
+  floors: Map<number, bigint>,
+  plan: ExecutionPlan,
+  result: TransactionResult,
+): void {
+  try {
+    const transactions: unknown = result?.transactions;
+    if (!Array.isArray(transactions)) return;
+    for (const transaction of transactions as readonly Partial<ConfirmedTransaction>[]) {
+      const blockNumber = transaction?.confirmation?.blockNumber;
+      if (typeof blockNumber !== 'bigint' || blockNumber < 0n) continue;
+      const chainId = plan.steps.find((step) => step.id === transaction.stepId)?.chainId;
+      if (chainId === undefined) continue;
+      const floor = floors.get(chainId);
+      if (floor === undefined || blockNumber > floor) floors.set(chainId, blockNumber);
+    }
+  } catch {
+    // A result whose properties throw when read carries no usable receipt block either. The
+    // result itself is returned to the caller untouched, as it was before floors existed.
+  }
+}
+
+/**
+ * Selects the block an allowance is read at.
+ *
+ * The head is requested with `cacheTime: 0`. viem otherwise answers `getBlockNumber` from a cache
+ * for the client's `cacheTime` (its polling interval by default), and a cached head can predate
+ * an approval that has just confirmed, which reads as a missing allowance.
+ *
+ * `floor` is the block of an approval confirmed earlier in the same `executeSwap`. The read is
+ * never below it: an RPC whose head is still behind gets a short, bounded time to catch up, and
+ * after that the read is pinned to the floor, so a node that cannot serve that block fails the
+ * read instead of reporting a stale allowance.
+ */
+async function readAllowanceBlockNumber(
+  publicClient: OseroApiPublicClient,
+  chainId: number,
+  floor: bigint | undefined,
+  signal: AbortSignal | undefined,
+): Promise<Result<bigint, RpcError | CancelError>> {
+  // oxlint-disable no-await-in-loop -- Each head request waits for the previous one.
+  for (let repoll = 0; ; repoll += 1) {
+    const latest = await awaitResultWithCancellation(
+      ResultAsync.fromPromise(publicClient.getBlockNumber({ cacheTime: 0 }), (cause) =>
+        RpcError.from({ cause, operation: 'getBlockNumber', chainId }),
+      ),
+      signal,
+    );
+    if (signal?.aborted) return err(CancelError.from(signal.reason));
+    if (latest.isErr()) return err(latest.error);
+    if (floor === undefined || latest.value >= floor) return ok(latest.value);
+    if (repoll >= APPROVAL_BLOCK_REPOLL_LIMIT) return ok(floor);
+    const slept = await sleep(APPROVAL_BLOCK_REPOLL_DELAY_MS, signal);
+    if (slept.isErr()) return err(slept.error);
+  }
+  // oxlint-enable no-await-in-loop
+}
+
 function awaitResultWithCancellation<Value, ErrorType>(
   result: PromiseLike<Result<Value, ErrorType>>,
   signal: AbortSignal | undefined,
@@ -1745,15 +1870,16 @@ async function awaitPollingOperation<Value, ErrorType>(
   remainingMs: number,
   timeoutMs: number,
   signal: AbortSignal | undefined,
+  label: string,
 ): Promise<Result<Value, ErrorType | CancelError | TimeoutError>> {
   if (signal?.aborted) return err(CancelError.from(signal.reason));
-  if (remainingMs <= 0) return err(new TimeoutError('waitForSwapCompletion', timeoutMs));
+  if (remainingMs <= 0) return err(new TimeoutError(label, timeoutMs));
 
   const controller = new AbortController();
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
-    controller.abort(new TimeoutError('waitForSwapCompletion', timeoutMs));
+    controller.abort(new TimeoutError(label, timeoutMs));
   }, remainingMs);
   const abort = () => controller.abort(signal?.reason);
   signal?.addEventListener('abort', abort, { once: true });
@@ -1761,7 +1887,7 @@ async function awaitPollingOperation<Value, ErrorType>(
   clearTimeout(timeout);
   signal?.removeEventListener('abort', abort);
 
-  return timedOut ? err(new TimeoutError('waitForSwapCompletion', timeoutMs)) : result;
+  return timedOut ? err(new TimeoutError(label, timeoutMs)) : result;
 }
 
 function sleep(
@@ -2355,6 +2481,19 @@ function assertApprovalCalldata(approval: OseroApiApprovalStep, path: string): v
       `${path}.transaction.calldata must match approve(spender, requiredAmount.raw)`,
     );
   }
+  // ABI decoding ignores bytes after the last argument, so the decoded values
+  // alone do not prove what the wallet would sign. Only the exact canonical
+  // encoding of approve(spender, requiredAmount.raw) is accepted.
+  const canonical = encodeFunctionData({
+    abi: erc20Abi,
+    functionName: 'approve',
+    args: [approval.spender, BigInt(approval.requiredAmount.raw)],
+  });
+  if (approval.transaction.calldata.toLowerCase() !== canonical.toLowerCase()) {
+    throw new DecodeError(
+      `${path}.transaction.calldata must be the canonical encoding of approve(spender, requiredAmount.raw) with no extra bytes`,
+    );
+  }
 }
 
 function decode<T>(
@@ -2560,7 +2699,7 @@ function decodePreparedTransaction(value: unknown, path: string): OseroApiPrepar
 
 function decodeRefreshContext(value: unknown, path: string): OseroApiRefreshContext {
   const record = asRecord(value, path);
-  return {
+  const known: OseroApiRefreshContext = {
     provider: decodeQuoteProvider(
       requiredField(record, 'provider', `${path}.provider`),
       `${path}.provider`,
@@ -2579,6 +2718,17 @@ function decodeRefreshContext(value: unknown, path: string): OseroApiRefreshCont
     ),
     referralCode: nullableField(record, 'referralCode', `${path}.referralCode`, decodeReferralCode),
   };
+  // The API is the authority on what a Refresh Context contains. A primitive
+  // field a newer API adds is kept after the known fields and echoed back on
+  // refresh, mirroring the Status Context. Known fields are never overridden,
+  // and a context without extra fields serializes exactly as before.
+  const extras: Record<string, string | number | boolean> = {};
+  for (const [key, extra] of Object.entries(record)) {
+    if (Object.hasOwn(known, key)) continue;
+    if (typeof extra === 'string' || typeof extra === 'boolean') extras[key] = extra;
+    else if (typeof extra === 'number' && Number.isFinite(extra)) extras[key] = extra;
+  }
+  return Object.keys(extras).length === 0 ? known : { ...known, ...extras };
 }
 
 type StatusContextCommon = {
@@ -2845,12 +2995,15 @@ function decodeLifiIncludedStep(value: unknown, path: string): OseroApiLifiInclu
   };
 }
 
+/**
+ * Structural decode of the normalized Transfer State. A state this SDK release
+ * does not know is reported as `unknown`, which is non-terminal: polling
+ * continues instead of failing on vocabulary the API may add later.
+ */
 function decodeTransferState(value: unknown, path: string): OseroApiTransferState {
   const state = decodeNonEmptyString(value, path);
-  if (state !== 'pending' && state !== 'completed' && state !== 'failed' && state !== 'unknown') {
-    throw new DecodeError(`${path} must be pending, completed, failed, or unknown`);
-  }
-  return state;
+  if (state === 'pending' || state === 'completed' || state === 'failed') return state;
+  return 'unknown';
 }
 
 function decodeTransferStatusProviderDetails(
@@ -3118,14 +3271,13 @@ function decodeNonNegativeSafeInteger(value: unknown, path: string): number {
   return number;
 }
 
+/**
+ * Structural only: the hosted API is the authority on which referral codes it
+ * accepts. Execution safety does not depend on a range here, because the
+ * decoded code is bound to the request in {@link assertSwapQuoteInvariants}.
+ */
 function decodeReferralCode(value: unknown, path: string): number {
-  const code = decodeNonNegativeSafeInteger(value, path);
-  if (code < OSERO_API_REFERRAL_CODE_MIN || code > OSERO_API_REFERRAL_CODE_MAX) {
-    throw new DecodeError(
-      `${path} must be between ${OSERO_API_REFERRAL_CODE_MIN} and ${OSERO_API_REFERRAL_CODE_MAX}`,
-    );
-  }
-  return code;
+  return decodeNonNegativeSafeInteger(value, path);
 }
 
 function addressField(
