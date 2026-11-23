@@ -35,7 +35,7 @@ Requirements:
 
 Supported runtimes:
 
-- **Node.js 20 or newer** for every entrypoint.
+- **Node.js 20.19+, 22.12+, or 23.2+** for every entrypoint (`>=20.19.0 <22.0.0 || >=22.12.0 <23.0.0 || >=23.2.0`, the range `@sentry/core` 11 requires).
 - **Modern browsers** that provide ES modules, `BigInt`, and a global `fetch`, for `@osero/client`, `/actions`, `/api`, `/contracts`, `/viem`, `/eip5792`, and `/ethers`. CI bundles each of these entrypoints for the browser with its dependencies and fails if any of them needs a Node.js built-in module (`pnpm browser:check`).
 - `@osero/client/privy` wraps the server-side `@privy-io/node` SDK and is supported on Node.js only.
 

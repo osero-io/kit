@@ -558,6 +558,16 @@ describe('Sentry sink', () => {
       type: 'osero.client',
       handled: true,
     });
+    for (const value of event['exception']['values']) {
+      expect(value.stacktrace.frames).toContainEqual(
+        expect.objectContaining({
+          filename: expect.stringContaining('telemetry.test.ts'),
+          lineno: expect.any(Number),
+          colno: expect.any(Number),
+        }),
+      );
+    }
+    expect(event['sdk']['integrations']).toEqual(['EventFilters', 'Dedupe', 'LinkedErrors']);
     expect(event).not.toHaveProperty('user');
     expect(event).not.toHaveProperty('request');
     expect(event).not.toHaveProperty('server_name');

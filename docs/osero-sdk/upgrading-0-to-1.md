@@ -10,7 +10,7 @@ Upgrade the package and runtime together:
 pnpm add @osero/client@^1.0.0 viem@'>=2.28.0 <3'
 ```
 
-Version 1 requires Node.js 20 or newer and ESM. Install `ethers@^6.14.0` or `@privy-io/node@^0.19.0` only when using that adapter.
+Version 1 requires ESM and Node.js 20.19+, 22.12+, or 23.2+. Releases up to 1.1.0 accepted any Node.js 20 or newer; later releases need the range that `@sentry/core` 11 requires. Install `ethers@^6.14.0` or `@privy-io/node@^0.19.0` only when using that adapter.
 
 ## Migration sequence
 
