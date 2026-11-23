@@ -450,11 +450,17 @@ const KEEPALIVE_BODY_LIMIT = 60_000;
  * disable telemetry never download or evaluate `@sentry/core`.
  */
 export async function createSentrySink(options: SentrySinkOptions = {}): Promise<TelemetrySink> {
-  const sentry = await import('@sentry/core');
+  // `@sentry/core` 11 moved `ServerRuntimeClient` and `nodeStackLineParser` to the
+  // `/server` subpath of the same package. Neither imports a Node.js built-in, so
+  // the client still loads in browsers and edge runtimes.
+  const [sentry, sentryServer] = await Promise.all([
+    import('@sentry/core'),
+    import('@sentry/core/server'),
+  ]);
   const fetchImpl = options.fetch ?? resolveFetch();
   if (fetchImpl === undefined) throw new Error('No fetch implementation available');
 
-  const client = new sentry.ServerRuntimeClient({
+  const client = new sentryServer.ServerRuntimeClient({
     dsn: options.dsn ?? TELEMETRY_DSN,
     release: `@osero/client@${SDK_VERSION}`,
     environment: detectEnvironment(),
@@ -479,7 +485,7 @@ export async function createSentrySink(options: SentrySinkOptions = {}): Promise
           },
         };
       }),
-    stackParser: sentry.createStackParser(sentry.nodeStackLineParser()),
+    stackParser: sentry.createStackParser(sentryServer.nodeStackLineParser()),
     integrations: [
       sentry.eventFiltersIntegration(),
       sentry.dedupeIntegration(),
@@ -487,6 +493,9 @@ export async function createSentrySink(options: SentrySinkOptions = {}): Promise
     ],
     sendClientReports: false,
     maxBreadcrumbs: 0,
+    // The SDK never records spans. Without this, `@sentry/core` 11 registers its
+    // span-streaming integration on the client by default.
+    traceLifecycle: 'static',
     _metadata: {
       sdk: {
         name: 'sentry.javascript.core',
