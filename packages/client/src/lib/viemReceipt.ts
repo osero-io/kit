@@ -170,10 +170,12 @@ function leaveObservation(key: string, observation: Observation): void {
 /**
  * Classifies a substitution viem returned without naming a reason.
  *
- * viem only calls `onReplaced` when the replacement already has enough
- * confirmations in the block it is found in. With more than one confirmation
- * requested it keeps the replacement's receipt, waits for later blocks, and
- * then resolves without the callback. The transaction viem found in the block
+ * Before 2.57.12, viem only calls `onReplaced` when the replacement already has
+ * enough confirmations in the block it is found in. With more than one
+ * confirmation requested it keeps the replacement's receipt, waits for later
+ * blocks, and then resolves without the callback. Later versions name the
+ * replacement for any confirmation count, so this runs only on the older viem
+ * the peer range still admits. The transaction viem found in the block
  * is therefore compared with what was submitted: the same sender, target,
  * calldata, and value under another hash is the same transaction at a
  * different fee. Anything else, including a transaction that was not observed,
