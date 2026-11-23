@@ -14,7 +14,10 @@ import { ConfirmationError, type ExecutionFailureContext } from './errors.js';
 
 export type ViemReplacementReason = 'repriced' | 'cancelled' | 'replaced';
 
-/** What the adapter asked the wallet to send for a plan step. */
+/**
+ * What the adapter had sent for a plan step: the request, with any calldata
+ * viem appends before broadcasting it (a client `dataSuffix`).
+ */
 export type SubmittedTransaction = {
   readonly from: Address;
   readonly to: Address;
@@ -26,8 +29,9 @@ export type ViemReceiptOutcome = {
   readonly receipt: TransactionReceipt;
   /**
    * Present when the confirmed receipt belongs to a different transaction than
-   * the submitted one. `replaced` is also reported whenever a substitution
-   * cannot be proven to be a repricing, so an unexplained substitution is never
+   * the submitted one. When the submitted transaction is known, `replaced` is
+   * also reported whenever a substitution cannot be proven to be a repricing of
+   * it, so neither an unexplained substitution nor viem's own verdict is
    * mistaken for a harmless fee bump.
    */
   readonly replacement?: ViemReplacementReason;
@@ -177,7 +181,7 @@ function leaveObservation(key: string, observation: Observation): void {
  * resolves with the replacement's receipt without naming a reason. Whichever
  * viem names, it reached its verdict by comparing the replacement with the
  * transaction the node returns under the submitted hash, which is not
- * necessarily what the adapter asked the wallet to send. So a repricing is
+ * necessarily what the adapter had sent. So a repricing is
  * never taken on viem's word: the transaction viem found in the mined block is
  * compared with what was submitted. The same sender, target, calldata, and
  * value under another hash is the same transaction at a different fee.
@@ -208,9 +212,13 @@ function classifyReplacement(
  * that reused the nonce. Callers must therefore inspect `replacement` before
  * treating the receipt as confirmation of the submitted plan step.
  *
- * Pass `submitted` so a substitution viem does not explain can be checked
- * against what was sent. Without it, an unexplained substitution is `replaced`.
- * The check issues no request beyond the ones viem makes for the wait.
+ * Pass `submitted`, as broadcast, so the substitution is checked against it.
+ * With `submitted`, every substitution other than one viem names `cancelled` or
+ * `replaced` is compared with it, whether or not viem named a reason and for
+ * any confirmation count: only the same sender, target, calldata, and value is
+ * `repriced`. Without `submitted`, the reason viem names is taken, and a
+ * substitution viem does not explain is `replaced`. The check issues no request
+ * beyond the ones viem makes for the wait.
  */
 export async function waitForViemReceipt(
   client: ClientLike,
@@ -227,9 +235,8 @@ export async function waitForViemReceipt(
   };
   const { submitted } = args;
   const hash = args.hash.toLowerCase();
-  // Without `submitted` (the EIP-5792 batch transaction, which the wallet
-  // built) there is nothing to check against, so a repricing viem names is
-  // reported as such.
+  // Only the EIP-5792 batch transaction, which the wallet built, comes without
+  // `submitted`: there is nothing to check viem's verdict against.
   if (submitted === undefined) {
     const receipt = await waitForTransactionReceipt(client, waitParameters(args, onNamed));
     if (receipt.transactionHash.toLowerCase() === hash) return { receipt };
@@ -242,9 +249,7 @@ export async function waitForViemReceipt(
     const receipt = await waitForTransactionReceipt(view, waitParameters(args, onNamed));
     const replacementHash = receipt.transactionHash.toLowerCase();
     if (replacementHash === hash) return { receipt };
-    // viem's `cancelled` and `replaced` already fail the step. A repricing,
-    // named or not and for any confirmation count, must match what was
-    // submitted.
+    // viem's `cancelled` and `replaced` already fail the step.
     if (named === 'cancelled' || named === 'replaced') return { receipt, replacement: named };
     return {
       receipt,

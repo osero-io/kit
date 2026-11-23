@@ -7,6 +7,7 @@ import {
   numberToHex,
   publicActions,
   type Address,
+  type DataSuffix,
   type Hex,
   type PublicClient,
 } from 'viem';
@@ -98,13 +99,31 @@ function rpcTransaction(hash: Hex, fields: Mined, blockNumber: bigint | null) {
 /**
  * A node on which the submitted transaction never mines. One block after the
  * start, a transaction from the same sender with the same nonce mines instead.
+ *
+ * With `speedsUpSent`, the node holds what it was sent under the submitted
+ * hash and mines that calldata again at another fee, as a wallet's speed-up
+ * does. Otherwise it holds `SUBMITTED_AS_MINED` and mines `replacement`,
+ * whatever it was sent.
  */
-function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint } = {}) {
+function scriptedNode(
+  replacement: Mined,
+  options: { readonly mineAfter?: bigint; readonly speedsUpSent?: boolean } = {},
+) {
   // The replacement mines one block after the start, or later when asked.
   let replacedAt = START_BLOCK + (options.mineAfter ?? 1n);
   let head = START_BLOCK - 1n;
   const calls: string[] = [];
   const sent: unknown[] = [];
+  const sentCalldata = (): Hex | undefined =>
+    options.speedsUpSent ? (sent[0] as { readonly data?: Hex } | undefined)?.data : undefined;
+  const original = (): Mined => {
+    const input = sentCalldata();
+    return input === undefined ? SUBMITTED_AS_MINED : { ...SUBMITTED_AS_MINED, input };
+  };
+  const mined = (): Mined => {
+    const input = sentCalldata();
+    return input === undefined ? replacement : { ...replacement, input };
+  };
   const request = async ({ method, params }: { method: string; params?: unknown }) => {
     calls.push(method);
     const [first] = (params ?? []) as readonly unknown[];
@@ -123,7 +142,7 @@ function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint
       case 'eth_getTransactionByHash':
         // viem reads the replacement from its block, never by hash. Neither may the adapter.
         if (first !== ORIGINAL) throw new Error('unexpected read of a transaction by hash');
-        return rpcTransaction(ORIGINAL, SUBMITTED_AS_MINED, null);
+        return rpcTransaction(ORIGINAL, original(), null);
       case 'eth_getTransactionReceipt':
         if (first !== REPLACEMENT || head < replacedAt) return null;
         return {
@@ -132,7 +151,7 @@ function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint
           blockHash: `0x${'cc'.repeat(32)}`,
           transactionIndex: '0x0',
           from: ACCOUNT,
-          to: replacement.to,
+          to: mined().to,
           status: '0x1',
           gasUsed: '0x5208',
           cumulativeGasUsed: '0x5208',
@@ -152,7 +171,7 @@ function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint
           gasLimit: '0x1',
           gasUsed: '0x1',
           transactions:
-            number === replacedAt ? [rpcTransaction(REPLACEMENT, replacement, replacedAt)] : [],
+            number === replacedAt ? [rpcTransaction(REPLACEMENT, mined(), replacedAt)] : [],
         };
       }
       default:
@@ -507,11 +526,16 @@ function plan({ from = ACCOUNT, data = '0x1234' }: { from?: Address; data?: Hex 
   return { single: result.value, steps };
 }
 
-function walletClient(replacement: Mined, account: Address = ACCOUNT) {
-  const node = scriptedNode(replacement);
+function walletClient(
+  replacement: Mined,
+  account: Address = ACCOUNT,
+  options: { readonly dataSuffix?: DataSuffix; readonly speedsUpSent?: boolean } = {},
+) {
+  const node = scriptedNode(replacement, { speedsUpSent: options.speedsUpSent ?? false });
   return {
     node,
     wallet: createWalletClient({
+      ...(options.dataSuffix === undefined ? {} : { dataSuffix: options.dataSuffix }),
       account,
       chain: base,
       transport: node.transport,
@@ -731,3 +755,82 @@ describe.each(WAITERS)('adapters cross-checking a repricing against %s', (_name,
     },
   );
 });
+
+const SUFFIX: Hex = '0xcafe';
+
+/**
+ * Whether the installed viem appends a wallet client's `dataSuffix` to the
+ * calldata it sends, as it does since 2.45.0. Older viem in the peer range
+ * ignores the option, so a suffix never reaches the wire there.
+ */
+const installedViemAppendsDataSuffix = await (async () => {
+  const { wallet, node } = walletClient(REPRICED, ACCOUNT, { dataSuffix: SUFFIX });
+  await wallet.sendTransaction({ to: TARGET, data: '0x1234' });
+  return (node.sent[0] as { readonly data?: Hex }).data === `0x1234${SUFFIX.slice(2)}`;
+})();
+
+const SUFFIXED_CASES = (
+  [
+    ['a string', SUFFIX],
+    ['a { value } object', { value: SUFFIX }],
+  ] as const
+).flatMap(([form, dataSuffix]) =>
+  [1, 2].map((confirmations) => [form, confirmations, dataSuffix] as const),
+);
+
+describe.each(WAITERS)(
+  'viem adapter with a dataSuffix wallet client against %s',
+  (_name, older) => {
+    if (older) emulateViemBefore2_57_12();
+
+    // A builder code (ERC-8021) appended by viem is part of what was broadcast,
+    // so the wallet's speed-up carries it too.
+    it.each(SUFFIXED_CASES)(
+      'confirms a genuine repricing with the suffix as %s (%i confirmations)',
+      async (_form, confirmations, dataSuffix) => {
+        const { wallet, node } = walletClient(REPRICED, ACCOUNT, {
+          dataSuffix,
+          speedsUpSent: true,
+        });
+
+        const result = await sendWith(wallet, plan().single, { confirmations });
+
+        expect(result.isOk()).toBe(true);
+        if (result.isOk()) {
+          expect(result.value.transactions[0]).toMatchObject({
+            submittedHash: ORIGINAL,
+            hash: REPLACEMENT,
+            replacement: {
+              reason: 'repriced',
+              originalHash: ORIGINAL,
+              replacementHash: REPLACEMENT,
+            },
+          });
+        }
+        // On viem without `dataSuffix`, nothing is appended, by viem or by the adapter.
+        expect((node.sent[0] as { readonly data?: Hex }).data).toBe(
+          installedViemAppendsDataSuffix ? `0x1234${SUFFIX.slice(2)}` : '0x1234',
+        );
+        expect(node.sent).toHaveLength(1);
+      },
+    );
+
+    describe.skipIf(!installedViemAppendsDataSuffix)('since viem 2.45.0', () => {
+      // The node holds the calldata without the suffix under the submitted hash,
+      // so viem calls the replacement a repricing. It is not what was broadcast.
+      it.each(SUFFIXED_CASES)(
+        'fails closed when the replacement mined without the suffix given as %s (%i confirmations)',
+        async (_form, confirmations, dataSuffix) => {
+          const { wallet, node } = walletClient(REPRICED, ACCOUNT, { dataSuffix });
+          const twoSteps = createExecutionPlan({ steps: plan().steps });
+          if (twoSteps.isErr()) throw twoSteps.error;
+
+          const result = await sendWith(wallet, twoSteps.value, { confirmations });
+
+          expectReplacementFailure(result);
+          expect(node.sent).toHaveLength(1);
+        },
+      );
+    });
+  },
+);

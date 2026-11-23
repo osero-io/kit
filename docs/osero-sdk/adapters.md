@@ -78,10 +78,15 @@ submitted. The message is `Transaction <hash> was <reason> and cannot be treated
 - **viem and Privy** observe viem's `onReplaced` callback. A `cancelled` or `replaced` reason fails
   the step. A repricing is never taken on viem's word: viem decides `repriced` by comparing the
   replacement with the transaction the node returns under the submitted hash, which need not be
-  what the adapter asked the wallet to send. So for any `confirmations`, and on every viem version,
-  the adapter compares the transaction viem found in the mined block with what it submitted. The
-  same sender, target, calldata, and value under another hash is a repricing. Anything else,
-  including a replacement the adapter could not observe, fails closed as `cancelled` or `replaced`.
+  what the adapter sent. So for any `confirmations`, and on every viem version, the adapter compares
+  the transaction viem found in the mined block with what it submitted. The same sender, target,
+  calldata, and value under another hash is a repricing. Anything else, including a replacement the
+  adapter could not observe, fails closed as `cancelled` or `replaced`. What the viem adapter
+  submitted includes the wallet client's `dataSuffix` (such as an ERC-8021 builder code), which
+  viem 2.45.0 and later append to the calldata, so a fee bump of a suffixed transaction is still a
+  repricing. A wallet that rewrites the transaction in any other way cannot be told apart from a
+  different transaction: a fee bump of a rewritten transaction fails closed. The Privy adapter
+  sends the step's calldata as is and sets no Wallet API data suffix.
   The same comparison classifies a replacement viem returns without naming a reason, which viem
   before 2.57.12 does when more than one confirmation is requested. The comparison uses the block
   viem already read for the wait, so it adds no RPC request. To see that block, the adapter's wait
@@ -93,8 +98,11 @@ submitted. The message is `Transaction <hash> was <reason> and cannot be treated
 - **EIP-5792** applies the rule to the extra-confirmation wait (`confirmations` greater than `1`).
   The wallet builds the batch transaction, so the adapter has nothing to compare a substitute
   against: any change of the batch transaction's hash during that wait fails, unless viem itself
-  reports a repricing. Replacement of a batch before the wallet reports its terminal status is the
-  wallet's concern and is not observable through `wallet_getCallsStatus`.
+  reports a repricing. viem 2.57.12 and later can; earlier versions never name a reason when more
+  than one confirmation is requested, so on them any change of the hash during that wait fails.
+  Replacement of a batch before the wallet reports its terminal status is the wallet's concern and
+  is not observable through `wallet_getCallsStatus`. The sequential fallback is the viem adapter
+  and follows its rule.
 - **Privy limitation.** Replacement is detected only for a response that carries a standard
   transaction hash, by scanning blocks through the receipt client. The adapter cannot observe what
   the Privy Wallet API does before it returns that hash.

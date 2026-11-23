@@ -1,6 +1,8 @@
 import {
+  concat,
   type Account,
   type Chain,
+  type Hex,
   type Transport,
   TransactionExecutionError,
   UserRejectedRequestError,
@@ -104,6 +106,23 @@ function resolveOptions(
   return ok({ ...options, confirmations: confirmations.value, gasBufferBps });
 }
 
+/**
+ * The calldata viem broadcasts for `data` from this client. Since 2.45.0,
+ * viem's `sendTransaction` appends the client's `dataSuffix` (how ERC-8021
+ * builder codes are attached), in its string or `{ value }` form. A repricing
+ * re-sends that calldata, so it is what the replacement is compared with.
+ * Older viem has no such field and appends nothing. The adapter never passes
+ * the per-call `dataSuffix`, which would take precedence.
+ */
+function broadcastCalldata(walletClient: WalletClient, data: Hex): Hex {
+  const { dataSuffix } = walletClient as { readonly dataSuffix?: unknown };
+  const suffix =
+    typeof dataSuffix === 'object' && dataSuffix !== null
+      ? (dataSuffix as { readonly value?: unknown }).value
+      : dataSuffix;
+  return typeof suffix === 'string' ? concat([data, suffix as Hex]) : data;
+}
+
 function sendSingleTransaction(
   walletClient: ConnectedWalletClient,
   plan: ExecutionPlan,
@@ -148,7 +167,7 @@ function sendSingleTransaction(
           submitted: {
             from: walletClient.account.address,
             to: request.to,
-            data: request.data,
+            data: broadcastCalldata(walletClient, request.data),
             value: request.value,
           },
           ...(options.confirmationTimeoutMs === undefined
