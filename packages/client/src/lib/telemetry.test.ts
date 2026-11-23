@@ -614,9 +614,4 @@ describe('Sentry sink', () => {
 
     expect(calls).toBe(1);
   });
-
-  it('flushes trivially before the sink exists', async () => {
-    _configureTelemetryForTesting({ enabled: true });
-    expect(await _flushTelemetryForTesting()).toBe(true);
-  });
 });

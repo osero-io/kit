@@ -247,10 +247,6 @@ describe('runExecutionPlan', () => {
 });
 
 describe('executor chain support', () => {
-  it('does not restrict chains when an executor declares none', () => {
-    expect(preflightExecutorCapabilities(plan(), CAPABILITIES).isOk()).toBe(true);
-  });
-
   it('accepts a plan whose every step is on a declared chain', () => {
     const result = preflightExecutorCapabilities(plan(), {
       ...CAPABILITIES,

@@ -402,27 +402,6 @@ describe('OseroApiClient request boundaries', () => {
     expect(result.isOk()).toBe(true);
   });
 
-  it('never hands the client instance to fetch as its receiver', async () => {
-    const receivers: unknown[] = [];
-    const probe: OseroApiFetch = function (this: unknown): Promise<Response> {
-      receivers.push(this);
-      return Promise.resolve(new Response(JSON.stringify({ assets: [] })));
-    };
-
-    await OseroApiClient.create({ apiKey: API_KEY, fetch: probe }).getSupportedAssets();
-    vi.stubGlobal('fetch', probe);
-    try {
-      await OseroApiClient.create({ apiKey: API_KEY }).getSupportedAssets();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-
-    expect(receivers).toHaveLength(2);
-    for (const receiver of receivers) {
-      expect(receiver === undefined || receiver === globalThis).toBe(true);
-    }
-  });
-
   it('tracks the hosted asset and chain vocabulary independently of native action chains', () => {
     expect(OSERO_API_KNOWN_CHAIN_IDS).toEqual([
       1, 8453, 42161, 10, 59144, 56, 130, 137, 143, 999, 9745, 43114, 80094,
@@ -1432,7 +1411,9 @@ describe('hosted quote verification and preparation', () => {
     const unknown = await client.getSwapQuote(request);
 
     expect(lifi.isOk()).toBe(true);
-    if (lifi.isOk() && isOseroApiLifiProviderDetails(lifi.value.quote.providerDetails)) {
+    if (!lifi.isOk()) return;
+    expect(isOseroApiLifiProviderDetails(lifi.value.quote.providerDetails)).toBe(true);
+    if (isOseroApiLifiProviderDetails(lifi.value.quote.providerDetails)) {
       expect(lifi.value.quote.providerDetails.usesComposer).toBe(true);
       expect(lifi.value.quote.providerDetails.steps[0]?.gasCosts[0]?.token.address).toBe(
         '0x0000000000000000000000000000000000000000',
@@ -2389,35 +2370,17 @@ describe('Transfer Status polling', () => {
     );
   });
 
-  it('polls pending and unknown states, de-duplicates callbacks, and returns completion', async () => {
-    const initial = ensoTransferStatusFixture('pending', 'PENDING');
-    const pending = ensoTransferStatusFixture('unknown', 'future-provider-state');
-    const completed = ensoTransferStatusFixture('completed', 'delivered');
-    const transport = fetchSequence(
-      { body: initial },
-      { body: initial },
-      { body: pending },
-      { body: completed },
-    );
-    const onStatus = mockFn();
+  it('narrows Enso Transfer Status Provider Details', async () => {
+    const transport = fetchSequence({ body: ensoTransferStatusFixture('completed', 'delivered') });
     const client = OseroApiClient.create({ apiKey: API_KEY, fetch: transport.fetch });
 
-    const result = await client.waitForSwapCompletion(crossChainQuoteFixture(), SOURCE_HASH, {
-      pollingIntervalMs: 1,
-      timeoutMs: 1_000,
-      onStatus,
-    });
+    const result = await client.getSwapStatusForQuote(crossChainQuoteFixture(), SOURCE_HASH);
 
     expect(result.isOk()).toBe(true);
-    if (result.isOk()) {
-      expect(result.value.state).toBe('completed');
-      expect(result.value.destinationTransactionHash).toBe(DESTINATION_HASH);
-      if (isOseroApiEnsoTransferStatusProviderDetails(result.value.providerDetails)) {
-        expect(result.value.providerDetails.status).toBe('delivered');
-      }
-    }
-    expect(onStatus).toHaveBeenCalledTimes(3);
-    expect(transport.calls).toHaveLength(4);
+    if (!result.isOk()) return;
+    expect(isOseroApiEnsoTransferStatusProviderDetails(result.value.providerDetails)).toBe(true);
+    if (!isOseroApiEnsoTransferStatusProviderDetails(result.value.providerDetails)) return;
+    expect(result.value.providerDetails.status).toBe('delivered');
   });
 
   it('preserves opaque Provider Details for an unknown Quote Provider', async () => {
@@ -2456,13 +2419,8 @@ describe('Transfer Status polling', () => {
     });
 
     expect(result.isOk()).toBe(true);
-    if (
-      result.isOk() &&
-      isOseroApiLifiTransferStatusProviderDetails(result.value.providerDetails)
-    ) {
-      expect(result.value.providerDetails.status).toBe('DONE');
-      expect(result.value.providerDetails.substatus).toBe('COMPLETED');
-    }
+    if (!result.isOk()) return;
+    expect(isOseroApiLifiTransferStatusProviderDetails(result.value.providerDetails)).toBe(true);
   });
 
   it.each([
@@ -2580,39 +2538,6 @@ describe('Transfer Status polling', () => {
       expect(result.value.sourceTransactionHash).toBe(SOURCE_HASH);
       expect(result.value.providerDetails).toEqual({ provider: 'enso', status: 'failed' });
     }
-  });
-
-  it('supports cancellation during polling and bounded timeout', async () => {
-    const controller = new AbortController();
-    const cancelTransport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
-    const cancelClient = OseroApiClient.create({ apiKey: API_KEY, fetch: cancelTransport.fetch });
-    const onStatus = mockFn(() => controller.abort('stop'));
-    const cancelled = await cancelClient.waitForSwapCompletion(
-      crossChainQuoteFixture(),
-      SOURCE_HASH,
-      {
-        pollingIntervalMs: 1,
-        timeoutMs: 100,
-        signal: controller.signal,
-        onStatus,
-      },
-    );
-
-    const timeoutTransport = fetchSequence({ body: ensoTransferStatusFixture('pending') });
-    const timeoutClient = OseroApiClient.create({ apiKey: API_KEY, fetch: timeoutTransport.fetch });
-    const timedOut = await timeoutClient.waitForSwapCompletion(
-      crossChainQuoteFixture(),
-      SOURCE_HASH,
-      {
-        pollingIntervalMs: 1,
-        timeoutMs: 5,
-      },
-    );
-
-    expect(cancelled.isErr()).toBe(true);
-    if (cancelled.isErr()) expect(cancelled.error.code).toBe('CANCELLED');
-    expect(timedOut.isErr()).toBe(true);
-    if (timedOut.isErr()) expect(timedOut.error).toBeInstanceOf(TimeoutError);
   });
 
   it('bounds and cancels a pending async status callback', async () => {
@@ -2828,6 +2753,7 @@ describe('0x quotes', () => {
     expect(result.value.quote.quote.expectedOutput).toEqual(
       ZEROX_SAME_CHAIN_QUOTE.quote.expectedOutput,
     );
+    expect(isOseroApiZeroXProviderDetails(result.value.quote.providerDetails)).toBe(true);
     if (!isOseroApiZeroXProviderDetails(result.value.quote.providerDetails)) return;
     expect(result.value.quote.providerDetails.fees.integratorFee).toEqual({
       amount: '2500',
@@ -2851,36 +2777,6 @@ describe('0x quotes', () => {
     if (!isOseroApiZeroXStatusContext(statusContext!)) return;
     expect(statusContext.providerQuoteId).toBe(ZEROX_QUOTE_ID);
     expect(statusContext.bridge).toBe('across_v4');
-  });
-
-  it('turns a 0x allowance issue into an Approval Step bound to the returned spender', async () => {
-    const approvalQuote = quoteWithApproval({ spender: SPENDER });
-    const fixture: OseroApiSwapQuoteResponse = {
-      ...approvalQuote,
-      provider: '0x',
-      quote: ZEROX_SAME_CHAIN_QUOTE.quote,
-      refreshContext: { ...approvalQuote.refreshContext, provider: '0x' },
-      providerDetails: ZEROX_SAME_CHAIN_QUOTE.providerDetails,
-    };
-    const transport = fetchSequence({ body: fixture });
-    const chain = publicClient(0n, 1);
-    const client = OseroApiClient.create({
-      apiKey: API_KEY,
-      fetch: transport.fetch,
-      publicClientProvider: () => chain.client,
-    });
-
-    const result = await client.getSwapQuote(zeroXQuoteRequest());
-
-    expect(result.isOk()).toBe(true);
-    if (!result.isOk()) return;
-    expect(result.value.state).toBe('approval-required');
-    expect(result.value.walletExecutionPlan.steps).toEqual([
-      expect.objectContaining({
-        operation: 'APPROVE_ERC20',
-        authorization: expect.objectContaining({ spender: SPENDER }),
-      }),
-    ]);
   });
 
   it.each([

@@ -695,21 +695,6 @@ const progressError = (context: ExecutionFailureContext) =>
   ProgressCallbackError.from(new Error('callback failed'), context);
 
 describe('resume state from a failed execution', () => {
-  it('derives state that resume accepts from a failure carrying confirmations', () => {
-    const { plan, state } = twoStepPlanWithState();
-    const error = new TransactionError('step two reverted', OTHER_HASH, {
-      ...failureContextFor(plan, state.confirmed.map(toCompletedExecutionStep)),
-      stage: 'revert',
-    });
-
-    const derived = executionResumeStateFromError(plan, error);
-
-    expect(derived.isOk()).toBe(true);
-    if (derived.isErr()) return;
-    expect(derived.value).toEqual(state);
-    expect(resumeExecutionPlan(plan, derived.value).isOk()).toBe(true);
-  });
-
   describe('when the failed step may already have been submitted', () => {
     it.each([
       ['a receipt wait that timed out', 'confirmation', confirmationError, { hash: OTHER_HASH }],

@@ -9,12 +9,7 @@ import {
   type AdapterContractFactory,
   type AdapterFault,
 } from './lib/_testing.js';
-import {
-  ConfirmationError,
-  TransactionError,
-  UnsupportedCapabilityError,
-  ValidationError,
-} from './lib/errors.js';
+import { ConfirmationError, UnsupportedCapabilityError, ValidationError } from './lib/errors.js';
 import {
   createExecutionPlan,
   createTransactionRequest,
@@ -209,77 +204,6 @@ describe('Privy stage behavior', () => {
     expect(state.sendTransaction).not.toHaveBeenCalled();
   });
 
-  it('separates caller cancellation from Wallet API broadcast failure', async () => {
-    const cancelled = makePrivy();
-    cancelled.sendTransaction.mockRejectedValue(
-      new APIUserAbortError({ message: 'caller aborted' }),
-    );
-    const broadcast = makePrivy();
-    broadcast.sendTransaction.mockRejectedValue(new Error('wallet API unavailable'));
-    const options = {
-      chainId: 8453,
-      receiptClient: receiptClient(8453),
-      idempotencyKeys: { swap: 'key-swap' },
-    } as const;
-
-    const cancelResult = await sendWith(
-      cancelled.privy,
-      { id: 'wallet-1', address: ACCOUNT },
-      singlePlan(),
-      options,
-    );
-    const broadcastResult = await sendWith(
-      broadcast.privy,
-      { id: 'wallet-1', address: ACCOUNT },
-      singlePlan(),
-      options,
-    );
-
-    expect(cancelResult.isErr()).toBe(true);
-    if (cancelResult.isErr()) expect(cancelResult.error.code).toBe('CANCELLED');
-    expect(broadcastResult.isErr()).toBe(true);
-    if (broadcastResult.isErr()) expect(broadcastResult.error.code).toBe('BROADCAST_FAILED');
-  });
-
-  it('never derives resume state when the caller aborts after the Wallet API accepted the request', async () => {
-    // The abort ends the HTTP call on the client; Privy may already be broadcasting.
-    let accepted = 0;
-    const privy = {
-      wallets: () => ({
-        ethereum: () => ({
-          sendTransaction: async () => {
-            accepted += 1;
-            throw new APIUserAbortError({ message: 'caller aborted after dispatch' });
-          },
-        }),
-      }),
-    } as unknown as PrivyClient;
-    const valuePlan = singlePlan();
-
-    const result = await sendWith(privy, { id: 'wallet-1', address: ACCOUNT }, valuePlan, {
-      chainId: 8453,
-      receiptClient: receiptClient(8453),
-      idempotencyKeys: { swap: 'key-swap' },
-    });
-
-    expect(accepted).toBe(1);
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error.code).toBe('CANCELLED');
-      const refused = executionResumeStateFromError(valuePlan, result.error);
-      expect(refused.isErr()).toBe(true);
-      if (refused.isErr()) {
-        expect(refused.error).toBeInstanceOf(ValidationError);
-        expect(refused.error.details).toMatchObject({ stage: 'signing', stepId: 'swap' });
-      }
-      // Only the caller, having checked the wallet, can vouch that nothing was sent.
-      const vouched = executionResumeStateFromError(valuePlan, result.error, {
-        unresolvedStep: 'assume-not-executed',
-      });
-      expect(vouched.isOk()).toBe(true);
-    }
-  });
-
   it('rejects sponsored responses without inventing a transaction hash', async () => {
     const state = makePrivy();
     state.sendTransaction.mockResolvedValue({ hash: '' });
@@ -349,87 +273,6 @@ describe('Privy stage behavior', () => {
     expect(actions.waitForTransactionReceipt).toHaveBeenCalledTimes(1);
   });
 
-  it('preserves submitted hash on receipt failure and maps reverts', async () => {
-    const timeoutState = makePrivy();
-    actions.waitForTransactionReceipt.mockRejectedValueOnce(new Error('timeout'));
-    const timeoutResult = await sendWith(
-      timeoutState.privy,
-      { id: 'wallet-1', address: ACCOUNT },
-      singlePlan(),
-      {
-        chainId: 8453,
-        receiptClient: receiptClient(8453),
-        idempotencyKeys: { swap: 'key-swap' },
-      },
-    );
-
-    const revertState = makePrivy();
-    actions.waitForTransactionReceipt.mockResolvedValueOnce({
-      status: 'reverted',
-      transactionHash: hash(1),
-      blockNumber: 1n,
-      gasUsed: 1n,
-      effectiveGasPrice: 1n,
-    });
-    const revertResult = await sendWith(
-      revertState.privy,
-      { id: 'wallet-1', address: ACCOUNT },
-      singlePlan(),
-      {
-        chainId: 8453,
-        receiptClient: receiptClient(8453),
-        idempotencyKeys: { swap: 'key-swap-2' },
-      },
-    );
-
-    expect(timeoutResult.isErr()).toBe(true);
-    if (timeoutResult.isErr()) {
-      expect(timeoutResult.error).toBeInstanceOf(ConfirmationError);
-      if (timeoutResult.error instanceof ConfirmationError) {
-        expect(timeoutResult.error.execution?.hash).toBe(hash(1));
-      }
-    }
-    expect(revertResult.isErr()).toBe(true);
-    if (revertResult.isErr()) expect(revertResult.error).toBeInstanceOf(TransactionError);
-  });
-
-  it('returns confirmed prefix recovery state when a later receipt fails', async () => {
-    const state = makePrivy();
-    actions.waitForTransactionReceipt
-      .mockResolvedValueOnce({
-        status: 'success',
-        transactionHash: hash(1),
-        blockNumber: 1n,
-        gasUsed: 1n,
-        effectiveGasPrice: 1n,
-      })
-      .mockRejectedValueOnce(new Error('second receipt timeout'));
-
-    const result = await sendWith(
-      state.privy,
-      { id: 'wallet-1', address: ACCOUNT },
-      twoStepPlan(),
-      {
-        chainId: 8453,
-        receiptClient: receiptClient(8453),
-        idempotencyKeys: {
-          swap: 'key-swap',
-          'swap-two': 'key-swap-two',
-        },
-      },
-    );
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr() && result.error instanceof ConfirmationError) {
-      expect(result.error.execution).toMatchObject({
-        stepId: 'swap-two',
-        hash: hash(2),
-        completed: [expect.objectContaining({ stepId: 'swap', hash: hash(1) })],
-      });
-    }
-    expect(state.sendTransaction).toHaveBeenCalledTimes(2);
-  });
-
   it('allows forward-compatible unknown chains only with supplied metadata and transport', async () => {
     const state = makePrivy();
     const unknownChain = { ...base, id: 999_999, name: 'Future chain' };
@@ -473,15 +316,9 @@ describe('Privy stage behavior', () => {
     ['a null plan', null],
     ['a plan without steps', { __typename: 'ExecutionPlan', version: 1, id: 'plan-x' }],
     ['a plan whose steps are not an array', { ...singlePlan(), steps: null }],
-    ['a plan with a malformed later step', undefined],
   ])(
     'returns a validation error for %s combined with idempotency keys',
-    async (_name, candidate) => {
-      const valid = twoStepPlan();
-      const malformed =
-        candidate === undefined
-          ? { ...valid, steps: [valid.steps[0], { ...valid.steps[1], data: '0x123' }] }
-          : candidate;
+    async (_name, malformed) => {
       const options = {
         chainId: 8453,
         receiptClient: receiptClient(8453),

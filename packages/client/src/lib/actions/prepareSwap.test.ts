@@ -6,7 +6,6 @@ import { psm3Abi } from '../abis/psm3.js';
 import { CHAIN_CAPABILITIES, type OseroChainId, type TokenSymbol } from '../capabilities.js';
 import { parseSlippage, referral, tokenAmount, UINT256_MAX, type TokenAmount } from '../domain.js';
 import { InsufficientAllowanceError, ValidationError } from '../errors.js';
-import { applySlippageDown, applySlippageUp, USDC_TO_USDS_SCALE } from '../math.js';
 import { OseroClient, type OseroPublicClient } from '../OseroClient.js';
 import { deserializeExecutionPlan, serializeExecutionPlan } from '../plan.js';
 import type { Result } from '../result.js';
@@ -167,7 +166,7 @@ describe('PSM3 quote integrity', () => {
 
     expect(result.isOk()).toBe(true);
     if (result.isOk()) {
-      expect(result.value.minimumAmountOut.raw).toBe(applySlippageDown(input.raw, tolerance));
+      expect(result.value.minimumAmountOut.raw).toBe(999_287n);
       const decoded = decodeFunctionData({
         abi: psm3Abi,
         data: result.value.plan.steps.at(-1)!.data,
@@ -203,7 +202,7 @@ describe('PSM3 quote integrity', () => {
 
     expect(result.isOk()).toBe(true);
     if (result.isOk()) {
-      expect(result.value.maximumAmountIn.raw).toBe(applySlippageUp(output.raw, tolerance));
+      expect(result.value.maximumAmountIn.raw).toBe(1_000_714n);
       const decoded = decodeFunctionData({
         abi: psm3Abi,
         data: result.value.plan.steps.at(-1)!.data,
@@ -390,7 +389,7 @@ describe('approval policy', () => {
         data: result.value.plan.steps.at(-1)!.data,
       });
       expect(decoded.functionName).toBe('deposit');
-      expect(decoded.args[0]).toBe(input.raw * USDC_TO_USDS_SCALE);
+      expect(decoded.args[0]).toBe(1_000_000_000_000_000_000n);
     }
   });
 

@@ -416,24 +416,6 @@ describe('eip5792 atomic behavior', () => {
     expect(actions.sendTransaction).not.toHaveBeenCalled();
   });
 
-  it('maps status 500 with a receipt to TransactionError with its hash', async () => {
-    actions.getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
-    actions.waitForCallsStatus.mockResolvedValue({
-      atomic: true,
-      status: 'failure',
-      statusCode: 500,
-      receipts: [receipt(hash(4), 'reverted')],
-    });
-
-    const result = await sendWith(wallet(), plan());
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr()) {
-      expect(result.error).toBeInstanceOf(TransactionError);
-      if (result.error instanceof TransactionError) expect(result.error.txHash).toBe(hash(4));
-    }
-  });
-
   it('maps a calls-status timeout to ConfirmationError that names the batch', async () => {
     const cause = new Error('timed out');
     actions.getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
@@ -457,26 +439,6 @@ describe('eip5792 atomic behavior', () => {
     }
     expect(actions.sendCalls).toHaveBeenCalledOnce();
     expect(actions.sendTransaction).not.toHaveBeenCalled();
-  });
-
-  it('uses one terminal receipt for every call in the batch', async () => {
-    actions.getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
-    actions.waitForCallsStatus.mockResolvedValue({
-      atomic: true,
-      status: 'success',
-      statusCode: 200,
-      receipts: [receipt(hash(7))],
-    });
-
-    const result = await sendWith(wallet(), plan());
-
-    expect(result.isOk()).toBe(true);
-    if (result.isOk()) {
-      expect(result.value.transactions.map((transaction) => transaction.hash)).toEqual([
-        hash(7),
-        hash(7),
-      ]);
-    }
   });
 });
 

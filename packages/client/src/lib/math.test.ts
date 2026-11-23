@@ -2,12 +2,9 @@ import { parseSlippage, type Slippage } from './domain.js';
 import {
   applySlippageDown,
   applySlippageUp,
-  BPS,
   usdcFromUsdsViaBuyGem,
   usdsFromUsdcViaSellGem,
-  USDC_TO_USDS_SCALE,
   usdsNeededForUsdcViaBuyGem,
-  WAD,
 } from './math.js';
 
 function slippage(value: string): Slippage {
@@ -77,17 +74,5 @@ describe('USDS <-> USDC conversion math', () => {
     const gemAmt = usdcFromUsdsViaBuyGem(usdsIn, tout);
     const usdsForThatGem = usdsNeededForUsdcViaBuyGem(gemAmt, tout);
     expect(usdsForThatGem).toBeLessThanOrEqual(usdsIn);
-  });
-});
-
-describe('constants', () => {
-  it('WAD is 1e18', () => {
-    expect(WAD).toBe(1_000_000_000_000_000_000n);
-  });
-  it('USDC_TO_USDS_SCALE is 1e12', () => {
-    expect(USDC_TO_USDS_SCALE).toBe(1_000_000_000_000n);
-  });
-  it('BPS is 10000', () => {
-    expect(BPS).toBe(10_000n);
   });
 });

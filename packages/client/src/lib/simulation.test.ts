@@ -156,20 +156,6 @@ describe('simulateExecutionPlan', () => {
     }
   });
 
-  it('uses legacy gas price when EIP-1559 maxFeePerGas is absent', async () => {
-    const { client } = simulationClient({
-      estimateFeesPerGas: mockFn(async () => ({ gasPrice: 3n })),
-    });
-
-    const result = await simulateExecutionPlan(client, executionPlan(), ACCOUNT);
-
-    expect(result.isOk()).toBe(true);
-    if (result.isOk()) {
-      expect(result.value.feeData.gasPrice).toBe(3n);
-      expect(result.value.steps[0]?.result).toMatchObject({ estimatedNativeFee: 300n });
-    }
-  });
-
   it('preflights account binding before making RPC calls', async () => {
     const { client, publicClient } = simulationClient();
 
@@ -404,6 +390,7 @@ describe('simulation fee basis', () => {
     if (result.isOk()) {
       expect(result.value.feeData).toEqual({ gasPrice: 3n, source: 'rpc', basis: 'gas-price' });
       expect('maxFeePerGas' in result.value.feeData).toBe(false);
+      expect(result.value.steps[0]?.result).toMatchObject({ estimatedNativeFee: 300n });
     }
   });
 });
