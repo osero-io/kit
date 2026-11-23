@@ -14,7 +14,10 @@ import { ConfirmationError, type ExecutionFailureContext } from './errors.js';
 
 export type ViemReplacementReason = 'repriced' | 'cancelled' | 'replaced';
 
-/** What the adapter asked the wallet to send for a plan step. */
+/**
+ * What the adapter had sent for a plan step: the request, with any calldata
+ * viem appends before broadcasting it (a client `dataSuffix`).
+ */
 export type SubmittedTransaction = {
   readonly from: Address;
   readonly to: Address;
@@ -26,8 +29,9 @@ export type ViemReceiptOutcome = {
   readonly receipt: TransactionReceipt;
   /**
    * Present when the confirmed receipt belongs to a different transaction than
-   * the submitted one. `replaced` is also reported whenever a substitution
-   * cannot be proven to be a repricing, so an unexplained substitution is never
+   * the submitted one. When the submitted transaction is known, `replaced` is
+   * also reported whenever a substitution cannot be proven to be a repricing of
+   * it, so neither an unexplained substitution nor viem's own verdict is
    * mistaken for a harmless fee bump.
    */
   readonly replacement?: ViemReplacementReason;
@@ -98,7 +102,12 @@ let observationCount = 0;
  *
  * viem finds a replacement by reading the block that mined it, and resolves its
  * nested actions through the client it was given. Observing that read gives the
- * replacement's contents without any request of our own.
+ * replacement's contents without any request of our own. It does so whether or
+ * not it then calls `onReplaced`, as long as the wait is not given viem's
+ * `replacement` parameter: with it, viem 2.57.20 can find a replacement in its
+ * nonce slot without reading a block, and nothing would be observed (see
+ * `waitParameters`). A hash fixes a transaction's contents, so viem re-reading
+ * the replacement by hash after a reorg changes nothing.
  *
  * viem shares one poller between waits that have the same client `uid` and
  * hash, and only the first wait's client is used for the reads. The view
@@ -168,20 +177,21 @@ function leaveObservation(key: string, observation: Observation): void {
 }
 
 /**
- * Classifies a substitution viem returned without naming a reason.
+ * Classifies the transaction that confirmed in place of the submitted one.
  *
- * Before 2.57.12, viem only calls `onReplaced` when the replacement already has
- * enough confirmations in the block it is found in. With more than one
- * confirmation requested it keeps the replacement's receipt, waits for later
- * blocks, and then resolves without the callback. Later versions name the
- * replacement for any confirmation count, so this runs only on the older viem
- * the peer range still admits. The transaction viem found in the block
- * is therefore compared with what was submitted: the same sender, target,
- * calldata, and value under another hash is the same transaction at a
- * different fee. Anything else, including a transaction that was not observed,
- * is not a repricing.
+ * viem calls `onReplaced` for every confirmation count since 2.57.12. Before
+ * that, it calls it only when one confirmation is requested: with more, it
+ * resolves with the replacement's receipt without naming a reason. Whichever
+ * viem names, it reached its verdict by comparing the replacement with the
+ * transaction the node returns under the submitted hash, which is not
+ * necessarily what the adapter had sent. So a repricing is
+ * never taken on viem's word: the transaction viem found in the mined block is
+ * compared with what was submitted. The same sender, target, calldata, and
+ * value under another hash is the same transaction at a different fee.
+ * Anything else, including a transaction that was not observed, is not a
+ * repricing.
  */
-function classifyUnreportedReplacement(
+function classifyReplacement(
   mined: ObservedTransaction | undefined,
   submitted: SubmittedTransaction,
 ): ViemReplacementReason {
@@ -205,9 +215,14 @@ function classifyUnreportedReplacement(
  * that reused the nonce. Callers must therefore inspect `replacement` before
  * treating the receipt as confirmation of the submitted plan step.
  *
- * Pass `submitted` so a substitution viem does not explain can be checked
- * against what was sent. Without it, an unexplained substitution is `replaced`.
- * The check issues no request beyond the ones viem makes for the wait.
+ * Pass `submitted`, as broadcast, so the substitution is checked against it.
+ * With `submitted`, every substitution other than one viem names `cancelled` or
+ * `replaced` is compared with it, whether or not viem named a reason and for
+ * any confirmation count: only the same sender, target, calldata, and value is
+ * `repriced`. Pass `'wallet-built'` only for a transaction the wallet built,
+ * which leaves nothing to compare against: the reason viem names is taken, and
+ * a substitution viem does not explain is `replaced`. The check issues no
+ * request beyond the ones viem makes for the wait.
  */
 export async function waitForViemReceipt(
   client: ClientLike,
@@ -215,44 +230,41 @@ export async function waitForViemReceipt(
     readonly hash: Hex;
     readonly confirmations: number;
     readonly timeout?: number;
-    readonly submitted?: SubmittedTransaction;
+    readonly submitted: SubmittedTransaction | 'wallet-built';
   },
 ): Promise<ViemReceiptOutcome> {
-  let reason: ViemReplacementReason | undefined;
+  let named: ViemReplacementReason | undefined;
+  const onNamed = (reason: ViemReplacementReason) => {
+    named = reason;
+  };
   const { submitted } = args;
   const hash = args.hash.toLowerCase();
-  if (submitted === undefined) {
-    const receipt = await waitForTransactionReceipt(
-      client,
-      waitParameters(args, (named) => {
-        reason = named;
-      }),
-    );
-    if (reason === undefined && receipt.transactionHash.toLowerCase() !== hash) reason = 'replaced';
-    return reason === undefined ? { receipt } : { receipt, replacement: reason };
+  if (submitted === 'wallet-built') {
+    const receipt = await waitForTransactionReceipt(client, waitParameters(args, onNamed));
+    if (receipt.transactionHash.toLowerCase() === hash) return { receipt };
+    return { receipt, replacement: named ?? 'replaced' };
   }
   const key = `${String(client.uid)}\u0000${hash}`;
   const observation = joinObservation(client, key);
   try {
     const view = observingClient(client, submitted.from.toLowerCase(), observation);
-    const receipt = await waitForTransactionReceipt(
-      view,
-      waitParameters(args, (named) => {
-        reason = named;
-      }),
-    );
-    if (reason === undefined && receipt.transactionHash.toLowerCase() !== hash) {
-      reason = classifyUnreportedReplacement(
-        observation.observed.get(receipt.transactionHash.toLowerCase()),
-        submitted,
-      );
-    }
-    return reason === undefined ? { receipt } : { receipt, replacement: reason };
+    const receipt = await waitForTransactionReceipt(view, waitParameters(args, onNamed));
+    const replacementHash = receipt.transactionHash.toLowerCase();
+    if (replacementHash === hash) return { receipt };
+    // viem's `cancelled` and `replaced` already fail the step.
+    if (named === 'cancelled' || named === 'replaced') return { receipt, replacement: named };
+    return {
+      receipt,
+      replacement: classifyReplacement(observation.observed.get(replacementHash), submitted),
+    };
   } finally {
     leaveObservation(key, observation);
   }
 }
 
+// Never pass viem's `replacement` parameter: it lets viem find a replacement
+// without reading a block, which this module cannot observe, so every genuine
+// fee bump would fail closed as `replaced`.
 function waitParameters(
   args: { readonly hash: Hex; readonly confirmations: number; readonly timeout?: number },
   onNamed: (reason: ViemReplacementReason) => void,

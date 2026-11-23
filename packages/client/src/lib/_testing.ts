@@ -205,6 +205,34 @@ export function createMockClient(
   };
 }
 
+/** A transaction body as viem reads it from a block. */
+export type MinedTransactionFixture = {
+  readonly hash: `0x${string}`;
+  readonly from: string;
+  readonly to: string | null;
+  readonly input: string;
+  readonly value: bigint;
+};
+
+/**
+ * Models, inside a mocked `waitForTransactionReceipt`, how viem finds a
+ * replacement: it reads the block that mined it through the client it was
+ * given, then names a reason. The adapter verifies a repricing against that
+ * read, so a mock that names one without it models no viem version.
+ * `getBlock` is the mocked `viem/actions` export, which viem falls back to when
+ * the client has no `getBlock` of its own.
+ */
+export async function readReplacementBlock(
+  client: unknown,
+  getBlock: Mock<(client: unknown, input: unknown) => Promise<unknown>>,
+  mined: MinedTransactionFixture,
+): Promise<void> {
+  getBlock.mockResolvedValueOnce({ transactions: [mined] });
+  const input = { blockNumber: 124n, includeTransactions: true };
+  const own = (client as { readonly getBlock?: (input: unknown) => Promise<unknown> }).getBlock;
+  await (own === undefined ? getBlock(client, input) : own(input));
+}
+
 /**
  * A failure the shared adapter contract can ask a harness to inject. `step` is
  * the 1-based position of the transaction within one `execute` call.

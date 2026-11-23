@@ -7,6 +7,7 @@ import {
   numberToHex,
   publicActions,
   type Address,
+  type DataSuffix,
   type Hex,
   type PublicClient,
 } from 'viem';
@@ -30,6 +31,9 @@ import { waitForViemReceipt, type SubmittedTransaction } from './viemReceipt.js'
  * classification is tested against it too: `viemBefore2_57_12` runs the real
  * waiter but withholds `onReplaced` whenever more than one confirmation is
  * requested, which is exactly what that viem did (wevm/viem#5284).
+ *
+ * On either, a repricing is verified against what was submitted, whether viem
+ * named it or not.
  */
 const waiter = vi.hoisted(() => ({ viemBefore2_57_12: false }));
 
@@ -95,13 +99,32 @@ function rpcTransaction(hash: Hex, fields: Mined, blockNumber: bigint | null) {
 /**
  * A node on which the submitted transaction never mines. One block after the
  * start, a transaction from the same sender with the same nonce mines instead.
+ *
+ * With `speedsUpSent`, the node holds what it was sent under the submitted
+ * hash and mines that calldata again at another fee, as a wallet's speed-up
+ * does. Otherwise it holds `SUBMITTED_AS_MINED` and mines `replacement`,
+ * whatever it was sent.
  */
-function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint } = {}) {
+function scriptedNode(
+  replacement: Mined,
+  options: { readonly mineAfter?: bigint; readonly speedsUpSent?: boolean } = {},
+) {
   // The replacement mines one block after the start, or later when asked.
   let replacedAt = START_BLOCK + (options.mineAfter ?? 1n);
   let head = START_BLOCK - 1n;
   const calls: string[] = [];
   const sent: unknown[] = [];
+  const estimated: unknown[] = [];
+  const sentCalldata = (): Hex | undefined =>
+    options.speedsUpSent ? (sent[0] as { readonly data?: Hex } | undefined)?.data : undefined;
+  const original = (): Mined => {
+    const input = sentCalldata();
+    return input === undefined ? SUBMITTED_AS_MINED : { ...SUBMITTED_AS_MINED, input };
+  };
+  const mined = (): Mined => {
+    const input = sentCalldata();
+    return input === undefined ? replacement : { ...replacement, input };
+  };
   const request = async ({ method, params }: { method: string; params?: unknown }) => {
     calls.push(method);
     const [first] = (params ?? []) as readonly unknown[];
@@ -109,6 +132,7 @@ function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint
       case 'eth_chainId':
         return numberToHex(base.id);
       case 'eth_estimateGas':
+        estimated.push(first);
         return '0x5208';
       case 'eth_sendTransaction':
         sent.push(first);
@@ -120,7 +144,7 @@ function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint
       case 'eth_getTransactionByHash':
         // viem reads the replacement from its block, never by hash. Neither may the adapter.
         if (first !== ORIGINAL) throw new Error('unexpected read of a transaction by hash');
-        return rpcTransaction(ORIGINAL, SUBMITTED_AS_MINED, null);
+        return rpcTransaction(ORIGINAL, original(), null);
       case 'eth_getTransactionReceipt':
         if (first !== REPLACEMENT || head < replacedAt) return null;
         return {
@@ -129,7 +153,7 @@ function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint
           blockHash: `0x${'cc'.repeat(32)}`,
           transactionIndex: '0x0',
           from: ACCOUNT,
-          to: replacement.to,
+          to: mined().to,
           status: '0x1',
           gasUsed: '0x5208',
           cumulativeGasUsed: '0x5208',
@@ -149,7 +173,7 @@ function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint
           gasLimit: '0x1',
           gasUsed: '0x1',
           transactions:
-            number === replacedAt ? [rpcTransaction(REPLACEMENT, replacement, replacedAt)] : [],
+            number === replacedAt ? [rpcTransaction(REPLACEMENT, mined(), replacedAt)] : [],
         };
       }
       default:
@@ -160,6 +184,7 @@ function scriptedNode(replacement: Mined, options: { readonly mineAfter?: bigint
     transport: custom({ request }),
     calls,
     sent,
+    estimated,
     /** Mines the replacement in the next block. */
     mineNow(): void {
       replacedAt = head + 1n;
@@ -173,6 +198,16 @@ const CANCELLED: Mined = { to: ACCOUNT, input: '0x', value: 0n };
 const OTHER_CALL: Mined = { to: TARGET, input: '0xdeadbeef', value: 0n };
 const OTHER_VALUE: Mined = { to: TARGET, input: '0x1234', value: 1n };
 
+/**
+ * Submissions a repricing of `SUBMITTED_AS_MINED` does not match, although
+ * viem calls it a repricing: viem compares it with the transaction under the
+ * submitted hash, which is `SUBMITTED_AS_MINED` itself.
+ */
+const MISMATCHED_SUBMISSIONS = [
+  ['was sent by another account', { ...SUBMITTED, from: TARGET }],
+  ['carries other calldata than was submitted', { ...SUBMITTED, data: '0xdeadbeef' }],
+] as const satisfies readonly (readonly [string, SubmittedTransaction])[];
+
 function publicClient(replacement: Mined) {
   const node = scriptedNode(replacement);
   return {
@@ -180,6 +215,32 @@ function publicClient(replacement: Mined) {
     client: createPublicClient({ chain: base, transport: node.transport, pollingInterval: 1 }),
   };
 }
+
+/**
+ * Whether the installed viem names a replacement when more than one
+ * confirmation is requested, as it does since 2.57.12. The `viem peer range`
+ * workflow (`.github/workflows/viem-peer-range.yml`) runs this suite against
+ * older viem in the peer range as well; there, the tests whose premise is the
+ * newer behaviour are skipped and the emulated ones describe the real waiter.
+ */
+const installedViemNamesEveryReplacement = await (async () => {
+  let named = false;
+  await publicClient(REPRICED)
+    .client.waitForTransactionReceipt({
+      hash: ORIGINAL,
+      confirmations: 2,
+      // viem's default is 180 s: a probe that cannot see the replacement must
+      // fail fast and say why, not stall the file's import.
+      timeout: 5_000,
+      onReplaced: () => {
+        named = true;
+      },
+    })
+    .catch((cause: unknown) => {
+      throw new Error('viem probe failed: the scripted replacement was not detected', { cause });
+    });
+  return named;
+})();
 
 describe('waitForViemReceipt against the real viem waiter', () => {
   it('lets viem name a repricing when one confirmation is requested', async () => {
@@ -196,64 +257,97 @@ describe('waitForViemReceipt against the real viem waiter', () => {
     expect(node.calls.filter((method) => method === 'eth_getTransactionByHash')).toHaveLength(1);
   });
 
-  it.each([
-    ['a repricing', REPRICED, 'repriced'],
-    ['a cancellation', CANCELLED, 'cancelled'],
-    ['a different call', OTHER_CALL, 'replaced'],
-    ['the same call with another value', OTHER_VALUE, 'replaced'],
-  ] as const)(
-    'takes the reason viem names for %s when two confirmations are requested',
-    async (_name, replacement, expected) => {
-      const { client, node } = publicClient(replacement);
+  describe.skipIf(!installedViemNamesEveryReplacement)('since 2.57.12', () => {
+    it.each([
+      ['a repricing', REPRICED, 'repriced'],
+      ['a cancellation', CANCELLED, 'cancelled'],
+      ['a different call', OTHER_CALL, 'replaced'],
+      ['the same call with another value', OTHER_VALUE, 'replaced'],
+    ] as const)(
+      'agrees with the reason viem names for %s when two confirmations are requested',
+      async (_name, replacement, expected) => {
+        const { client, node } = publicClient(replacement);
 
-      const outcome = await waitForViemReceipt(client, {
-        hash: ORIGINAL,
-        confirmations: 2,
-        submitted: SUBMITTED,
-      });
-      // The premise, checked on a fresh node: since 2.57.12 viem's own callback
-      // names the replacement here, with the reason the adapter would have given.
-      let reportedByViem: string | undefined;
-      const plain = publicClient(replacement);
-      const direct = await plain.client.waitForTransactionReceipt({
-        hash: ORIGINAL,
-        confirmations: 2,
-        onReplaced: (response) => {
-          reportedByViem = response.reason;
-        },
-      });
+        const outcome = await waitForViemReceipt(client, {
+          hash: ORIGINAL,
+          confirmations: 2,
+          submitted: SUBMITTED,
+        });
+        // The premise, checked on a fresh node: since 2.57.12 viem's own callback
+        // names the replacement here, with the reason the adapter gives.
+        let reportedByViem: string | undefined;
+        const plain = publicClient(replacement);
+        const direct = await plain.client.waitForTransactionReceipt({
+          hash: ORIGINAL,
+          confirmations: 2,
+          onReplaced: (response) => {
+            reportedByViem = response.reason;
+          },
+        });
 
-      expect(direct.transactionHash).toBe(REPLACEMENT);
-      expect(reportedByViem).toBe(expected);
-      expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
-      expect(outcome.receipt.blockNumber).toBe(START_BLOCK + 1n);
-      expect(outcome.replacement).toBe(expected);
-      expect(node.calls).toEqual(plain.node.calls);
-    },
-  );
+        expect(direct.transactionHash).toBe(REPLACEMENT);
+        expect(reportedByViem).toBe(expected);
+        expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+        expect(outcome.receipt.blockNumber).toBe(START_BLOCK + 1n);
+        expect(outcome.replacement).toBe(expected);
+        expect(node.calls).toEqual(plain.node.calls);
+      },
+    );
+  });
 
-  // Documents present behaviour, it does not endorse it: viem compares the
-  // replacement with the transaction it read for the submitted hash, and the
-  // adapter does not cross-check that reason against `submitted`. The same
-  // cases fail closed as `replaced` on viem before 2.57.12 (see below).
-  it.each([
-    ['was sent by another account', { ...SUBMITTED, from: TARGET }],
-    ['carries other calldata', { ...SUBMITTED, data: '0xdeadbeef' }],
-  ] as const)(
-    'currently reports repricing from viem when the mined transaction differs from `submitted` because it %s',
-    async (_name, submitted) => {
-      const { client } = publicClient(REPRICED);
+  for (const confirmations of [1, 2]) {
+    describe.skipIf(confirmations > 1 && !installedViemNamesEveryReplacement)(
+      `with ${confirmations} confirmation${confirmations > 1 ? 's' : ''}`,
+      () => {
+        // viem compares the replacement with the transaction it read for the
+        // submitted hash, so it calls these repricings. The adapter compares the
+        // replacement with what it submitted, and they differ.
+        it.each(MISMATCHED_SUBMISSIONS)(
+          'fails closed although viem reports a repricing when the mined transaction %s',
+          async (_name, submitted) => {
+            const { client, node } = publicClient(REPRICED);
 
-      const outcome = await waitForViemReceipt(client, {
-        hash: ORIGINAL,
-        confirmations: 2,
-        submitted,
-      });
+            const outcome = await waitForViemReceipt(client, {
+              hash: ORIGINAL,
+              confirmations,
+              submitted,
+            });
+            // The premise, checked on a fresh node: viem itself names a repricing.
+            let reportedByViem: string | undefined;
+            const plain = publicClient(REPRICED);
+            await plain.client.waitForTransactionReceipt({
+              hash: ORIGINAL,
+              confirmations,
+              onReplaced: (response) => {
+                reportedByViem = response.reason;
+              },
+            });
 
-      expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
-      expect(outcome.replacement).toBe('repriced');
-    },
-  );
+            expect(reportedByViem).toBe('repriced');
+            expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+            expect(outcome.replacement).toBe('replaced');
+            // Cross-checking costs nothing: the node saw exactly the requests of a plain viem wait.
+            expect(node.calls).toEqual(plain.node.calls);
+          },
+        );
+
+        // Pins `waitForViemReceipt`'s `'wallet-built'` contract. Only the EIP-5792
+        // extra-confirmation wait (2+ confirmations) uses it.
+        it('takes a repricing viem names without the submitted transaction to compare against', async () => {
+          const { client } = publicClient(REPRICED);
+
+          const outcome = await waitForViemReceipt(client, {
+            hash: ORIGINAL,
+            confirmations,
+            submitted: 'wallet-built',
+          });
+
+          expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+          expect(outcome.replacement).toBe('repriced');
+        });
+      },
+    );
+  }
 });
 
 describe('waitForViemReceipt against the real viem waiter as it behaved before 2.57.12', () => {
@@ -380,35 +474,73 @@ describe('waitForViemReceipt against the real viem waiter as it behaved before 2
     expect(outcome.replacement).toBe('repriced');
   });
 
-  it('fails closed when the confirmed transaction was sent by another account', async () => {
+  it.each(
+    MISMATCHED_SUBMISSIONS.flatMap(([name, submitted]) =>
+      [1, 2].map((confirmations) => [name, confirmations, submitted] as const),
+    ),
+  )(
+    'fails closed when the mined transaction %s (%i confirmations)',
+    async (_name, confirmations, submitted) => {
+      const { client, node } = publicClient(REPRICED);
+
+      const outcome = await waitForViemReceipt(client, {
+        hash: ORIGINAL,
+        confirmations,
+        submitted,
+      });
+      // On this viem, one confirmation is named a repricing and two are not named at all.
+      let reportedByViem: string | undefined;
+      const plain = publicClient(REPRICED);
+      await waitForTransactionReceipt(plain.client, {
+        hash: ORIGINAL,
+        confirmations,
+        onReplaced: (response) => {
+          reportedByViem = response.reason;
+        },
+      });
+
+      expect(reportedByViem).toBe(confirmations === 1 ? 'repriced' : undefined);
+      expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+      expect(outcome.replacement).toBe('replaced');
+      expect(node.calls).toEqual(plain.node.calls);
+    },
+  );
+
+  // Pins `waitForViemReceipt`'s `'wallet-built'` contract. Only the EIP-5792
+  // extra-confirmation wait (2+ confirmations) uses it.
+  it('takes a repricing viem names with one confirmation without the submitted transaction', async () => {
     const { client } = publicClient(REPRICED);
 
     const outcome = await waitForViemReceipt(client, {
       hash: ORIGINAL,
-      confirmations: 2,
-      submitted: { ...SUBMITTED, from: TARGET },
+      confirmations: 1,
+      submitted: 'wallet-built',
     });
 
-    expect(outcome.replacement).toBe('replaced');
+    expect(outcome.replacement).toBe('repriced');
   });
 
   it('fails closed without the submitted transaction to compare against', async () => {
     const { client } = publicClient(REPRICED);
 
-    const outcome = await waitForViemReceipt(client, { hash: ORIGINAL, confirmations: 2 });
+    const outcome = await waitForViemReceipt(client, {
+      hash: ORIGINAL,
+      confirmations: 2,
+      submitted: 'wallet-built',
+    });
 
     expect(outcome.replacement).toBe('replaced');
   });
 });
 
-function plan() {
+function plan({ from = ACCOUNT, data = '0x1234' }: { from?: Address; data?: Hex } = {}) {
   const steps = ['one', 'two'].map((id) => {
     const step = createTransactionRequest({
       id,
       chainId: base.id,
-      from: ACCOUNT,
+      from,
       to: TARGET,
-      data: '0x1234',
+      data,
       operation: 'SWAP_EXACT_IN',
     });
     if (step.isErr()) throw step.error;
@@ -419,12 +551,17 @@ function plan() {
   return { single: result.value, steps };
 }
 
-function walletClient(replacement: Mined) {
-  const node = scriptedNode(replacement);
+function walletClient(
+  replacement: Mined,
+  account: Address = ACCOUNT,
+  options: { readonly dataSuffix?: DataSuffix; readonly speedsUpSent?: boolean } = {},
+) {
+  const node = scriptedNode(replacement, { speedsUpSent: options.speedsUpSent ?? false });
   return {
     node,
     wallet: createWalletClient({
-      account: ACCOUNT,
+      ...(options.dataSuffix === undefined ? {} : { dataSuffix: options.dataSuffix }),
+      account,
       chain: base,
       transport: node.transport,
       pollingInterval: 1,
@@ -547,3 +684,184 @@ describe.each(WAITERS)('Privy adapter with multiple confirmations against %s', (
     }
   });
 });
+
+/**
+ * What an adapter submits when the transaction that mines under its hash is
+ * not what it asked for. viem calls the replacement of that transaction a
+ * repricing; the adapter must not.
+ */
+const MISMATCHED_STEPS: readonly (readonly [string, { from?: Address; data?: Hex }])[] = [
+  ['the wallet sent from another account', { from: TARGET }],
+  ['the wallet sent other calldata', { data: '0xdeadbeef' }],
+];
+
+const MISMATCH_CASES = MISMATCHED_STEPS.flatMap(([name, step]) =>
+  [1, 2].map((confirmations) => [name, confirmations, step] as const),
+);
+
+function expectReplacementFailure(result: Awaited<ReturnType<typeof sendWith>>): void {
+  expect(result.isErr()).toBe(true);
+  if (result.isErr()) {
+    expect(result.error).toBeInstanceOf(ConfirmationError);
+    expect(result.error.message).toBe(
+      `Transaction ${ORIGINAL} was replaced and cannot be treated as this plan step`,
+    );
+    if (result.error instanceof ConfirmationError) {
+      expect(result.error.execution).toMatchObject({
+        stage: 'replacement',
+        stepId: 'one',
+        hash: ORIGINAL,
+        completed: [],
+      });
+    }
+  }
+}
+
+describe.each(WAITERS)('adapters cross-checking a repricing against %s', (_name, older) => {
+  if (older) emulateViemBefore2_57_12();
+
+  it.each([1, 2])(
+    'viem: confirms a genuine repricing (%i confirmations)',
+    async (confirmations) => {
+      const { wallet } = walletClient(REPRICED);
+
+      const result = await sendWith(wallet, plan().single, { confirmations });
+
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) {
+        expect(result.value.transactions[0]?.replacement).toEqual({
+          reason: 'repriced',
+          originalHash: ORIGINAL,
+          replacementHash: REPLACEMENT,
+        });
+      }
+    },
+  );
+
+  it.each(MISMATCH_CASES)(
+    'viem: fails at the replacement stage when %s (%i confirmations)',
+    async (_case, confirmations, step) => {
+      const { wallet, node } = walletClient(REPRICED, step.from ?? ACCOUNT);
+      const twoSteps = createExecutionPlan({ steps: plan(step).steps });
+      if (twoSteps.isErr()) throw twoSteps.error;
+
+      const result = await sendWith(wallet, twoSteps.value, { confirmations });
+
+      expectReplacementFailure(result);
+      expect(node.sent).toHaveLength(1);
+    },
+  );
+
+  it.each(MISMATCH_CASES)(
+    'Privy: fails at the replacement stage when %s (%i confirmations)',
+    async (_case, confirmations, step) => {
+      const sendTransaction = vi.fn<() => Promise<{ hash: Hex }>>(async () => ({ hash: ORIGINAL }));
+      const privy = {
+        wallets: () => ({ ethereum: () => ({ sendTransaction }) }),
+      } as unknown as PrivyClient;
+      const { client } = publicClient(REPRICED);
+      const twoSteps = createExecutionPlan({ steps: plan(step).steps });
+      if (twoSteps.isErr()) throw twoSteps.error;
+
+      const result = await sendWithPrivy(
+        privy,
+        { id: 'wallet-1', address: step.from ?? ACCOUNT },
+        twoSteps.value,
+        {
+          chainId: base.id,
+          receiptClient: client as unknown as PublicClient,
+          idempotencyKeys: { one: 'key-one', two: 'key-two' },
+          confirmations,
+        },
+      );
+
+      expectReplacementFailure(result);
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    },
+  );
+});
+
+const SUFFIX: Hex = '0xcafe';
+
+/**
+ * Whether the installed viem appends a wallet client's `dataSuffix` to the
+ * calldata it sends, as it does since 2.45.0. Older viem in the peer range
+ * ignores the option, so a suffix never reaches the wire there. The send makes
+ * one request to the scripted node and no polling, so it needs no timeout.
+ */
+const installedViemAppendsDataSuffix = await (async () => {
+  const { wallet, node } = walletClient(REPRICED, ACCOUNT, { dataSuffix: SUFFIX });
+  await wallet.sendTransaction({ to: TARGET, data: '0x1234' }).catch((cause: unknown) => {
+    throw new Error('viem probe failed: the scripted node did not accept the send', { cause });
+  });
+  return (node.sent[0] as { readonly data?: Hex }).data === `0x1234${SUFFIX.slice(2)}`;
+})();
+
+const SUFFIXED_CASES = (
+  [
+    ['a string', SUFFIX],
+    ['a { value } object', { value: SUFFIX }],
+  ] as const
+).flatMap(([form, dataSuffix]) =>
+  [1, 2].map((confirmations) => [form, confirmations, dataSuffix] as const),
+);
+
+describe.each(WAITERS)(
+  'viem adapter with a dataSuffix wallet client against %s',
+  (_name, older) => {
+    if (older) emulateViemBefore2_57_12();
+
+    // A builder code (ERC-8021) appended by viem is part of what was broadcast,
+    // so the wallet's speed-up carries it too.
+    it.each(SUFFIXED_CASES)(
+      'confirms a genuine repricing with the suffix as %s (%i confirmations)',
+      async (_form, confirmations, dataSuffix) => {
+        const { wallet, node } = walletClient(REPRICED, ACCOUNT, {
+          dataSuffix,
+          speedsUpSent: true,
+        });
+
+        const result = await sendWith(wallet, plan().single, { confirmations });
+
+        expect(result.isOk()).toBe(true);
+        if (result.isOk()) {
+          expect(result.value.transactions[0]).toMatchObject({
+            submittedHash: ORIGINAL,
+            hash: REPLACEMENT,
+            replacement: {
+              reason: 'repriced',
+              originalHash: ORIGINAL,
+              replacementHash: REPLACEMENT,
+            },
+          });
+        }
+        // On viem without `dataSuffix`, nothing is appended, by viem or by the adapter.
+        const broadcast = (node.sent[0] as { readonly data?: Hex }).data;
+        expect(broadcast).toBe(
+          installedViemAppendsDataSuffix ? `0x1234${SUFFIX.slice(2)}` : '0x1234',
+        );
+        // The gas is estimated for the calldata that is broadcast, in one request.
+        expect(node.estimated).toEqual([expect.objectContaining({ data: broadcast })]);
+        expect(node.sent).toHaveLength(1);
+      },
+    );
+
+    describe.skipIf(!installedViemAppendsDataSuffix)('since viem 2.45.0', () => {
+      // The node holds the calldata without the suffix under the submitted hash,
+      // so viem calls the replacement a repricing. It is not what was broadcast.
+      it.each(SUFFIXED_CASES)(
+        'fails closed when the replacement mined without the suffix given as %s (%i confirmations)',
+        async (_form, confirmations, dataSuffix) => {
+          const { wallet, node } = walletClient(REPRICED, ACCOUNT, { dataSuffix });
+          const twoSteps = createExecutionPlan({ steps: plan().steps });
+          if (twoSteps.isErr()) throw twoSteps.error;
+
+          const result = await sendWith(wallet, twoSteps.value, { confirmations });
+
+          expectReplacementFailure(result);
+          expect(node.sent).toHaveLength(1);
+        },
+      );
+    });
+  },
+);

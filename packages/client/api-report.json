@@ -50,7 +50,7 @@
     "dist/lib/types.d.ts": "f4eb0a658a10dcea739d29c62a088565934b31588d5ca9466beac866aa07c175",
     "dist/lib/validation.d.ts": "bff7c05e30c79b4583edbed06ed7ecf03384869b869a9940d7954e15b157c375",
     "dist/lib/version.d.ts": "4269369be11b9185926d4378e9833ace91b3cd5a85c6a81f9a3451cde49defc8",
-    "dist/lib/viemReceipt.d.ts": "952ad1962febf7b9d41ee4bf1499830937be04e83fe259a9e9750f7948d9be65",
+    "dist/lib/viemReceipt.d.ts": "d86d666aa1d72582fc8a1f32883938f3c2b749ab005351c5a7167ade0c1d0cd3",
     "dist/privy.d.ts": "10aca54d313e6ea8d976b57ee02273e672f434e124669368737ab01c8b0d689d",
     "dist/viem.d.ts": "39e60d5c5b724573f4b9ecc43236f6bdb2cee06cdb7d764687babd02fd1ad199"
   }

@@ -6,8 +6,10 @@ import { type Mock, vi } from 'vitest';
 import {
   defineAdapterContract,
   mockFn,
+  readReplacementBlock,
   type AdapterContractFactory,
   type AdapterFault,
+  type MinedTransactionFixture,
 } from './lib/_testing.js';
 import {
   ConfirmationError,
@@ -108,7 +110,7 @@ function injectPrivyFault(state: PrivyHarnessState, fault: AdapterFault, step: n
     return;
   }
   let waited = 0;
-  actions.waitForTransactionReceipt.mockImplementation(async (_client, input) => {
+  actions.waitForTransactionReceipt.mockImplementation(async (client, input) => {
     waited += 1;
     const receipt = {
       status: 'success',
@@ -120,9 +122,32 @@ function injectPrivyFault(state: PrivyHarnessState, fault: AdapterFault, step: n
     if (waited !== step) return receipt;
     if (fault.kind === 'timeout') throw new Error('receipt timeout');
     if (fault.kind === 'revert') return { ...receipt, status: 'reverted' };
+    const replacementHash = hash(9_000 + step);
+    // A repricing re-sends the step that was just sent, at another fee.
+    const { transaction } = sentPrivyTransaction(state);
+    await readReplacementBlock(client, actions.getBlock, {
+      hash: replacementHash,
+      from: transaction.from,
+      to: transaction.to,
+      input: transaction.data,
+      value: BigInt(transaction.value),
+    });
     input.onReplaced?.({ reason: fault.kind });
-    return { ...receipt, transactionHash: hash(9_000 + step) };
+    return { ...receipt, transactionHash: replacementHash };
   });
+}
+
+/** The transaction of the last Wallet API send. */
+function sentPrivyTransaction(state: PrivyHarnessState) {
+  const [, request] = state.sendTransaction.mock.lastCall as [
+    string,
+    {
+      readonly params: {
+        readonly transaction: { from: Hex; to: Hex; data: Hex; value: Hex };
+      };
+    },
+  ];
+  return request.params;
 }
 
 const factory: AdapterContractFactory = (configuration = {}) => {
@@ -527,9 +552,25 @@ describe('Privy stage behavior', () => {
   });
 });
 
-function replaceFirstReceipt(reason: string | undefined, replacementHash: Hex): void {
-  actions.waitForTransactionReceipt.mockImplementationOnce(async (_client, input) => {
-    if (reason !== undefined) input.onReplaced?.({ reason });
+/** The first step of `twoStepPlan`, as viem reads it from a block. */
+const FIRST_STEP_MINED = { from: ACCOUNT, to: TARGET, input: '0x1234', value: 0n } as const;
+
+/**
+ * Models viem naming a replacement: it reads the block that mined it through
+ * the client it was given, `onReplaced` fires, then the wait resolves with the
+ * replacement's receipt. `mined` is what that block holds under the
+ * replacement's hash; by default the first step at another fee.
+ */
+function replaceFirstReceipt(
+  reason: string | undefined,
+  replacementHash: Hex,
+  mined: Omit<MinedTransactionFixture, 'hash'> = FIRST_STEP_MINED,
+): void {
+  actions.waitForTransactionReceipt.mockImplementationOnce(async (client, input) => {
+    if (reason !== undefined) {
+      await readReplacementBlock(client, actions.getBlock, { hash: replacementHash, ...mined });
+      input.onReplaced?.({ reason });
+    }
     return {
       status: 'success',
       transactionHash: replacementHash,
@@ -587,6 +628,31 @@ describe('Privy transaction replacement', () => {
     }
     expect(state.sendTransaction).toHaveBeenCalledTimes(2);
   });
+
+  it.each([1, 2])(
+    'fails closed when viem names a repricing of other calldata with %i confirmations',
+    async (confirmations) => {
+      const state = makePrivy();
+      replaceFirstReceipt('repriced', hash(99), { ...FIRST_STEP_MINED, input: '0xdead' });
+
+      const result = await sendWith(state.privy, wallet, twoStepPlan(), {
+        ...options,
+        confirmations,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error).toBeInstanceOf(ConfirmationError);
+        expect(result.error.message).toBe(
+          `Transaction ${hash(1)} was replaced and cannot be treated as this plan step`,
+        );
+        if (result.error instanceof ConfirmationError) {
+          expect(result.error.execution).toMatchObject({ stage: 'replacement', hash: hash(1) });
+        }
+      }
+      expect(state.sendTransaction).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('accepts an unexplained substitution that is the same transaction at another fee', async () => {
     const state = makePrivy();

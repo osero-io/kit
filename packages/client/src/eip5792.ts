@@ -717,6 +717,9 @@ async function executeAtomicBatch(
       hash: submittedHash,
       confirmations: execution.options.confirmations,
       timeout: execution.options.confirmationTimeoutMs,
+      // The wallet built the batch transaction, so there is nothing to compare a
+      // substitute against: a repricing viem reports is accepted as such.
+      submitted: 'wallet-built',
     });
     receipt = waited.receipt;
     replacement = waited.replacement;
