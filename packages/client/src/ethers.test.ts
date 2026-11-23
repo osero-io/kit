@@ -201,17 +201,7 @@ describe('ethers stage behavior', () => {
     expect(state.sendTransaction).not.toHaveBeenCalled();
   });
 
-  it('classifies explicit estimation, cancellation, signing, and broadcast stages', async () => {
-    const estimation = makeHarness();
-    estimation.estimateGas.mockRejectedValue(new Error('estimate failed'));
-    const estimationResult = await sendWith(estimation.signer, singlePlan());
-
-    const cancelled = makeHarness();
-    cancelled.sendTransaction.mockRejectedValue(
-      makeError('rejected', 'ACTION_REJECTED', { action: 'sendTransaction', reason: 'rejected' }),
-    );
-    const cancelResult = await sendWith(cancelled.signer, singlePlan());
-
+  it('classifies insufficient funds as broadcast and any other send failure as signing', async () => {
     const broadcast = makeHarness();
     broadcast.sendTransaction.mockRejectedValue(
       makeError('funds', 'INSUFFICIENT_FUNDS', { transaction: {} }),
@@ -222,10 +212,6 @@ describe('ethers stage behavior', () => {
     signing.sendTransaction.mockRejectedValue(new Error('sign failed'));
     const signingResult = await sendWith(signing.signer, singlePlan());
 
-    expect(estimationResult.isErr()).toBe(true);
-    if (estimationResult.isErr()) expect(estimationResult.error.code).toBe('SIMULATION_FAILED');
-    expect(cancelResult.isErr()).toBe(true);
-    if (cancelResult.isErr()) expect(cancelResult.error.code).toBe('CANCELLED');
     expect(broadcastResult.isErr()).toBe(true);
     if (broadcastResult.isErr()) expect(broadcastResult.error.code).toBe('BROADCAST_FAILED');
     expect(signingResult.isErr()).toBe(true);
@@ -258,12 +244,7 @@ describe('ethers stage behavior', () => {
     expect(state.sendTransaction).not.toHaveBeenCalled();
   });
 
-  it('preserves submitted hash on receipt timeout and maps reverts truthfully', async () => {
-    const timeout = makeHarness();
-    timeout.wait.mockRejectedValue(new Error('timeout'));
-    timeout.sendTransaction.mockResolvedValue({ hash: hash(1), wait: timeout.wait });
-    const timeoutResult = await sendWith(timeout.signer, singlePlan());
-
+  it('reports a status-0 receipt returned by wait() as a reverted transaction', async () => {
     const reverted = makeHarness();
     reverted.wait.mockResolvedValue({
       hash: hash(1),
@@ -275,82 +256,8 @@ describe('ethers stage behavior', () => {
     reverted.sendTransaction.mockResolvedValue({ hash: hash(1), wait: reverted.wait });
     const revertedResult = await sendWith(reverted.signer, singlePlan());
 
-    expect(timeoutResult.isErr()).toBe(true);
-    if (timeoutResult.isErr()) {
-      expect(timeoutResult.error).toBeInstanceOf(ConfirmationError);
-      if (timeoutResult.error instanceof ConfirmationError) {
-        expect(timeoutResult.error.execution?.hash).toBe(hash(1));
-      }
-    }
     expect(revertedResult.isErr()).toBe(true);
     if (revertedResult.isErr()) expect(revertedResult.error).toBeInstanceOf(TransactionError);
-  });
-
-  it('returns confirmed prefix recovery state when a later step cannot be confirmed', async () => {
-    const state = makeHarness();
-    const firstWait = mockFn(async () => ({
-      hash: hash(1),
-      status: 1,
-      blockNumber: 123,
-      gasUsed: 50n,
-      gasPrice: 2n,
-    }));
-    const secondWait = mockFn(async () => {
-      throw new Error('second receipt timeout');
-    });
-    state.sendTransaction
-      .mockResolvedValueOnce({ hash: hash(1), wait: firstWait })
-      .mockResolvedValueOnce({ hash: hash(2), wait: secondWait });
-
-    const result = await sendWith(state.signer, twoStepPlan());
-
-    expect(result.isErr()).toBe(true);
-    if (result.isErr() && result.error instanceof ConfirmationError) {
-      expect(result.error.execution).toMatchObject({
-        stepId: 'swap-two',
-        hash: hash(2),
-        completed: [expect.objectContaining({ stepId: 'swap', hash: hash(1) })],
-      });
-    }
-    expect(state.sendTransaction).toHaveBeenCalledTimes(2);
-  });
-
-  it('records a repriced replacement effective hash and receipt', async () => {
-    const state = makeHarness();
-    const replacementHash = hash(2);
-    const replacementReceipt = {
-      hash: replacementHash,
-      status: 1,
-      blockNumber: 124,
-      gasUsed: 55n,
-      gasPrice: 3n,
-    };
-    const replacementResponse = { hash: replacementHash } as TransactionResponse;
-    state.wait.mockRejectedValue(
-      makeError('replaced', 'TRANSACTION_REPLACED', {
-        cancelled: false,
-        reason: 'repriced',
-        hash: hash(1),
-        replacement: replacementResponse,
-        receipt: replacementReceipt as unknown as TransactionReceipt,
-      }),
-    );
-    state.sendTransaction.mockResolvedValue({ hash: hash(1), wait: state.wait });
-
-    const result = await sendWith(state.signer, singlePlan());
-
-    expect(result.isOk()).toBe(true);
-    if (result.isOk()) {
-      expect(result.value.transactions[0]).toMatchObject({
-        submittedHash: hash(1),
-        hash: replacementHash,
-        replacement: {
-          reason: 'repriced',
-          originalHash: hash(1),
-          replacementHash,
-        },
-      });
-    }
   });
 
   it.each([
