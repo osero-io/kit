@@ -12,7 +12,9 @@ import { vi } from 'vitest';
 import {
   defineAdapterContract,
   type AdapterContractFactory,
+  readReplacementBlock,
   type AdapterFault,
+  type MinedTransactionFixture,
 } from './lib/_testing.js';
 import { ConfirmationError, TransactionError } from './lib/errors.js';
 import { createExecutionPlan, createTransactionRequest } from './lib/plan.js';
@@ -81,6 +83,14 @@ async function successfulReceipt(_client: unknown, input: ReceiptWaitInput) {
   };
 }
 
+/** The fields of a mocked viem `sendTransaction` call the fault injection reads. */
+type SentTransaction = {
+  readonly account: { readonly address: Hex };
+  readonly to: Hex;
+  readonly data: Hex;
+  readonly value: bigint;
+};
+
 /** Injects one failure into the mocked viem actions for the shared adapter contract. */
 function injectViemFault(fault: AdapterFault, step: number): void {
   const nth = <Args extends unknown[], Value>(
@@ -132,8 +142,18 @@ function injectViemFault(fault: AdapterFault, step: number): void {
     if (fault.kind === 'revert') {
       return { ...(await successfulReceipt(client, input)), status: 'reverted' };
     }
+    const replacementHash = hash(9_000 + step);
+    // A repricing re-sends the step that was just sent, at another fee.
+    const sent = actions.sendTransaction.mock.lastCall?.[1] as SentTransaction;
+    await readReplacementBlock(client, actions.getBlock, {
+      hash: replacementHash,
+      from: sent.account.address,
+      to: sent.to,
+      input: sent.data,
+      value: sent.value,
+    });
     input.onReplaced?.({ reason: fault.kind });
-    return { ...(await successfulReceipt(client, input)), transactionHash: hash(9_000 + step) };
+    return { ...(await successfulReceipt(client, input)), transactionHash: replacementHash };
   });
 }
 
@@ -325,14 +345,26 @@ function twoStepPlan() {
   return valuePlan.value;
 }
 
-/** Models viem: `onReplaced` fires, then the wait resolves with the replacement's receipt. */
+/** The first step of `twoStepPlan`, as viem reads it from a block. */
+const FIRST_STEP_MINED = { from: ACCOUNT, to: TARGET, input: '0x01', value: 0n } as const;
+
+/**
+ * Models viem naming a replacement: it reads the block that mined it through
+ * the client it was given, `onReplaced` fires, then the wait resolves with the
+ * replacement's receipt. `mined` is what that block holds under the
+ * replacement's hash; by default the first step at another fee.
+ */
 function replaceFirstReceipt(
   reason: string | undefined,
   replacementHash: Hex,
   status = 'success',
+  mined: Omit<MinedTransactionFixture, 'hash'> = FIRST_STEP_MINED,
 ): void {
-  actions.waitForTransactionReceipt.mockImplementationOnce(async (_client, input) => {
-    if (reason !== undefined) input.onReplaced?.({ reason });
+  actions.waitForTransactionReceipt.mockImplementationOnce(async (client, input) => {
+    if (reason !== undefined) {
+      await readReplacementBlock(client, actions.getBlock, { hash: replacementHash, ...mined });
+      input.onReplaced?.({ reason });
+    }
     return {
       status,
       transactionHash: replacementHash,
@@ -527,7 +559,78 @@ describe('viem transaction replacement', () => {
       const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { confirmations: 2 });
 
       expect(result.isOk()).toBe(true);
-      expect(actions.getBlock).not.toHaveBeenCalled();
+      // The only block read is the one the waiter made itself.
+      expect(actions.getBlock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe.each([1, 2])('when viem names a repricing with %i confirmations', (confirmations) => {
+    it('accepts it when the mined transaction is the step that was sent', async () => {
+      replaceFirstReceipt('repriced', hash(99));
+
+      const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { confirmations });
+
+      expect(result.isOk()).toBe(true);
+      if (result.isOk()) {
+        expect(result.value.transactions[0]?.replacement).toEqual({
+          reason: 'repriced',
+          originalHash: hash(1),
+          replacementHash: hash(99),
+        });
+      }
+      expect(actions.getBlock).toHaveBeenCalledTimes(1);
+      expect(actions.sendTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    // viem compares the replacement with what the node holds under the
+    // submitted hash, not with what the adapter asked the wallet to send.
+    it.each([
+      ['another sender', { ...FIRST_STEP_MINED, from: OTHER }, 'replaced'],
+      ['other calldata', { ...FIRST_STEP_MINED, input: '0x02' }, 'replaced'],
+      ['another target', { ...FIRST_STEP_MINED, to: OTHER }, 'replaced'],
+      ['another value', { ...FIRST_STEP_MINED, value: 1n }, 'replaced'],
+      ['a cancellation', { ...FIRST_STEP_MINED, to: ACCOUNT, input: '0x' }, 'cancelled'],
+    ] as const)(
+      'fails closed when the mined transaction has %s and broadcasts nothing further',
+      async (_name, mined, reason) => {
+        replaceFirstReceipt('repriced', hash(99), 'success', mined);
+
+        const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { confirmations });
+
+        expect(result.isErr()).toBe(true);
+        if (result.isErr()) {
+          expect(result.error).toBeInstanceOf(ConfirmationError);
+          expect(result.error.message).toBe(
+            `Transaction ${hash(1)} was ${reason} and cannot be treated as this plan step`,
+          );
+          if (result.error instanceof ConfirmationError) {
+            expect(result.error.execution).toMatchObject({
+              stage: 'replacement',
+              hash: hash(1),
+              completed: [],
+            });
+          }
+        }
+        expect(actions.sendTransaction).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('fails closed when the waiter never read the block that mined the replacement', async () => {
+      actions.waitForTransactionReceipt.mockImplementationOnce(async (_client, input) => {
+        input.onReplaced?.({ reason: 'repriced' });
+        return { status: 'success', transactionHash: hash(99), blockNumber: 124n };
+      });
+
+      const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan(), { confirmations });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr() && result.error instanceof ConfirmationError) {
+        expect(result.error.execution?.stage).toBe('replacement');
+        expect(result.error.message).toBe(
+          `Transaction ${hash(1)} was replaced and cannot be treated as this plan step`,
+        );
+      }
+      expect(actions.sendTransaction).toHaveBeenCalledTimes(1);
     });
   });
 

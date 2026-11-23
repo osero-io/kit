@@ -98,7 +98,9 @@ let observationCount = 0;
  *
  * viem finds a replacement by reading the block that mined it, and resolves its
  * nested actions through the client it was given. Observing that read gives the
- * replacement's contents without any request of our own.
+ * replacement's contents without any request of our own. It does so whether or
+ * not it then calls `onReplaced`. A hash fixes a transaction's contents, so
+ * viem re-reading the replacement by hash after a reorg changes nothing.
  *
  * viem shares one poller between waits that have the same client `uid` and
  * hash, and only the first wait's client is used for the reads. The view
@@ -168,20 +170,21 @@ function leaveObservation(key: string, observation: Observation): void {
 }
 
 /**
- * Classifies a substitution viem returned without naming a reason.
+ * Classifies the transaction that confirmed in place of the submitted one.
  *
- * Before 2.57.12, viem only calls `onReplaced` when the replacement already has
- * enough confirmations in the block it is found in. With more than one
- * confirmation requested it keeps the replacement's receipt, waits for later
- * blocks, and then resolves without the callback. Later versions name the
- * replacement for any confirmation count, so this runs only on the older viem
- * the peer range still admits. The transaction viem found in the block
- * is therefore compared with what was submitted: the same sender, target,
- * calldata, and value under another hash is the same transaction at a
- * different fee. Anything else, including a transaction that was not observed,
- * is not a repricing.
+ * viem calls `onReplaced` for every confirmation count since 2.57.12. Before
+ * that, it calls it only when one confirmation is requested: with more, it
+ * resolves with the replacement's receipt without naming a reason. Whichever
+ * viem names, it reached its verdict by comparing the replacement with the
+ * transaction the node returns under the submitted hash, which is not
+ * necessarily what the adapter asked the wallet to send. So a repricing is
+ * never taken on viem's word: the transaction viem found in the mined block is
+ * compared with what was submitted. The same sender, target, calldata, and
+ * value under another hash is the same transaction at a different fee.
+ * Anything else, including a transaction that was not observed, is not a
+ * repricing.
  */
-function classifyUnreportedReplacement(
+function classifyReplacement(
   mined: ObservedTransaction | undefined,
   submitted: SubmittedTransaction,
 ): ViemReplacementReason {
@@ -218,36 +221,35 @@ export async function waitForViemReceipt(
     readonly submitted?: SubmittedTransaction;
   },
 ): Promise<ViemReceiptOutcome> {
-  let reason: ViemReplacementReason | undefined;
+  let named: ViemReplacementReason | undefined;
+  const onNamed = (reason: ViemReplacementReason) => {
+    named = reason;
+  };
   const { submitted } = args;
   const hash = args.hash.toLowerCase();
+  // Without `submitted` (the EIP-5792 batch transaction, which the wallet
+  // built) there is nothing to check against, so a repricing viem names is
+  // reported as such.
   if (submitted === undefined) {
-    const receipt = await waitForTransactionReceipt(
-      client,
-      waitParameters(args, (named) => {
-        reason = named;
-      }),
-    );
-    if (reason === undefined && receipt.transactionHash.toLowerCase() !== hash) reason = 'replaced';
-    return reason === undefined ? { receipt } : { receipt, replacement: reason };
+    const receipt = await waitForTransactionReceipt(client, waitParameters(args, onNamed));
+    if (receipt.transactionHash.toLowerCase() === hash) return { receipt };
+    return { receipt, replacement: named ?? 'replaced' };
   }
   const key = `${String(client.uid)}\u0000${hash}`;
   const observation = joinObservation(client, key);
   try {
     const view = observingClient(client, submitted.from.toLowerCase(), observation);
-    const receipt = await waitForTransactionReceipt(
-      view,
-      waitParameters(args, (named) => {
-        reason = named;
-      }),
-    );
-    if (reason === undefined && receipt.transactionHash.toLowerCase() !== hash) {
-      reason = classifyUnreportedReplacement(
-        observation.observed.get(receipt.transactionHash.toLowerCase()),
-        submitted,
-      );
-    }
-    return reason === undefined ? { receipt } : { receipt, replacement: reason };
+    const receipt = await waitForTransactionReceipt(view, waitParameters(args, onNamed));
+    const replacementHash = receipt.transactionHash.toLowerCase();
+    if (replacementHash === hash) return { receipt };
+    // viem's `cancelled` and `replaced` already fail the step. A repricing,
+    // named or not and for any confirmation count, must match what was
+    // submitted.
+    if (named === 'cancelled' || named === 'replaced') return { receipt, replacement: named };
+    return {
+      receipt,
+      replacement: classifyReplacement(observation.observed.get(replacementHash), submitted),
+    };
   } finally {
     leaveObservation(key, observation);
   }

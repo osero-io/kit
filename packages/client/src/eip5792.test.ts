@@ -13,6 +13,7 @@ import { sendWith, supportsAtomicBatch } from './eip5792.js';
 import {
   defineAdapterContract,
   type AdapterContractFactory,
+  readReplacementBlock,
   type AdapterFault,
 } from './lib/_testing.js';
 import {
@@ -159,6 +160,14 @@ async function successfulReceipt(_client: unknown, input: ReceiptWaitInput) {
   };
 }
 
+/** The fields of a mocked viem `sendTransaction` call the fault injection reads. */
+type SentTransaction = {
+  readonly account: { readonly address: Hex };
+  readonly to: Hex;
+  readonly data: Hex;
+  readonly value: bigint;
+};
+
 /** Injects one failure into the mocked viem actions for the shared adapter contract. */
 function injectViemFault(fault: AdapterFault, step: number): void {
   const nth = <Args extends unknown[], Value>(
@@ -210,8 +219,18 @@ function injectViemFault(fault: AdapterFault, step: number): void {
     if (fault.kind === 'revert') {
       return { ...(await successfulReceipt(client, input)), status: 'reverted' };
     }
+    const replacementHash = hash(9_000 + step);
+    // A repricing re-sends the step that was just sent, at another fee.
+    const sent = actions.sendTransaction.mock.lastCall?.[1] as SentTransaction;
+    await readReplacementBlock(client, actions.getBlock, {
+      hash: replacementHash,
+      from: sent.account.address,
+      to: sent.to,
+      input: sent.data,
+      value: sent.value,
+    });
     input.onReplaced?.({ reason: fault.kind });
-    return { ...(await successfulReceipt(client, input)), transactionHash: hash(9_000 + step) };
+    return { ...(await successfulReceipt(client, input)), transactionHash: replacementHash };
   });
 }
 
