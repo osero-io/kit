@@ -103,8 +103,11 @@ let observationCount = 0;
  * viem finds a replacement by reading the block that mined it, and resolves its
  * nested actions through the client it was given. Observing that read gives the
  * replacement's contents without any request of our own. It does so whether or
- * not it then calls `onReplaced`. A hash fixes a transaction's contents, so
- * viem re-reading the replacement by hash after a reorg changes nothing.
+ * not it then calls `onReplaced`, as long as the wait is not given viem's
+ * `replacement` parameter: with it, viem 2.57.20 can find a replacement in its
+ * nonce slot without reading a block, and nothing would be observed (see
+ * `waitParameters`). A hash fixes a transaction's contents, so viem re-reading
+ * the replacement by hash after a reorg changes nothing.
  *
  * viem shares one poller between waits that have the same client `uid` and
  * hash, and only the first wait's client is used for the reads. The view
@@ -216,9 +219,10 @@ function classifyReplacement(
  * With `submitted`, every substitution other than one viem names `cancelled` or
  * `replaced` is compared with it, whether or not viem named a reason and for
  * any confirmation count: only the same sender, target, calldata, and value is
- * `repriced`. Without `submitted`, the reason viem names is taken, and a
- * substitution viem does not explain is `replaced`. The check issues no request
- * beyond the ones viem makes for the wait.
+ * `repriced`. Pass `'wallet-built'` only for a transaction the wallet built,
+ * which leaves nothing to compare against: the reason viem names is taken, and
+ * a substitution viem does not explain is `replaced`. The check issues no
+ * request beyond the ones viem makes for the wait.
  */
 export async function waitForViemReceipt(
   client: ClientLike,
@@ -226,7 +230,7 @@ export async function waitForViemReceipt(
     readonly hash: Hex;
     readonly confirmations: number;
     readonly timeout?: number;
-    readonly submitted?: SubmittedTransaction;
+    readonly submitted: SubmittedTransaction | 'wallet-built';
   },
 ): Promise<ViemReceiptOutcome> {
   let named: ViemReplacementReason | undefined;
@@ -235,9 +239,7 @@ export async function waitForViemReceipt(
   };
   const { submitted } = args;
   const hash = args.hash.toLowerCase();
-  // Only the EIP-5792 batch transaction, which the wallet built, comes without
-  // `submitted`: there is nothing to check viem's verdict against.
-  if (submitted === undefined) {
+  if (submitted === 'wallet-built') {
     const receipt = await waitForTransactionReceipt(client, waitParameters(args, onNamed));
     if (receipt.transactionHash.toLowerCase() === hash) return { receipt };
     return { receipt, replacement: named ?? 'replaced' };
@@ -260,6 +262,9 @@ export async function waitForViemReceipt(
   }
 }
 
+// Never pass viem's `replacement` parameter: it lets viem find a replacement
+// without reading a block, which this module cannot observe, so every genuine
+// fee bump would fail closed as `replaced`.
 function waitParameters(
   args: { readonly hash: Hex; readonly confirmations: number; readonly timeout?: number },
   onNamed: (reason: ViemReplacementReason) => void,

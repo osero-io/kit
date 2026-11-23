@@ -227,7 +227,7 @@ export async function readReplacementBlock(
   getBlock: Mock<(client: unknown, input: unknown) => Promise<unknown>>,
   mined: MinedTransactionFixture,
 ): Promise<void> {
-  getBlock.mockResolvedValue({ transactions: [mined] });
+  getBlock.mockResolvedValueOnce({ transactions: [mined] });
   const input = { blockNumber: 124n, includeTransactions: true };
   const own = (client as { readonly getBlock?: (input: unknown) => Promise<unknown> }).getBlock;
   await (own === undefined ? getBlock(client, input) : own(input));

@@ -215,19 +215,27 @@ function publicClient(replacement: Mined) {
 
 /**
  * Whether the installed viem names a replacement when more than one
- * confirmation is requested, as it does since 2.57.12. The suite also runs
- * against older viem in the peer range; there, the tests whose premise is the
+ * confirmation is requested, as it does since 2.57.12. The `viem peer range`
+ * workflow (`.github/workflows/viem-peer-range.yml`) runs this suite against
+ * older viem in the peer range as well; there, the tests whose premise is the
  * newer behaviour are skipped and the emulated ones describe the real waiter.
  */
 const installedViemNamesEveryReplacement = await (async () => {
   let named = false;
-  await publicClient(REPRICED).client.waitForTransactionReceipt({
-    hash: ORIGINAL,
-    confirmations: 2,
-    onReplaced: () => {
-      named = true;
-    },
-  });
+  await publicClient(REPRICED)
+    .client.waitForTransactionReceipt({
+      hash: ORIGINAL,
+      confirmations: 2,
+      // viem's default is 180 s: a probe that cannot see the replacement must
+      // fail fast and say why, not stall the file's import.
+      timeout: 5_000,
+      onReplaced: () => {
+        named = true;
+      },
+    })
+    .catch((cause: unknown) => {
+      throw new Error('viem probe failed: the scripted replacement was not detected', { cause });
+    });
   return named;
 })();
 
@@ -320,12 +328,16 @@ describe('waitForViemReceipt against the real viem waiter', () => {
           },
         );
 
-        // The EIP-5792 extra-confirmation wait has no submitted transaction: the
-        // wallet built the batch. viem's verdict is all there is to go on.
+        // Pins `waitForViemReceipt`'s contract without `submitted`. Only the
+        // EIP-5792 extra-confirmation wait (2+ confirmations) omits it.
         it('takes a repricing viem names without the submitted transaction to compare against', async () => {
           const { client } = publicClient(REPRICED);
 
-          const outcome = await waitForViemReceipt(client, { hash: ORIGINAL, confirmations });
+          const outcome = await waitForViemReceipt(client, {
+            hash: ORIGINAL,
+            confirmations,
+            submitted: 'wallet-built',
+          });
 
           expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
           expect(outcome.replacement).toBe('repriced');
@@ -491,10 +503,16 @@ describe('waitForViemReceipt against the real viem waiter as it behaved before 2
     },
   );
 
+  // Pins `waitForViemReceipt`'s contract without `submitted`. Only the EIP-5792
+  // extra-confirmation wait (2+ confirmations) omits it.
   it('takes a repricing viem names with one confirmation without the submitted transaction', async () => {
     const { client } = publicClient(REPRICED);
 
-    const outcome = await waitForViemReceipt(client, { hash: ORIGINAL, confirmations: 1 });
+    const outcome = await waitForViemReceipt(client, {
+      hash: ORIGINAL,
+      confirmations: 1,
+      submitted: 'wallet-built',
+    });
 
     expect(outcome.replacement).toBe('repriced');
   });
@@ -502,7 +520,11 @@ describe('waitForViemReceipt against the real viem waiter as it behaved before 2
   it('fails closed without the submitted transaction to compare against', async () => {
     const { client } = publicClient(REPRICED);
 
-    const outcome = await waitForViemReceipt(client, { hash: ORIGINAL, confirmations: 2 });
+    const outcome = await waitForViemReceipt(client, {
+      hash: ORIGINAL,
+      confirmations: 2,
+      submitted: 'wallet-built',
+    });
 
     expect(outcome.replacement).toBe('replaced');
   });
@@ -761,11 +783,14 @@ const SUFFIX: Hex = '0xcafe';
 /**
  * Whether the installed viem appends a wallet client's `dataSuffix` to the
  * calldata it sends, as it does since 2.45.0. Older viem in the peer range
- * ignores the option, so a suffix never reaches the wire there.
+ * ignores the option, so a suffix never reaches the wire there. The send makes
+ * one request to the scripted node and no polling, so it needs no timeout.
  */
 const installedViemAppendsDataSuffix = await (async () => {
   const { wallet, node } = walletClient(REPRICED, ACCOUNT, { dataSuffix: SUFFIX });
-  await wallet.sendTransaction({ to: TARGET, data: '0x1234' });
+  await wallet.sendTransaction({ to: TARGET, data: '0x1234' }).catch((cause: unknown) => {
+    throw new Error('viem probe failed: the scripted node did not accept the send', { cause });
+  });
   return (node.sent[0] as { readonly data?: Hex }).data === `0x1234${SUFFIX.slice(2)}`;
 })();
 

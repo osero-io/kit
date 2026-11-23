@@ -113,6 +113,10 @@ function resolveOptions(
  * re-sends that calldata, so it is what the replacement is compared with.
  * Older viem has no such field and appends nothing. The adapter never passes
  * the per-call `dataSuffix`, which would take precedence.
+ *
+ * Mirrors the `dataSuffix` resolution in viem's `sendTransaction` (checked at
+ * 2.45.0 and 2.57.20). If viem changes it, the `dataSuffix` tests in
+ * `lib/viemReceipt.test.ts` fail; update this helper to match, not the tests.
  */
 function broadcastCalldata(walletClient: WalletClient, data: Hex): Hex {
   const { dataSuffix } = walletClient as { readonly dataSuffix?: unknown };
