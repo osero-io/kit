@@ -231,6 +231,29 @@ describe('waitForViemReceipt against the real viem waiter', () => {
       expect(node.calls).toEqual(plain.node.calls);
     },
   );
+
+  // Documents present behaviour, it does not endorse it: viem compares the
+  // replacement with the transaction it read for the submitted hash, and the
+  // adapter does not cross-check that reason against `submitted`. The same
+  // cases fail closed as `replaced` on viem before 2.57.12 (see below).
+  it.each([
+    ['was sent by another account', { ...SUBMITTED, from: TARGET }],
+    ['carries other calldata', { ...SUBMITTED, data: '0xdeadbeef' }],
+  ] as const)(
+    'currently reports repricing from viem when the mined transaction differs from `submitted` because it %s',
+    async (_name, submitted) => {
+      const { client } = publicClient(REPRICED);
+
+      const outcome = await waitForViemReceipt(client, {
+        hash: ORIGINAL,
+        confirmations: 2,
+        submitted,
+      });
+
+      expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+      expect(outcome.replacement).toBe('repriced');
+    },
+  );
 });
 
 describe('waitForViemReceipt against the real viem waiter as it behaved before 2.57.12', () => {

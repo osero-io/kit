@@ -76,7 +76,9 @@ The rule is the same in every adapter: only a repricing may stand in for the ste
 submitted. The message is `Transaction <hash> was <reason> and cannot be treated as this plan step`.
 
 - **viem and Privy** observe viem's `onReplaced` callback and use the reason it names. viem
-  2.57.12 and later call it for any `confirmations`. Earlier versions call it only when one
+  2.57.12 and later call it for any `confirmations`, so on those versions the adapter takes the
+  reason viem names and does not compare the replacement with what it submitted: viem compares it
+  with the transaction it read for the submitted hash. Earlier versions call it only when one
   confirmation is requested; with more, they return the replacement's receipt without naming a
   reason. In that case the adapter compares the transaction viem found in the mined block with
   what it submitted. The same sender, target, calldata, and value under another hash is a
