@@ -1411,7 +1411,9 @@ describe('hosted quote verification and preparation', () => {
     const unknown = await client.getSwapQuote(request);
 
     expect(lifi.isOk()).toBe(true);
-    if (lifi.isOk() && isOseroApiLifiProviderDetails(lifi.value.quote.providerDetails)) {
+    if (!lifi.isOk()) return;
+    expect(isOseroApiLifiProviderDetails(lifi.value.quote.providerDetails)).toBe(true);
+    if (isOseroApiLifiProviderDetails(lifi.value.quote.providerDetails)) {
       expect(lifi.value.quote.providerDetails.usesComposer).toBe(true);
       expect(lifi.value.quote.providerDetails.steps[0]?.gasCosts[0]?.token.address).toBe(
         '0x0000000000000000000000000000000000000000',
@@ -2751,6 +2753,7 @@ describe('0x quotes', () => {
     expect(result.value.quote.quote.expectedOutput).toEqual(
       ZEROX_SAME_CHAIN_QUOTE.quote.expectedOutput,
     );
+    expect(isOseroApiZeroXProviderDetails(result.value.quote.providerDetails)).toBe(true);
     if (!isOseroApiZeroXProviderDetails(result.value.quote.providerDetails)) return;
     expect(result.value.quote.providerDetails.fees.integratorFee).toEqual({
       amount: '2500',

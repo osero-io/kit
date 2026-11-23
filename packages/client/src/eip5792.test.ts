@@ -299,6 +299,21 @@ describe('eip5792 atomic behavior', () => {
     expect(actions.sendCalls).toHaveBeenCalledOnce();
   });
 
+  it('maps a declined ready-wallet upgrade to CancelError', async () => {
+    const cause = Object.assign(new Error('upgrade declined'), { code: 5750 });
+    actions.getCapabilities.mockResolvedValue({ atomic: { status: 'ready' } });
+    actions.sendCalls.mockRejectedValue(cause);
+
+    const result = await sendWith(wallet(), plan());
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(CancelError);
+      expect(result.error.cause).toBe(cause);
+    }
+    expect(actions.sendTransaction).not.toHaveBeenCalled();
+  });
+
   it('does not fall back on 5760 when sequential fallback is disabled', async () => {
     actions.getCapabilities.mockResolvedValue({ atomic: { status: 'supported' } });
     actions.sendCalls.mockRejectedValue(
@@ -344,6 +359,15 @@ describe('eip5792 atomic behavior', () => {
 
   it('rejects unsupported atomic execution when sequential fallback is disabled', async () => {
     const result = await sendWith(wallet(), plan(), { fallbackToSequential: false });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(UnsupportedCapabilityError);
+    expect(actions.sendCalls).not.toHaveBeenCalled();
+    expect(actions.sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a required atomic batch when the wallet cannot batch', async () => {
+    const result = await sendWith(wallet(), plan({ execution: 'atomic-batch' }));
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error).toBeInstanceOf(UnsupportedCapabilityError);

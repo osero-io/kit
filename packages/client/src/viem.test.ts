@@ -280,6 +280,24 @@ function substituteFirstReceipt(replacementHash: Hex, mined: Record<string, unkn
 describe('viem transaction replacement', () => {
   beforeEach(resetActions);
 
+  it('records a repriced replacement and continues with the next step', async () => {
+    replaceFirstReceipt('repriced', hash(99));
+
+    const result = await sendWith(wallet(ACCOUNT, 8453), twoStepPlan());
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.transactions[0]).toMatchObject({
+        submittedHash: hash(1),
+        hash: hash(99),
+        replacement: { reason: 'repriced', originalHash: hash(1), replacementHash: hash(99) },
+        confirmation: { status: 'success', transactionHash: hash(99) },
+      });
+      expect(result.value.transactions[1]?.replacement).toBeUndefined();
+    }
+    expect(actions.sendTransaction).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['cancelled', 'replaced'] as const)(
     'fails at the replacement stage and broadcasts nothing further when a step is %s',
     async (reason) => {

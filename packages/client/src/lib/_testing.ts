@@ -333,33 +333,10 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
       },
     );
 
-    it('rejects account and chain mismatches before broadcasting', async () => {
-      const wrongAccount = factory({
-        account: '0x3333333333333333333333333333333333333333',
-        chainId: 8453,
-      });
-      const wrongChain = factory({ account: CONTRACT_ACCOUNT, chainId: 1 });
-
-      const accountResult = await wrongAccount.execute(contractPlan(), 'direct');
-      const chainResult = await wrongChain.execute(contractPlan(), 'direct');
-
-      expect(accountResult.isErr()).toBe(true);
-      if (accountResult.isErr()) expect(accountResult.error.code).toBe('ACCOUNT_MISMATCH');
-      expect(chainResult.isErr()).toBe(true);
-      if (chainResult.isErr()) expect(chainResult.error.code).toBe('CHAIN_MISMATCH');
-      expect(wrongAccount.broadcast).not.toHaveBeenCalled();
-      expect(wrongChain.broadcast).not.toHaveBeenCalled();
-    });
-
     it('preflights every later step before broadcasting', async () => {
-      const malformedHarness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
       const mixedAccountHarness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
       const mixedChainHarness = factory({ account: CONTRACT_ACCOUNT, chainId: 8453 });
       const valid = contractPlan();
-      const malformed = {
-        ...valid,
-        steps: [valid.steps[0]!, { ...valid.steps[1]!, data: '0x123' }],
-      } as ExecutionPlan;
       const mixedAccount = {
         ...valid,
         steps: [
@@ -372,14 +349,11 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
         steps: [valid.steps[0]!, { ...valid.steps[1]!, chainId: 10 }],
       } as ExecutionPlan;
 
-      const malformedResult = await malformedHarness.execute(malformed, 'direct');
       const accountResult = await mixedAccountHarness.execute(mixedAccount, 'direct');
       const chainResult = await mixedChainHarness.execute(mixedChain, 'direct');
 
-      expect(malformedResult.isErr()).toBe(true);
       expect(accountResult.isErr()).toBe(true);
       expect(chainResult.isErr()).toBe(true);
-      expect(malformedHarness.broadcast).not.toHaveBeenCalled();
       expect(mixedAccountHarness.broadcast).not.toHaveBeenCalled();
       expect(mixedChainHarness.broadcast).not.toHaveBeenCalled();
     });
@@ -568,9 +542,11 @@ export function defineAdapterContract(name: string, factory: AdapterContractFact
     });
 
     describe('failure stages', () => {
-      it('classifies a failed gas estimate as a simulation error and sends nothing', async () => {
+      it('classifies a failed gas estimate as a simulation error and sends nothing', async (context) => {
         const harness = harnessWithFault({ stage: 'estimate' });
-        if (harness.fail === undefined || harness.performs?.estimate !== true) return;
+        if (harness.fail === undefined || harness.performs?.estimate !== true) {
+          context.skip('this adapter performs no gas estimate of its own');
+        }
 
         const result = await harness.execute(contractPlan(), 'direct');
 

@@ -24,7 +24,7 @@ describe('SSR / APY helpers', () => {
       const result = await getSUsdsApy(client, { chainId });
 
       expect(result.isOk()).toBe(true);
-      if (result.isOk()) expect(result.value).toBeCloseTo(0.0365, 3);
+      if (result.isOk()) expect(result.value).toBeCloseTo(0.0365, 12);
       expect(readContract).toHaveBeenCalledOnce();
     },
   );

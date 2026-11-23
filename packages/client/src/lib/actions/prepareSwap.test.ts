@@ -166,6 +166,7 @@ describe('PSM3 quote integrity', () => {
 
     expect(result.isOk()).toBe(true);
     if (result.isOk()) {
+      expect(result.value.minimumAmountOut.raw).toBe(999_287n);
       const decoded = decodeFunctionData({
         abi: psm3Abi,
         data: result.value.plan.steps.at(-1)!.data,

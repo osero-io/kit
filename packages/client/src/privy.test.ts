@@ -408,6 +408,23 @@ describe('Privy transaction replacement', () => {
   } as const;
   const wallet = { id: 'wallet-1', address: ACCOUNT } satisfies PrivyWallet;
 
+  it('records a repriced replacement and continues with the next step', async () => {
+    const state = makePrivy();
+    replaceFirstReceipt('repriced', hash(99));
+
+    const result = await sendWith(state.privy, wallet, twoStepPlan(), options);
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk()) {
+      expect(result.value.transactions[0]).toMatchObject({
+        submittedHash: hash(1),
+        hash: hash(99),
+        replacement: { reason: 'repriced', originalHash: hash(1), replacementHash: hash(99) },
+      });
+    }
+    expect(state.sendTransaction).toHaveBeenCalledTimes(2);
+  });
+
   it('accepts an unexplained substitution that is the same transaction at another fee', async () => {
     const state = makePrivy();
     substituteFirstReceipt(hash(99), { from: ACCOUNT, to: TARGET, input: '0x1234', value: 0n });
