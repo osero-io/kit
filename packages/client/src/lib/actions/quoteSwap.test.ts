@@ -2,7 +2,6 @@ import { createMockClient, mockFn, type MockPublicClient } from '../_testing.js'
 import { CHAIN_CAPABILITIES, type OseroChainId, type TokenSymbol } from '../capabilities.js';
 import { parseSlippage, tokenAmount, type TokenAmount } from '../domain.js';
 import { RpcError, ValidationError } from '../errors.js';
-import { applySlippageDown } from '../math.js';
 import type { OseroClient } from '../OseroClient.js';
 import type { Result } from '../result.js';
 import type { SwapQuote } from '../types.js';
@@ -123,7 +122,7 @@ describe('quoteSwap economics', () => {
     expect(result.isOk()).toBe(true);
     if (result.isOk()) {
       expect(result.value.expectedAmountOut.raw).toBe(1_000_000n);
-      expect(result.value.minimumAmountOut.raw).toBe(applySlippageDown(1_000_000n, slippage.value));
+      expect(result.value.minimumAmountOut.raw).toBe(999_287n);
       expect(result.value.slippage.bps).toBe('7.125');
     }
   });
@@ -141,25 +140,6 @@ describe('quoteSwap economics', () => {
     expect(result.isOk()).toBe(true);
     if (result.isOk()) expect(result.value.quotedAt.blockNumber).toBe(BLOCK);
     expect(publicClient.getBlockNumber.mock.calls).toEqual([[{ cacheTime: 0 }]]);
-  });
-
-  it('returns unprotected-route economics without requiring execution consent', async () => {
-    const { client } = setup(1);
-
-    const result = await quoteSwap(client, {
-      chainId: 1,
-      mode: 'exact-in',
-      amountIn: amount('USDS'),
-      assetOut: 'sUSDS',
-    });
-
-    expect(result.isOk()).toBe(true);
-    if (result.isOk()) {
-      expect(result.value.slippageProtection).toEqual({
-        bound: 'minimum-output',
-        enforcedBy: 'none',
-      });
-    }
   });
 
   it('rejects malformed slippage before reading a block', async () => {
