@@ -26,7 +26,7 @@ pnpm add ethers
 pnpm add @privy-io/node
 ```
 
-Node.js 20 or newer and ESM are required.
+Node.js 20.19+, 22.12+, or 23.2+ and ESM are required.
 
 ## Prepare and execute
 
