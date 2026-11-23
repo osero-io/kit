@@ -75,16 +75,17 @@ cases:
 The rule is the same in every adapter: only a repricing may stand in for the step that was
 submitted. The message is `Transaction <hash> was <reason> and cannot be treated as this plan step`.
 
-- **viem and Privy** observe viem's `onReplaced` callback. viem calls it only when one confirmation
-  is requested; with more, it returns the replacement's receipt without naming a reason. In that
-  case the adapter compares the transaction viem found in the mined block with what it submitted.
-  The same sender, target, calldata, and value under another hash is a repricing. Anything else,
-  including a replacement the adapter could not observe, fails closed as `cancelled` or `replaced`.
-  The comparison uses the block viem already read for the wait, so it adds no RPC request. To see
-  that block, the adapter's wait keeps its own receipt polling: it does not join a
-  `waitForTransactionReceipt` you started yourself on the same client and hash, so that wait's
-  `confirmations` no longer stand in for the ones you passed to `sendWith`. Block-number polling is
-  still shared.
+- **viem and Privy** observe viem's `onReplaced` callback and use the reason it names. viem
+  2.57.12 and later call it for any `confirmations`. Earlier versions call it only when one
+  confirmation is requested; with more, they return the replacement's receipt without naming a
+  reason. In that case the adapter compares the transaction viem found in the mined block with
+  what it submitted. The same sender, target, calldata, and value under another hash is a
+  repricing. Anything else, including a replacement the adapter could not observe, fails closed as
+  `cancelled` or `replaced`. The comparison uses the block viem already read for the wait, so it
+  adds no RPC request. To see that block, the adapter's wait keeps its own receipt polling: it does
+  not join a `waitForTransactionReceipt` you started yourself on the same client and hash, so that
+  wait's `confirmations` no longer stand in for the ones you passed to `sendWith`. Block-number
+  polling is still shared.
 - **ethers** reads the `TRANSACTION_REPLACED` error. A replacement flagged `cancelled`, or with any
   reason other than `repriced`, fails.
 - **EIP-5792** applies the rule to the extra-confirmation wait (`confirmations` greater than `1`).

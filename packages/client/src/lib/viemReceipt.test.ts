@@ -10,6 +10,7 @@ import {
   type Hex,
   type PublicClient,
 } from 'viem';
+import { waitForTransactionReceipt } from 'viem/actions';
 import { base } from 'viem/chains';
 
 import { sendWith as sendWithPrivy } from '../privy.js';
@@ -20,10 +21,44 @@ import { waitForViemReceipt, type SubmittedTransaction } from './viemReceipt.js'
 
 /**
  * These tests run viem's real `waitForTransactionReceipt` against a scripted
- * JSON-RPC node, because the behaviour under test is viem's own: with more
- * than one confirmation requested it resolves with a replacement's receipt
- * without ever calling `onReplaced`. A mocked waiter cannot show that.
+ * JSON-RPC node, because the behaviour under test is viem's own. Before viem
+ * 2.57.12, with more than one confirmation requested, it resolved with a
+ * replacement's receipt without ever calling `onReplaced`; later versions name
+ * the replacement for any confirmation count. A mocked waiter cannot show either.
+ *
+ * The peer range still admits the older viem, so the adapter's own
+ * classification is tested against it too: `viemBefore2_57_12` runs the real
+ * waiter but withholds `onReplaced` whenever more than one confirmation is
+ * requested, which is exactly what that viem did (wevm/viem#5284).
  */
+const waiter = vi.hoisted(() => ({ viemBefore2_57_12: false }));
+
+vi.mock('viem/actions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('viem/actions')>();
+  const wait: typeof actual.waitForTransactionReceipt = (client, parameters) =>
+    actual.waitForTransactionReceipt(
+      client,
+      waiter.viemBefore2_57_12 && (parameters.confirmations ?? 1) > 1
+        ? { ...parameters, onReplaced: undefined }
+        : parameters,
+    );
+  return { ...actual, waitForTransactionReceipt: wait };
+});
+
+/** Runs the enclosing `describe` against viem's waiter as it behaved before 2.57.12. */
+function emulateViemBefore2_57_12(): void {
+  beforeEach(() => {
+    waiter.viemBefore2_57_12 = true;
+  });
+  afterEach(() => {
+    waiter.viemBefore2_57_12 = false;
+  });
+}
+
+const WAITERS = [
+  ['the real viem waiter', false],
+  ['the real viem waiter as it behaved before 2.57.12', true],
+] as const;
 
 const ACCOUNT: Address = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
 const TARGET: Address = '0x2222222222222222222222222222222222222222';
@@ -167,6 +202,46 @@ describe('waitForViemReceipt against the real viem waiter', () => {
     ['a different call', OTHER_CALL, 'replaced'],
     ['the same call with another value', OTHER_VALUE, 'replaced'],
   ] as const)(
+    'takes the reason viem names for %s when two confirmations are requested',
+    async (_name, replacement, expected) => {
+      const { client, node } = publicClient(replacement);
+
+      const outcome = await waitForViemReceipt(client, {
+        hash: ORIGINAL,
+        confirmations: 2,
+        submitted: SUBMITTED,
+      });
+      // The premise, checked on a fresh node: since 2.57.12 viem's own callback
+      // names the replacement here, with the reason the adapter would have given.
+      let reportedByViem: string | undefined;
+      const plain = publicClient(replacement);
+      const direct = await plain.client.waitForTransactionReceipt({
+        hash: ORIGINAL,
+        confirmations: 2,
+        onReplaced: (response) => {
+          reportedByViem = response.reason;
+        },
+      });
+
+      expect(direct.transactionHash).toBe(REPLACEMENT);
+      expect(reportedByViem).toBe(expected);
+      expect(outcome.receipt.transactionHash).toBe(REPLACEMENT);
+      expect(outcome.receipt.blockNumber).toBe(START_BLOCK + 1n);
+      expect(outcome.replacement).toBe(expected);
+      expect(node.calls).toEqual(plain.node.calls);
+    },
+  );
+});
+
+describe('waitForViemReceipt against the real viem waiter as it behaved before 2.57.12', () => {
+  emulateViemBefore2_57_12();
+
+  it.each([
+    ['a repricing', REPRICED, 'repriced'],
+    ['a cancellation', CANCELLED, 'cancelled'],
+    ['a different call', OTHER_CALL, 'replaced'],
+    ['the same call with another value', OTHER_VALUE, 'replaced'],
+  ] as const)(
     'classifies %s itself when two confirmations make viem skip onReplaced',
     async (_name, replacement, expected) => {
       const { client, node } = publicClient(replacement);
@@ -176,10 +251,11 @@ describe('waitForViemReceipt against the real viem waiter', () => {
         confirmations: 2,
         submitted: SUBMITTED,
       });
-      // The premise, checked on a fresh node: viem's own callback stays silent here.
+      // The premise, checked on a fresh node through the same `viem/actions`
+      // import the adapter uses: viem's own callback stays silent here.
       let reportedByViem: string | undefined;
       const plain = publicClient(replacement);
-      const direct = await plain.client.waitForTransactionReceipt({
+      const direct = await waitForTransactionReceipt(plain.client, {
         hash: ORIGINAL,
         confirmations: 2,
         onReplaced: (response) => {
@@ -333,7 +409,9 @@ function walletClient(replacement: Mined) {
   };
 }
 
-describe('viem adapter with multiple confirmations against the real viem waiter', () => {
+describe.each(WAITERS)('viem adapter with multiple confirmations against %s', (_name, older) => {
+  if (older) emulateViemBefore2_57_12();
+
   it('confirms a repriced step instead of failing it', async () => {
     const { wallet, node } = walletClient(REPRICED);
 
@@ -412,7 +490,9 @@ describe('viem adapter with multiple confirmations against the real viem waiter'
   );
 });
 
-describe('Privy adapter with multiple confirmations against the real viem waiter', () => {
+describe.each(WAITERS)('Privy adapter with multiple confirmations against %s', (_name, older) => {
+  if (older) emulateViemBefore2_57_12();
+
   it('confirms a repriced step for two sends that share a hash, one through an extended receipt client', async () => {
     // A retry with the same idempotency key resolves to the same hash.
     const privy = {
