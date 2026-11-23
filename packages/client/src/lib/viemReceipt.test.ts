@@ -114,6 +114,7 @@ function scriptedNode(
   let head = START_BLOCK - 1n;
   const calls: string[] = [];
   const sent: unknown[] = [];
+  const estimated: unknown[] = [];
   const sentCalldata = (): Hex | undefined =>
     options.speedsUpSent ? (sent[0] as { readonly data?: Hex } | undefined)?.data : undefined;
   const original = (): Mined => {
@@ -131,6 +132,7 @@ function scriptedNode(
       case 'eth_chainId':
         return numberToHex(base.id);
       case 'eth_estimateGas':
+        estimated.push(first);
         return '0x5208';
       case 'eth_sendTransaction':
         sent.push(first);
@@ -182,6 +184,7 @@ function scriptedNode(
     transport: custom({ request }),
     calls,
     sent,
+    estimated,
     /** Mines the replacement in the next block. */
     mineNow(): void {
       replacedAt = head + 1n;
@@ -833,9 +836,12 @@ describe.each(WAITERS)(
           });
         }
         // On viem without `dataSuffix`, nothing is appended, by viem or by the adapter.
-        expect((node.sent[0] as { readonly data?: Hex }).data).toBe(
+        const broadcast = (node.sent[0] as { readonly data?: Hex }).data;
+        expect(broadcast).toBe(
           installedViemAppendsDataSuffix ? `0x1234${SUFFIX.slice(2)}` : '0x1234',
         );
+        // The gas is estimated for the calldata that is broadcast, in one request.
+        expect(node.estimated).toEqual([expect.objectContaining({ data: broadcast })]);
         expect(node.sent).toHaveLength(1);
       },
     );

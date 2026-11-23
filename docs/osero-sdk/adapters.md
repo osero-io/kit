@@ -37,7 +37,9 @@ listed here rather than hidden.
 | EIP-5792 | None for an atomic batch. The wallet selects gas for `wallet_sendCalls`. | `gasBufferBps` applies only when the adapter falls back to sequential viem. |
 
 The buffered limit is `ceil(estimate × (10000 + gasBufferBps) / 10000)`. An out-of-range
-`gasBufferBps` is a `ValidationError` before any RPC call.
+`gasBufferBps` is a `ValidationError` before any RPC call. The viem adapter estimates the calldata
+it broadcasts: with a wallet client created with `dataSuffix`, that is the step's calldata with the
+suffix appended, as viem 2.45.0 and later send it.
 
 ## Confirmations
 

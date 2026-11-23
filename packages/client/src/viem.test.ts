@@ -241,11 +241,40 @@ describe('viem stage behavior', () => {
     if (broadcast.isErr()) expect(broadcast.error.code).toBe('BROADCAST_FAILED');
   });
 
+  it.each([
+    ['a string', '0xcafe'],
+    ['a { value } object', { value: '0xcafe' }],
+  ] as const)(
+    'estimates gas for the calldata viem broadcasts with a dataSuffix given as %s',
+    async (_form, dataSuffix) => {
+      // viem appends the client's suffix when it sends, but not when it estimates.
+      const suffixed = { ...wallet(ACCOUNT, 8453), dataSuffix } as unknown as WalletClient;
+
+      const result = await sendWith(suffixed, singlePlan(), { gasBufferBps: 0 });
+
+      expect(result.isOk()).toBe(true);
+      expect(actions.estimateGas).toHaveBeenCalledTimes(1);
+      expect(actions.estimateGas).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ data: '0x1234cafe' }),
+      );
+      // viem appends the suffix to the calldata it is given, so the send gets the request's.
+      expect(actions.sendTransaction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ data: '0x1234', gas: 100n }),
+      );
+    },
+  );
+
   it('uses a fresh buffered estimate and never promotes advisory gas to a limit', async () => {
     const result = await sendWith(wallet(ACCOUNT, 8453), singlePlan());
 
     expect(result.isOk()).toBe(true);
     expect(actions.estimateGas).toHaveBeenCalledTimes(1);
+    expect(actions.estimateGas).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ data: '0x1234' }),
+    );
     expect(actions.sendTransaction).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ gas: 115n }),

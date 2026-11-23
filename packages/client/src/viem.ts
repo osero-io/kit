@@ -110,9 +110,10 @@ function resolveOptions(
  * The calldata viem broadcasts for `data` from this client. Since 2.45.0,
  * viem's `sendTransaction` appends the client's `dataSuffix` (how ERC-8021
  * builder codes are attached), in its string or `{ value }` form. A repricing
- * re-sends that calldata, so it is what the replacement is compared with.
- * Older viem has no such field and appends nothing. The adapter never passes
- * the per-call `dataSuffix`, which would take precedence.
+ * re-sends that calldata, so it is what the replacement is compared with, and
+ * it is what the gas estimate must cover. Older viem has no such field and
+ * appends nothing. The adapter never passes the per-call `dataSuffix`, which
+ * would take precedence.
  *
  * Mirrors the `dataSuffix` resolution in viem's `sendTransaction` (checked at
  * 2.45.0 and 2.57.20). If viem changes it, the `dataSuffix` tests in
@@ -134,11 +135,15 @@ function sendSingleTransaction(
   context: SingleTransactionContext,
   options: ResolvedOptions,
 ): ResultAsync<SingleTransactionResult, SendWithError> {
+  // viem's `estimateGas` does not append `dataSuffix`, but the `gas` passed to
+  // `sendTransaction` stops viem from estimating again, so the estimate is made
+  // for the calldata that is broadcast.
+  const broadcastData = broadcastCalldata(walletClient, request.data);
   return ResultAsync.fromPromise(
     estimateGasWithViem(walletClient, {
       account: walletClient.account,
       to: request.to,
-      data: request.data,
+      data: broadcastData,
       value: request.value,
     }),
     (cause) => SimulationError.from(cause, context.failure('simulation')),
@@ -171,7 +176,7 @@ function sendSingleTransaction(
           submitted: {
             from: walletClient.account.address,
             to: request.to,
-            data: broadcastCalldata(walletClient, request.data),
+            data: broadcastData,
             value: request.value,
           },
           ...(options.confirmationTimeoutMs === undefined
