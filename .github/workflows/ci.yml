@@ -11,22 +11,33 @@ permissions:
   actions: read
   contents: read
 
+# A push to a pull request supersedes the run for its previous head. Runs on main
+# and manual runs each get their own group, so every one of them finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 env:
   TURBO_TELEMETRY_DISABLED: 1
 
+# The checks run as parallel jobs instead of one after another in a single job.
 jobs:
-  quality:
-    name: Quality (Node ${{ matrix.node }})
+  test:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 24]
+        include:
+          - name: Test (Node 20)
+            node: 20
+            args: ''
+          # The suite's only Node 24 run, so it also enforces the coverage thresholds.
+          - name: Test and coverage (Node 24)
+            node: 24
+            args: '-- --coverage'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          filter: tree:0
-          fetch-depth: 0
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
@@ -40,9 +51,35 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Test all projects
+        run: pnpm turbo run test ${{ matrix.args }}
+
+  # TypeScript 7 runs a native compiler, so build and typecheck output does not
+  # depend on the Node version; they run once, on Node 24.
+  checks:
+    name: Build, typecheck, and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The changeset check compares against the base branch.
+          filter: tree:0
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
       - name: Require an SDK changeset for release-branch pull requests
         if: >-
-          matrix.node == 24 &&
           startsWith(github.base_ref, 'release/') &&
           !startsWith(github.head_ref, 'changeset-release/')
         env:
@@ -54,27 +91,34 @@ jobs:
             --output="$status_file"
           node scripts/check-release-changeset.mjs "$status_file"
 
-      - name: Build, typecheck, and test all projects
-        run: pnpm turbo run build typecheck test
-
-      - name: Lint and format
-        if: matrix.node == 24
-        run: pnpm turbo run format:check lint
+      - name: Build, typecheck, lint, and check formatting
+        run: pnpm turbo run build typecheck format:check lint
 
       - name: Verify release-state guards
-        if: matrix.node == 24
         run: pnpm test:release
 
-      - name: Enforce full-source coverage
-        if: matrix.node == 24
-        run: pnpm --filter @osero/client test:coverage
-
       - name: Check browser bundles import no Node.js built-in
-        if: matrix.node == 24
         run: pnpm browser:check
 
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
       - name: Validate clean tarball and packed consumers
-        if: matrix.node == 24
         run: pnpm package:validate
 
   forks:

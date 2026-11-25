@@ -10,7 +10,7 @@ This is a pnpm/Turborepo TypeScript workspace built with TypeScript 7. The SDK l
 - `pnpm build`: compile the SDK with TypeScript project references (`turbo run build`).
 - `pnpm typecheck`: run declaration-only type checking for the client and the examples (`turbo run typecheck`).
 - `pnpm test`: run the Vitest suite for the client package (`turbo run test`).
-- `pnpm check`: run the full CI pipeline (`turbo run format:check lint build typecheck test`).
+- `pnpm check`: run format, lint, build, and typecheck (`turbo run format:check lint build typecheck`), then every package's test suite once with its coverage thresholds (`pnpm -r run test --coverage`).
 - `pnpm turbo run <task> --filter=@osero/client`: scope any task to a single package.
 - `pnpm lint` / `pnpm lint:fix`: run oxlint across workspace sources, optionally fixing issues.
 - `pnpm format:check` / `pnpm format`: check or apply oxfmt formatting.

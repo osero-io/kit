@@ -12,7 +12,7 @@ pnpm + Turborepo TypeScript monorepo, compiled with TypeScript 7. The only publi
 - `pnpm build` — `turbo run build`: compile the SDK with `tsc --build` (TS project references) into `packages/client/dist`
 - `pnpm typecheck` — `turbo run typecheck`: declaration-only typecheck of the client (including its tests) and the examples
 - `pnpm test` — `turbo run test`: run the Vitest suite. Coverage: `pnpm turbo run test -- --coverage` (written to `packages/client/test-output/vitest/coverage`)
-- `pnpm check` — everything CI runs: `turbo run format:check lint build typecheck test`
+- `pnpm check` — format, lint, build, and typecheck (`turbo run format:check lint build typecheck`), then every package's test suite once with its coverage thresholds (`pnpm -r run test --coverage`, outside turbo so it always runs and sees your environment)
 - Scope any task to one package with a turbo filter: `pnpm turbo run build --filter=@osero/client`
 - Run a single test: `pnpm --filter @osero/client test -t "<test name>"` or point vitest at a file: `pnpm --filter @osero/client test src/lib/actions/prepareSwap.test.ts`
 - `pnpm browser:check` — bundle the browser-supported entrypoints of the built SDK with esbuild and fail on any Node built-in import (run after `pnpm build`; CI runs it)
